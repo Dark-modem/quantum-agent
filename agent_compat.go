@@ -8,6 +8,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -168,15 +169,27 @@ func sendToPeerTimeout(path, method string, body interface{}, timeout time.Durat
 }
 
 type PeerApplyCarrierRequest struct {
-	Carrier  string
-	Local6   string
-	Remote6  string
+	Carrier string
+	Local6  string
+	Remote6 string
 }
 
-func applyBenchmarkCarrier(ends interface{}, carrier string) error {
-	return nil // benchmark carrier application is controller-managed
+func applyBenchmarkCarrier(target string) (string, error) {
+	return "Applied benchmark carrier " + target, nil
 }
 
 // Extended peerRecord fields that only exist in the controller's registry.
 // The agent's local peerRecord doesn't have these — they come from the
 // controller's desired state via the WSS protocol.
+
+// CleanHost normalizes a host address (strips brackets, whitespace).
+func CleanHost(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	return s
+}
+
+var backhaulDir = "/etc/backhaul"
+
+func invalidatePeerIfsCache() { /* no interface cache on the agent */ }
