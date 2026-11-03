@@ -19,7 +19,7 @@ type agentSeam[F any] struct {
 	fn F
 }
 
-func (s *agentSeam[F]) get() F { s.mu.RLock(); defer s.mu.RUnlock(); return s.fn }
+func (s *agentSeam[F]) get() F  { s.mu.RLock(); defer s.mu.RUnlock(); return s.fn }
 func (s *agentSeam[F]) set(f F) { s.mu.Lock(); s.fn = f; s.mu.Unlock() }
 
 // HubSnapshot is a minimal stub: the agent does not build hub snapshots.
@@ -148,3 +148,35 @@ func writeAPIError(w http.ResponseWriter, r *http.Request, code, msg string) {
 }
 
 func linkLabelFromString(s string) string { return s }
+
+// --- Peer coordination stubs ---
+// The agent does NOT manage the peer registry or coordinate with peers.
+// The controller orchestrates carrier switches across agents via desired-state.
+// These stubs satisfy compilation for files that reference peer-coordination
+// functions from the old combined architecture.
+
+var runSystemctl = func(args ...string) error {
+	return nil // agent uses matrixExec
+}
+
+func sendToPeer(path, method string, body interface{}) (json.RawMessage, error) {
+	return nil, nil // peer comm is controller-managed
+}
+
+func sendToPeerTimeout(path, method string, body interface{}, timeout time.Duration) (json.RawMessage, error) {
+	return nil, nil
+}
+
+type PeerApplyCarrierRequest struct {
+	Carrier  string
+	Local6   string
+	Remote6  string
+}
+
+func applyBenchmarkCarrier(ends interface{}, carrier string) error {
+	return nil // benchmark carrier application is controller-managed
+}
+
+// Extended peerRecord fields that only exist in the controller's registry.
+// The agent's local peerRecord doesn't have these — they come from the
+// controller's desired state via the WSS protocol.

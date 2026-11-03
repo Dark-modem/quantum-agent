@@ -340,6 +340,15 @@ type peerRecord struct {
 	FRPTransport   string   `json:"frp_transport,omitempty"`   // "tcp" | "kcp" | "quic" | "websocket" | "wss"
 	UseEncryption  bool     `json:"use_encryption,omitempty"`  // transport.useEncryption
 	UseCompression bool     `json:"use_compression,omitempty"` // transport.useCompression
+	// Controller-registry fields (populated from desired state; not stored locally)
+	PeerURL      string `json:"peer_url,omitempty"`
+	InternalIP   string `json:"internal_ip,omitempty"`
+	PeerSecret   string `json:"peer_secret,omitempty"`
+	Role         string `json:"role,omitempty"`
+	IsConnected  bool   `json:"is_connected,omitempty"`
+	LastSync     int64  `json:"last_sync,omitempty"`
+	AutoPilotEnabled  bool `json:"auto_pilot_enabled,omitempty"`
+	AutoPilotThreshold int  `json:"auto_pilot_threshold,omitempty"`
 }
 
 // portList is raw_ports. Older quantum.sh wrote it for Backhaul peers as one
