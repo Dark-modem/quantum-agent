@@ -147,9 +147,9 @@ func parseUfwDefaults(line string) (in, out string) {
 		}
 		switch {
 		case strings.HasSuffix(part, "(incoming)"):
-			in = fields[0]
+			in = fields[1] // fields[0] is the literal "Default:" on the first part
 		case strings.HasSuffix(part, "(outgoing)"):
-			out = fields[0]
+			out = fields[1]
 		}
 	}
 	return in, out
@@ -271,7 +271,7 @@ func readSysctl(key string) string {
 }
 
 func sysctlProcPath(key string) string {
-	return filepath.Join("/proc/sys", strings.ReplaceAll(key, ".", "/"))
+	return filepath.Join(sysctlProcRoot, strings.ReplaceAll(key, ".", "/"))
 }
 
 // ---- fail2ban / timesync / logging / keys ----
@@ -331,18 +331,14 @@ func detectAuthorizedKeys() SSHKeysState {
 	return st
 }
 
+// authorizedKeysUser derives the user from an authorized_keys path of the
+// shape .../<user>/.ssh/authorized_keys (works for /root and /home/*).
 func authorizedKeysUser(path string) string {
-	dir := filepath.Base(filepath.Dir(filepath.Dir(path)))
-	if dir == ".ssh" { // "/home/*/.ssh" collapsed: the glob base is /home/<user>
-		parts := strings.Split(filepath.ToSlash(path), "/")
-		if len(parts) >= 3 {
-			return parts[len(parts)-3]
-		}
+	user := filepath.Base(filepath.Dir(filepath.Dir(path)))
+	if user == "" || user == "/" || user == "." {
+		return ""
 	}
-	if path == "/root/.ssh/authorized_keys" {
-		return "root"
-	}
-	return ""
+	return user
 }
 
 // hasPublicKey reports whether the file contains at least one line that

@@ -84,8 +84,10 @@ func ApplyProfile(ctx context.Context, profile Profile, opts ApplyOpts) (*ApplyR
 		j.FinishedAt = nowUnix()
 		if err != nil {
 			j.Error = err.Error()
-			_ = saveJournal(j)
-		} else {
+		}
+		// A rolled-back journal was already persisted and marked terminal by
+		// rollbackJournal; re-saving here would resurrect the renamed files.
+		if !j.RolledBack {
 			_ = saveJournal(j)
 		}
 		return res, err

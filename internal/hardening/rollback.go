@@ -46,6 +46,7 @@ func rollbackJournal(ctx context.Context, j *Journal, reason string) []string {
 		}
 	}
 	j.Error = reason
+	j.RolledBack = true
 	_ = saveJournal(j)
 	markJournalTerminal(j, ".rolledback")
 	_ = os.Remove(rollbackScriptPath(j.ID))

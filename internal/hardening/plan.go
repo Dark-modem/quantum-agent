@@ -64,17 +64,11 @@ func PlanProfile(profile Profile, state *DetectedState) (*Plan, error) {
 			plan.Risky = true
 		}
 	}
-	plan.Noop = !plan.Risky && !planHasActionable(plan)
+	// Noop means: nothing desired at all (zero items). A plan whose items
+	// are all BLOCKED is not a noop — it is a plan that would do nothing on
+	// purpose; apply reports it as success-with-nothing-applied.
+	plan.Noop = len(plan.Items) == 0
 	return plan, nil
-}
-
-func planHasActionable(p *Plan) bool {
-	for _, it := range p.Items {
-		if !it.Blocked {
-			return true
-		}
-	}
-	return false
 }
 
 // ---- firewall planning ----

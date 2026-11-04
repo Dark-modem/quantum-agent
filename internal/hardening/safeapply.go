@@ -35,9 +35,19 @@ const (
 	// preOpenOwner tags the temporary additive allows. Convergence never
 	// removes them; Confirm/Rollback do.
 	preOpenOwner = "safe-apply"
+)
+
+// Timing knobs are vars so hermetic tests shrink them (production keeps
+// the real values below via the defaults set in newHardeningTimings —
+// package vars initialized once).
+var (
 	// listenerSettle is how long apply waits for sshd to re-listen after a
 	// reload before probing banners.
 	listenerSettle = 2 * time.Second
+	// sshPathProbeDeadline bounds waitSSHPath's retry loop.
+	sshPathProbeDeadline = 8 * time.Second
+	// sshPathProbeInterval is the retry cadence inside waitSSHPath.
+	sshPathProbeInterval = 500 * time.Millisecond
 )
 
 type riskyOutcome struct {
@@ -461,7 +471,7 @@ func dedupePorts(ports []int) []int {
 
 // waitSSHPath probes with a few retries (sshd re-listen latency).
 func waitSSHPath(ports []int) *VerifyResult {
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(sshPathProbeDeadline)
 	var last *VerifyResult
 	for {
 		last = verifySSHPath(ports)
@@ -471,6 +481,6 @@ func waitSSHPath(ports []int) *VerifyResult {
 		if time.Now().After(deadline) {
 			return last
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(sshPathProbeInterval)
 	}
 }

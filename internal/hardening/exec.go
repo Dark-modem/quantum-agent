@@ -42,8 +42,12 @@ var (
 	authorizedKeyGlobs = []string{"/root/.ssh/authorized_keys", "/home/*/.ssh/authorized_keys"}
 )
 
-// journaldLogDir is the persistent-journal directory journald watches.
-const journaldLogDir = "/var/log/journal"
+// sysctlProcRoot is where kernel sysctl values are read from (Linux /proc).
+var sysctlProcRoot = "/proc/sys"
+
+// journaldLogDir is the persistent-journal directory journald watches
+// (var: hermetic tests redirect it into a temp dir).
+var journaldLogDir = "/var/log/journal"
 
 // writeFileAtomic writes content to path via temp+rename (the store
 // convention: a crash never leaves a half-written owned file).
