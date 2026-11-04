@@ -62,10 +62,16 @@ trap cleanup EXIT
 
 # 0. build the real binaries ----------------------------------------------
 say "building real binaries..."
+# The panel pins the PRIVATE quantum-protocol module: root's git needs
+# the invoking user's gh credential (passed via E2E_GH_TOKEN).
+if [ -n "${E2E_GH_TOKEN:-}" ]; then
+  git config --global url."https://x-access-token:${E2E_GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+fi
 rm -rf $LAB; mkdir -p $LAB
+cd "$REPO_ROOT/../quantum-panel" || exit 1
+GOFLAGS="-trimpath -buildvcs=false" go build -o $LAB/quantum-panel ./cmd/quantum-panel || { echo "panel build failed"; exit 1; }
 cd "$REPO_ROOT" || exit 1
-GOFLAGS=-trimpath go build -o $LAB/quantum-panel ./cmd/quantum-panel || { echo "panel build failed"; exit 1; }
-GOFLAGS=-trimpath go build -o $LAB/quantum-agent ./cmd/quantum-agent || { echo "agent build failed"; exit 1; }
+GOFLAGS="-trimpath -buildvcs=false" go build -o $LAB/quantum-agent ./cmd/quantum-agent || { echo "agent build failed"; exit 1; }
 cd - >/dev/null || true
 
 # 1. namespaces + bridge ---------------------------------------------------
@@ -91,47 +97,69 @@ for ipaddr in "${IP_ALL[@]}"; do ping -c1 -W1 "$ipaddr" >/dev/null 2>&1 && REACH
 [ "$REACH" = "${#IP_ALL[@]}" ] && ok "all 6 namespaces reachable (${REACH}/6)" || bad "namespaces reachable ($REACH/6)"
 
 # 2. panel ------------------------------------------------------------------
-say "starting the real panel (host ns, :$PANEL_PORT)..."
+say "starting the real panel..."
 export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS
 mkdir -p $LAB/panel
 $LAB/quantum-panel > $LAB/panel.log 2>&1 &
 PANEL_PID=$!
+# First start generates the config: random base path + first free port,
+# with GRE_PANEL_PASSWORD applied as the initial admin password. Read the
+# ACTUAL port+base back from panel.json for every scripted call.
+sleep 3
+eval "$(python3 -c "
+import json
+cfg = json.load(open('$LAB/panel/panel.json'))
+print('PANEL_PORT=' + str(cfg.get('port', 7777)))
+base = str(cfg.get('base_path', ''))
+if base and not base.startswith('/'):
+    base = '/' + base
+print('PANEL_BASE=' + base)
+" 2>/dev/null)"
+PANEL_URL="http://127.0.0.1:$PANEL_PORT$PANEL_BASE"
+say "panel at $PANEL_URL"
 LIVE=""
 for i in $(seq 1 30); do
-  curl -s -o /dev/null "http://127.0.0.1:$PANEL_PORT/api/login" && LIVE=1 && break
+  curl -s -o /dev/null "$PANEL_URL/api/login" && LIVE=1 && break
   sleep 0.5
 done
-[ "$LIVE" = "1" ] && ok "panel listening" || { bad "panel never listened"; exit 1; }
-curl -s -c $LAB/admin.cookies -X POST "http://127.0.0.1:$PANEL_PORT/api/login" \
+[ "$LIVE" = "1" ] && ok "panel listening at $PANEL_URL" || { bad "panel never listened"; echo "--- panel.log ---"; tail -30 "$LAB/panel.log" 2>/dev/null; exit 1; }
+curl -s -c $LAB/admin.cookies -X POST "$PANEL_URL/api/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"admin\",\"password\":\"$PANEL_PASS\"}" > $LAB/login.json
-CSRF=$(python -c "import json;print(json.load(open('$LAB/login.json')).get('csrf_token',''))")
+CSRF=$(python3 -c "import json;print(json.load(open('$LAB/login.json')).get('csrf_token',''))")
 [ -n "$CSRF" ] && ok "panel login (admin)" || bad "panel login"
 
-api() { # api METHOD PATH [body]
+api() { # api METHOD PATH [body] — prints the response body, logs the code
   local m=$1 p=$2 b=${3:-}
+  local out code
   if [ -n "$b" ]; then
-    curl -s -b $LAB/admin.cookies -X "$m" "http://127.0.0.1:$PANEL_PORT$p" \
-      -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' -d "$b"
+    out=$(curl -s -b $LAB/admin.cookies -X "$m" "$PANEL_URL$p" \
+      -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' -d "$b" \
+      -w $'\n%{http_code}')
   else
-    curl -s -b $LAB/admin.cookies -X "$m" "http://127.0.0.1:$PANEL_PORT$p"
+    out=$(curl -s -b $LAB/admin.cookies -X "$m" "$PANEL_URL$p" -w $'\n%{http_code}')
   fi
+  code=${out##*$'\n'}
+  echo "$m $p http=$code" >> $LAB/api.log
+  echo "${out%$'\n'*}"
 }
-jq_get() { python -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
+jq_get() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)" 2>/dev/null || echo ""; }
 
 # 3. mesh configuration ------------------------------------------------------
 say "configuring the mesh (2 iran DCs, 1 foreign DC, 6 servers)..."
 api POST /api/mesh/datacenters '{"name":"Drak","kind":"iran","price_coefficient":1.0}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Chekavak","kind":"iran","price_coefficient":1.5}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Hetzner Germany","kind":"foreign","price_coefficient":1.0}' >/dev/null
-DC_DRAK=$(api GET /api/mesh/datacenters | jq_get "[d['id'] for d in json.load(sys.stdin) if d['name']=='Drak'][0]")
-DC_HZ=$(api GET /api/mesh/datacenters | jq_get "[d['id'] for d in json.load(sys.stdin) if d['name']=='Hetzner Germany'][0]")
+DC_DRAK=$(api GET /api/mesh/datacenters | jq_get "[d['id'] for d in json.load(sys.stdin)['datacenters'] if d['name']=='Drak'][0]")
+DC_HZ=$(api GET /api/mesh/datacenters | jq_get "[d['id'] for d in json.load(sys.stdin)['datacenters'] if d['name']=='Hetzner Germany'][0]")
+[ -n "$DC_DRAK" ] && [ -n "$DC_HZ" ] && ok "datacenters created ($DC_DRAK/$DC_HZ)" || bad "datacenters ($DC_DRAK/$DC_HZ)"
 
 declare -A SRV_ID
 declare -A SRV_IP
 mkserver() { # name role dcid ip
   SRV_ID[$1]=$(api POST /api/mesh/servers "{\"name\":\"$1\",\"role\":\"$2\",\"datacenter_id\":$3,\"address\":\"$4\"}" | jq_get "json.load(sys.stdin)['id']")
   SRV_IP[$1]=$4
+  if [ -z "${SRV_ID[$1]}" ]; then bad "server $1 creation returned no id"; fi
 }
 mkserver ir-drak-1 iran "$DC_DRAK" ${IP_IRAN[0]}
 mkserver ir-drak-2 iran "$DC_DRAK" ${IP_IRAN[1]}
@@ -154,10 +182,9 @@ GEN2=$(api POST /api/mesh/topologies/generate "{
   \"iran_servers\":[${SRV_ID[ir-chk-1]},${SRV_ID[ir-chk-2]}],
   \"foreign_servers\":[${SRV_ID[hz-fra-1]},${SRV_ID[hz-fra-2]}],
   \"tunnels_per_pair\":2,\"engines\":[\"matrix\",\"fake\"],\"enabled\":true}")
-TOPO1=$(echo "$GEN1" | jq_get "json.load(sys.stdin)['topology_id']")
-TOPO2=$(echo "$GEN2" | jq_get "json.load(sys.stdin)['topology_id']")
-N1=$(echo "$GEN1" | jq_get "len(json.load(sys.stdin)['tunnels'])")
-[ "$N1" = "8" ] && ok "drak-hz generated (2x2x2=8 tunnels)" || bad "drak-hz generated ($N1 tunnels)"
+TOPO1=$(echo "$GEN1" | jq_get "json.load(sys.stdin)['topology_id']" 2>"$LAB/gen1.err")
+N1=$(echo "$GEN1" | jq_get "len(json.load(sys.stdin)['tunnels'])" 2>/dev/null)
+[ "$N1" = "8" ] && ok "drak-hz generated (2x2x2=8 tunnels)" || bad "drak-hz generated ($N1 tunnels) raw=$GEN1 && tail -12 $LAB/api.log 2>/dev/null"
 
 # Patch every fake tunnel's engine_params with its remote server's lab IP.
 python - "$PANEL_PORT" "$LAB/admin.cookies" "$CSRF" "$SINK_PORT" <<'PYEOF'
@@ -210,8 +237,8 @@ for i in "${!NS_ALL[@]}"; do
   echo "$name=$aid" >> "$LAB/agent-ids"
   api POST /api/mesh/agents/$aid/link "{\"server_id\":$sid}" >/dev/null
 done
-AGENTS=$(api GET /api/mesh/agents)
-N_AGENTS=$(echo "$AGENTS" | jq_get "len(json.load(sys.stdin))")
+AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(json.load(sys.stdin)['agents'])")
+N_AGENTS=$(echo "$AGENTS" | jq_get "len(d)")
 [ "$N_AGENTS" = "6" ] && ok "6 agents enrolled + linked" || bad "agents enrolled ($N_AGENTS/6)"
 
 # 5. run the real agents ------------------------------------------------------
@@ -232,12 +259,12 @@ agentTestWait() { # desc seconds command...
   done
   return 1
 }
-V2N=$(api GET /api/mesh/agents | jq_get "sum(1 for a in json.load(sys.stdin) if a.get('proto_version',0)>=2)")
+V2N=$(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")
 [ "$V2N" = "6" ] && ok "v2 negotiated on all 6 agents" || bad "v2 negotiated ($V2N/6)"
 
 # 6. push DesiredV2 to every agent -------------------------------------------
 say "pushing DesiredV2 to every agent..."
-for aid in $(api GET /api/mesh/agents | jq_get "[a['id'] for a in json.load(sys.stdin)]"); do
+for aid in $(echo "$AGENTS" | jq_get "[a['id'] for a in d]"); do
   api POST /api/mesh/agents/$aid/push > "$LAB/push-$aid.json"
 done
 sleep 3
@@ -251,7 +278,7 @@ for ns in "${NS_FOREIGN[@]}"; do
 done
 [ "$SINKS" = "2" ] && ok "fake sinks listening on both foreign agents" || bad "fake sinks ($SINKS/2)"
 
-AG_DRAK1=$(echo "$AGENTS" | jq_get "[a['id'] for a in json.load(sys.stdin) if a['name']=='ir-drak-1'][0]")
+AG_DRAK1=$(echo "$AGENTS" | jq_get "[a['id'] for a in d if a['name']=='ir-drak-1'][0]")
 
 # 7. forward rule + measured weighted split ----------------------------------
 say "forward rule + measured weighted split..."
@@ -295,7 +322,7 @@ while [ $(date +%s) -lt $DEADLINE ]; do
   sleep 0.5
 done
 T1=$(date +%s.%N)
-DT=$(python -c "print(f'{$T1-$T0:.1f}')")
+DT=$(python3 -c "print(f'{$T1-$T0:.1f}')")
 check $MOVED "tunnel failover: new connections moved to hz-fra-2 in ${DT}s"
 FAILOVER_TIME=$DT
 
@@ -319,7 +346,7 @@ while [ $(date +%s) -lt $DEADLINE ]; do
   sleep 0.5
 done
 T1=$(date +%s.%N)
-DT2=$(python -c "print(f'{$T1-$T0:.1f}')")
+DT2=$(python3 -c "print(f'{$T1-$T0:.1f}')")
 check $BACK "failback to hz-fra-2 in ${DT2}s"
 
 # 10. panel death: traffic + failover keep working ---------------------------
@@ -352,24 +379,25 @@ for i in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$PANEL_PORT/api/
 curl -s -c $LAB/admin.cookies -X POST "http://127.0.0.1:$PANEL_PORT/api/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"admin\",\"password\":\"$PANEL_PASS\"}" > $LAB/login2.json
-CSRF=$(python -c "import json;print(json.load(open('$LAB/login2.json')).get('csrf_token',''))")
+CSRF=$(python3 -c "import json;print(json.load(open('$LAB/login2.json')).get('csrf_token',''))")
 # agents reconnect; give them time, then count distinct applied revisions
 sleep 8
-REVS=$(api GET /api/mesh/agents | jq_get "len({a.get('applied_revision','') for a in json.load(sys.stdin) if a.get('applied_revision')})")
+REVS=$(api GET /api/mesh/agents | jq_get "len({a.get('applied_revision','') for a in json.load(sys.stdin)['agents'] if a.get('applied_revision')})")
 [ "$REVS" -le 2 ] && ok "panel restart: no revision storm ($REVS distinct applied revisions)" || bad "revision storm ($REVS)"
 
 # 12. wire/payload counters in the usage API ----------------------------------
 say "usage counters..."
-USAGE_OK=$(api GET /api/mesh/usage | python -c "
-import json,sys
-d=json.load(sys.stdin)
-rows = d if isinstance(d, list) else d.get('links', d.get('tunnels', []))
-found = False
-for r in (rows or []):
-    if r.get('wire_rx', 0) > 0 or r.get('payload_rx', 0) > 0:
-        found = True
-print('YES' if found else 'NO')")
-[ "$USAGE_OK" = "YES" ] && ok "usage API carries real byte counters (wire==payload for fake tunnels)" || bad "usage API counters"
+# The usage API needs a scope param and answers {scope, usage:{wire_rx,…}}.
+# Query per topology: the store's traffic_samples carry the agent's
+# reported wire+payload counters (fake tunnels: wire == payload).
+TOPO1_USAGE=$(api GET "/api/mesh/usage?topology_id=$TOPO1")
+echo "$TOPO1_USAGE" > /tmp/quantum-e2e/usage.json
+USAGE_OK=$(python3 -c "
+import json
+d = json.load(open('/tmp/quantum-e2e/usage.json'))
+u = d.get('usage', {})
+print('YES' if (u.get('wire_rx', 0) > 0 or u.get('payload_rx', 0) > 0) else 'NO')" 2>/dev/null)
+[ "$USAGE_OK" = "YES" ] && ok "usage API carries real byte counters (wire==payload for fake tunnels)" || bad "usage API counters ($TOPO1_USAGE)"
 
 # 13. weight change enforced on the agent -------------------------------------
 say "weight change..."
