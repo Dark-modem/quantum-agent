@@ -384,6 +384,7 @@ func (s *agentSession) serve(ctx context.Context) error {
 		Caps:          caps,
 		MaxVersion:    agentMaxProtoVersion,
 		EngineCatalog: agentEngineCatalog(),
+		Engines:       agentEngineInfos(),
 	}
 	if err := s.send(agentMsgHello, hello); err != nil {
 		s.fail(err)

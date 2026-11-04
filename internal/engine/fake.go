@@ -34,6 +34,9 @@ type FakeEngine struct {
 
 	forwardAddr map[string]string
 	forwardPort map[string]int
+
+	describeVersion string
+	describeSchema  json.RawMessage
 }
 
 // NewFakeEngine returns a healthy, empty FakeEngine with the given ID.
@@ -265,4 +268,19 @@ func (f *FakeEngine) ForwardAddress(inst Instance) (string, int, bool) {
 		return "", 0, false
 	}
 	return h, f.forwardPort[inst.TunnelID], true
+}
+
+// SetDescribe scripts the Describer capability.
+func (f *FakeEngine) SetDescribe(version string, schema json.RawMessage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.describeVersion = version
+	f.describeSchema = schema
+}
+
+// Describe implements the optional Describer capability.
+func (f *FakeEngine) Describe() EngineInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return EngineInfo{ID: f.id, Version: f.describeVersion, ParamsSchema: f.describeSchema}
 }

@@ -221,3 +221,14 @@ func (d *MatrixDriver) ForwardAddress(inst engine.Instance) (string, int, bool) 
 	}
 	return "", 0, false
 }
+
+// Describe implements the optional engine.Describer capability
+// (PROTOCOL-REQUESTS R3): the catalog entry the panel stores per agent.
+// The params_schema is a hint document (the engine owns its params).
+func (d *MatrixDriver) Describe() engine.EngineInfo {
+	return engine.EngineInfo{
+		ID:           "matrix",
+		Version:      panelVersion,
+		ParamsSchema: json.RawMessage(`{"instance":"matrix|matrix2|… (required)"}`),
+	}
+}

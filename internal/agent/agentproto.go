@@ -142,3 +142,5 @@ const (
 	agentCmdHardeningRollback = protocol.CmdHardeningRollback
 	agentCmdHardeningStatus   = protocol.CmdHardeningStatus
 )
+
+type agentEngineInfo = protocol.EngineInfo

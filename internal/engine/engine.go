@@ -138,3 +138,35 @@ type ForwardAddresser interface {
 	// ok=false when the address is not currently known.
 	ForwardAddress(inst Instance) (host string, port int, ok bool)
 }
+
+// EngineInfo is one rich catalog entry (PROTOCOL-REQUESTS R3): the
+// panel stores it per agent and hard-validates tunnel engine ids.
+type EngineInfo struct {
+	ID      string
+	Version string
+	// ParamsSchema is opaque: the named engine owns the document.
+	ParamsSchema json.RawMessage
+}
+
+// Describer is an optional capability: engines that publish a rich
+// catalog entry. Engines without it appear as {ID} only.
+type Describer interface {
+	Describe() EngineInfo
+}
+
+// CatalogOf returns the rich catalog for a registry: Describer engines
+// carry version/schema; the rest appear as bare IDs.
+func CatalogOf(reg *Registry) []EngineInfo {
+	ids := reg.IDs()
+	out := make([]EngineInfo, 0, len(ids))
+	for _, id := range ids {
+		info := EngineInfo{ID: id}
+		if drv, ok := reg.Driver(id); ok {
+			if d, canDescribe := drv.(Describer); canDescribe {
+				info = d.Describe()
+			}
+		}
+		out = append(out, info)
+	}
+	return out
+}

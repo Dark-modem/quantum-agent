@@ -22,6 +22,8 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -146,7 +148,10 @@ func (b *forwardBalancer) Stop() {
 func (b *forwardBalancer) loop(stop chan struct{}) {
 	for {
 		b.mu.Lock()
-		interval := b.desired.Balancing.HealthCheck.IntervalS
+		interval := 1
+		if b.desired.Balancing != nil && b.desired.Balancing.HealthCheck.IntervalS > 0 {
+			interval = b.desired.Balancing.HealthCheck.IntervalS
+		}
 		b.mu.Unlock()
 		if interval < 1 {
 			interval = 1
@@ -257,15 +262,34 @@ func (b *forwardBalancer) tick() balTickReport {
 	rules := make([]forwardRender, 0, len(d.Forwards))
 	forwards := make([]protocol.ForwardRuntime, 0, len(d.Forwards))
 	for _, fr := range d.Forwards {
+		if !fr.IsEnabled() {
+			continue // explicitly disabled rule: not rendered (PROTOCOL-REQUESTS R1)
+		}
+		runtime := protocol.ForwardRuntime{
+			ID: fr.ID, ListenPort: fr.ListenPort, Proto: fr.Proto, TargetGroup: fr.TargetGroup,
+		}
+		if fr.TargetGroup == "" && strings.TrimSpace(fr.Target) != "" {
+			// Static per-server rule (panel ForwardSpec form, no
+			// balancing group): rendered unconditionally — availability
+			// is the panel's responsibility here.
+			host, port, perr := splitForwardTarget(fr.Target, fr.TargetPort)
+			if perr != nil {
+				rep.Errors = append(rep.Errors, fmt.Sprintf("forward %s: %v", fr.ID, perr))
+				continue
+			}
+			rules = append(rules, forwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto,
+				Targets: []balTarget{{TunnelID: "static:" + fr.ID, IP: host, Port: port, Weight: 1}}})
+			runtime.Targets = append(runtime.Targets, "static:"+fr.ID)
+			runtime.Weights = append(runtime.Weights, 1)
+			forwards = append(forwards, runtime)
+			continue
+		}
 		g, ok := groups[fr.TargetGroup]
 		if !ok {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("forward %s: unknown target group %q", fr.ID, fr.TargetGroup))
 			continue
 		}
 		targets := []balTarget{}
-		runtime := protocol.ForwardRuntime{
-			ID: fr.ID, ListenPort: fr.ListenPort, Proto: fr.Proto, TargetGroup: fr.TargetGroup,
-		}
 		for _, tid := range ids {
 			st := byID[tid]
 			if st.TopologyID != g.TopologyID {
@@ -380,6 +404,23 @@ func forwardAddressOf(reg *engine.Registry, st engine.TunnelStatus) (forwardAddr
 		return forwardAddr{}, false
 	}
 	return forwardAddr{host: host, port: port}, true
+}
+
+// splitForwardTarget parses "addr" or "addr:port" (port defaulting to
+// the rule's target_port).
+func splitForwardTarget(target string, defaultPort int) (string, int, error) {
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(target))
+	if err != nil {
+		if strings.Contains(target, ":") && !strings.HasPrefix(target, "[") {
+			return "", 0, fmt.Errorf("forward target %q: %v", target, err)
+		}
+		return strings.Trim(strings.TrimSpace(target), "[]"), defaultPort, nil
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return "", 0, fmt.Errorf("forward target %q: bad port", target)
+	}
+	return strings.Trim(host, "[]"), port, nil
 }
 
 func orDefault(v, def int) int {

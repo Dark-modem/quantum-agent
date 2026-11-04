@@ -19,6 +19,8 @@ import (
 
 func testCtx() context.Context { return context.Background() }
 
+var protocolTrue = true
+
 func toEngineSpecs(engines []protocol.EngineSpec, tunnels []protocol.TunnelSpec) ([]engine.EngineSpec, []engine.TunnelSpec) {
 	engs := make([]engine.EngineSpec, 0, len(engines))
 	for _, e := range engines {
@@ -452,5 +454,62 @@ func TestRenderForwardNFTValidationShape(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("script lacks %q:\n%s", want, script)
 		}
+	}
+}
+
+// ---- R1/R3 consumption ----
+
+// TestBalancerDisabledAndStaticForwards covers the panel's ForwardSpec
+// delivery form: disabled rules are not rendered; explicit-target rules
+// (no group) render as static single-target forwards.
+func TestBalancerDisabledAndStaticForwards(t *testing.T) {
+	h := newBalHarness(t)
+	enabled := false
+	d := protocol.DesiredV2{
+		Revision: "1796470000000000200",
+		Forwards: []protocol.ForwardRule{
+			{ID: "fw-off", ListenPort: 9999, Proto: "tcp", Target: "10.189.0.9", TargetPort: 22, Enabled: &enabled},
+			{ID: "fw-static", ListenPort: 2201, Proto: "tcp", Target: "10.189.0.2", TargetPort: 22, Enabled: &protocolTrue},
+		},
+	}
+	h.bal.Reconcile(&d)
+	time.Sleep(50 * time.Millisecond)
+	script := h.lastScript()
+	if strings.Contains(script, "9999") {
+		t.Fatalf("disabled rule rendered:\n%s", script)
+	}
+	if !strings.Contains(script, "tcp dport 2201 dnat to numgen inc mod 1 map { 0-0 : 10.189.0.2 } : 22") {
+		t.Fatalf("static rule not rendered as validated:\n%s", script)
+	}
+}
+
+// TestHelloCarriesRichCatalog pins R3: hello.Engines carries the matrix
+// entry with a params_schema hint, and the v1-shaped decode drops it.
+func TestHelloCarriesRichCatalog(t *testing.T) {
+	hello := agentHello{
+		ID: "agt_x", Version: panelVersion, Caps: agentCaps(),
+		MaxVersion:    agentMaxProtoVersion,
+		EngineCatalog: agentEngineCatalog(), Engines: agentEngineInfos(),
+	}
+	raw, err := agentEncodeV2(agentMsgHello, hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, data, err := protocol.DecodeAny(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got protocol.Hello
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range got.Engines {
+		if e.ID == "matrix" && e.ParamsSchema != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("hello.Engines lacks the matrix schema: %+v", got.Engines)
 	}
 }

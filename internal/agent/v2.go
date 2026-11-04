@@ -36,6 +36,20 @@ func agentEngineCatalog() []string {
 	return reg.IDs()
 }
 
+// agentEngineInfos returns the rich catalog (PROTOCOL-REQUESTS R3).
+func agentEngineInfos() []protocol.EngineInfo {
+	reg, err := AgentEngines()
+	if err != nil {
+		return nil
+	}
+	infos := engine.CatalogOf(reg)
+	out := make([]protocol.EngineInfo, 0, len(infos))
+	for _, i := range infos {
+		out = append(out, protocol.EngineInfo{ID: i.ID, Version: i.Version, ParamsSchema: i.ParamsSchema})
+	}
+	return out
+}
+
 // agentV2 is the process-wide v2 runtime: the engine manager over the
 // builtin registry plus the forward balancer. Constructed lazily; the
 // Manager has no background activity until a v2 desired state arrives,
