@@ -1,12 +1,8 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,7 +151,7 @@ func switchCarrier(target string, o carrier6Opts) (string, error) {
 		}
 	}
 	if !waitCarrierUp(carrierVerifyWait) {
-		_ = applyCarrierMode(prev)
+		_, _ = applyCarrierMode(prev)
 		LogSecurityAudit("carrier_switch_undone", "admin", "127.0.0.1", "target="+target+" back="+prev)
 		return "", fmt.Errorf("the tunnel did not answer over %s within %s; this server is back on %s", target, carrierVerifyWait, prev)
 	}
