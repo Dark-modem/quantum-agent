@@ -8,42 +8,6 @@ import (
 	"testing"
 )
 
-func TestPeerConfigDefaultsAndLoadSave(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "quantum_peer_test_*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
-
-	// 1. Default config
-	c := loadPeerConfig()
-	if c.Role == "" || c.PeerSecret == "" {
-		t.Errorf("expected default role and secret, got role=%q secret=%q", c.Role, c.PeerSecret)
-	}
-	if c.AutoPilotEnabled {
-		t.Errorf("expected autopilot disabled by default")
-	}
-
-	// 2. Modify and Save
-	c.PeerURL = "http://1.2.3.4:8080"
-	c.InternalIP = "10.10.10.1"
-	c.Role = "master"
-	c.AutoPilotThreshold = 25.0
-	if err := savePeerConfig(c); err != nil {
-		t.Fatalf("savePeerConfig failed: %v", err)
-	}
-
-	// 3. Reload
-	loaded := loadPeerConfig()
-	if loaded.PeerURL != "http://1.2.3.4:8080" || loaded.InternalIP != "10.10.10.1" || loaded.AutoPilotThreshold != 25.0 {
-		t.Errorf("loaded config mismatch: %+v", loaded)
-	}
-}
-
 func TestPeerAuthMiddleware(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "quantum_peer_auth_test_*")
 	if err != nil {

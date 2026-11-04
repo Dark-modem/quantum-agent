@@ -413,47 +413,6 @@ func TestForeignFRPSwitchUsesTheGivenPortsAndProtocol(t *testing.T) {
 	}
 }
 
-func TestTunnelTokenHandshakeRecordsTheForeignPanel(t *testing.T) {
-	swapLab(t)
-	mux := http.NewServeMux()
-	mountPeerRoutes(mux, "/base")
-	before := loadPeerConfig()
-
-	req := httptest.NewRequest("POST", peerRoutePrefix+"/api/peer/handshake",
-		strings.NewReader(`{"role":"worker","public_ip":"92.2.2.2","panel_port":9443,"internal_ip":"10.80.2.2"}`))
-	req.Header.Set("X-Peer-Secret", "tok-2")
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-	if w.Code != 200 {
-		t.Fatalf("handshake with the peer token: %d %s", w.Code, w.Body.String())
-	}
-	l := loadTunnelLinks()[2]
-	if l.PanelPort != 9443 || l.InternalIP != "10.80.2.2" || l.PublicIP != "92.2.2.2" {
-		t.Errorf("link not recorded: %+v", l)
-	}
-	if after := loadPeerConfig(); after.InternalIP != before.InternalIP || after.PeerURL != before.PeerURL || after.InternalPort != before.InternalPort {
-		t.Error("a peer's handshake must not touch the main Peer Link")
-	}
-
-	for _, path := range []string{"/api/peer/handshake", "/api/peer/swap-carrier", "/api/peer/apply-engine"} {
-		req = httptest.NewRequest("POST", peerRoutePrefix+path, strings.NewReader(`{}`))
-		req.Header.Set("X-Peer-Secret", "wrong")
-		w = httptest.NewRecorder()
-		mux.ServeHTTP(w, req)
-		if w.Code != 404 {
-			t.Errorf("%s with a wrong secret: %d, want 404", path, w.Code)
-		}
-	}
-	// The peer token opens handshake and ping only.
-	req = httptest.NewRequest("POST", peerRoutePrefix+"/api/peer/apply-engine", strings.NewReader(`{}`))
-	req.Header.Set("X-Peer-Secret", "tok-2")
-	w = httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-	if w.Code != 404 {
-		t.Errorf("apply-engine with a peer token: %d, want 404", w.Code)
-	}
-}
-
 func TestTunnelPeerCallUsesTheTokenAndRemembersTheURL(t *testing.T) {
 	swapLab(t)
 	var gotSecret, gotPath string

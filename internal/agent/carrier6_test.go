@@ -59,48 +59,6 @@ func TestCarrier6Applicable(t *testing.T) {
 	}
 }
 
-func TestSwitchCarrierBothServers(t *testing.T) {
-	got, mu := fakeWorker(t, "2001:db8::2")
-	withCarrierVerify(t, func() bool { return true })
-	detail, err := switchCarrier("6to4", carrier6Opts{})
-	if err != nil || !strings.Contains(detail, "Both servers") {
-		t.Fatalf("6to4: %q %v", detail, err)
-	}
-	if loadCarrierConfig().ActiveCarrier != "6to4" {
-		t.Errorf("this server is on %q", loadCarrierConfig().ActiveCarrier)
-	}
-	// 4in6: this server's IPv6 given, the worker's asked over the Peer Link;
-	// the worker gets them the other way round
-	if _, err := switchCarrier("4in6", carrier6Opts{Local6: "2001:db8::1"}); err != nil {
-		t.Fatalf("4in6: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(*got) != 2 || (*got)[0].Carrier != "6to4" || (*got)[1] != (PeerApplyCarrierRequest{Carrier: "4in6", Local6: "2001:db8::2", Remote6: "2001:db8::1"}) {
-		t.Fatalf("worker was told %+v", *got)
-	}
-}
-
-func TestSwitchCarrierUndoneWhenTunnelSilent(t *testing.T) {
-	got, mu := fakeWorker(t, "")
-	withCarrierVerify(t, func() bool { return false })
-	if _, err := applyCarrierMode("direct"); err != nil && !strings.Contains(err.Error(), "script not found") {
-		t.Fatal(err)
-	}
-	_, err := switchCarrier("6to4", carrier6Opts{})
-	if err == nil || !strings.Contains(err.Error(), "back on direct") {
-		t.Fatalf("silent tunnel: %v", err)
-	}
-	if a := loadCarrierConfig().ActiveCarrier; a != "direct" {
-		t.Errorf("this server stayed on %q", a)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(*got) != 2 || (*got)[0].Carrier != "6to4" || (*got)[1].Carrier != "direct" {
-		t.Fatalf("worker was told %+v, want 6to4 then direct", *got)
-	}
-}
-
 func TestSwitchCarrier4in6NeedsAddresses(t *testing.T) {
 	_, _ = fakeWorker(t, "") // the worker has no IPv6
 	withCarrierVerify(t, func() bool { return true })

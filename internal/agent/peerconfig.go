@@ -14,6 +14,7 @@ package agent
 // (currentLocal(), cfg.Port) and has no meaning on a standalone agent.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -21,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -271,6 +273,18 @@ func peerHandshake(role, internalIP string) error {
 	return nil
 }
 
+// POST /api/peer/ping answers a peer's liveness probe (ported verbatim
+// from the monolith peer.go).
+func handlePeerPing(w http.ResponseWriter, r *http.Request) {
+	carrierCfg := loadCarrierConfig()
+	writeJSON(w, map[string]any{
+		"status":         "pong",
+		"active_carrier": carrierCfg.ActiveCarrier,
+		"version":        panelVersion,
+		"time":           time.Now().UnixNano(),
+	})
+}
+
 // requirePeerAuth authenticates peer API requests with the shared peer
 // link secret (agent adaptation of the monolith peer.go middleware: no
 // admin sessions exist on the agent, so the cookie path is gone).
@@ -332,6 +346,7 @@ func mountPeerRoutes(mux *http.ServeMux, base string) {
 		method, path string
 		h            http.HandlerFunc
 	}{
+		{"POST", "/api/peer/ping", handlePeerPing},
 		{"POST", "/api/peer/revpath-probe", handlePeerRevPathProbe},
 		{"POST", "/api/peer/sshfwd-install-key", handlePeerSSHFwdInstallKey},
 		{"POST", "/api/peer/swap-carrier", handlePeerSwapCarrier},
@@ -355,4 +370,91 @@ func mountPeerRoutes(mux *http.ServeMux, base string) {
 	// Anything else under the prefix (other paths, wrong methods) is a plain
 	// 404 rather than the catch-all redirect or a 405 that would reveal routes.
 	mux.HandleFunc(peerRoutePrefix+"/", http.NotFound)
+}
+
+// sendToPeer sends an HTTP request to the remote peer using dual-path fallback:
+// Path 1: Internal tunnel IP (e.g. http://10.10.10.1:8080/api/peer/...)
+// Path 2: Public URL (e.g. http://5.6.7.8:8080/api/peer/...)
+func sendToPeer(path string, method string, payload any) ([]byte, error) {
+	return sendToPeerTimeout(path, method, payload, 4*time.Second)
+}
+
+// sendToPeerTimeout is sendToPeer for calls the peer needs longer to answer
+// (an engine switch restarts services before it replies).
+func sendToPeerTimeout(path string, method string, payload any, timeout time.Duration) ([]byte, error) {
+	c := loadPeerConfig()
+	var bodyBytes []byte
+	var err error
+	if payload != nil {
+		bodyBytes, err = json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	targetURLs := peerTargetURLs(c, path)
+	if len(targetURLs) == 0 {
+		return nil, fmt.Errorf("no peer address configured (both InternalIP and PeerURL are empty)")
+	}
+
+	tr := &http.Transport{
+		TLSClientConfig: peerTLSConfig(&c),
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: tr,
+		// A wrong path hits the catch-all redirect to the login page; following
+		// it turned that into a 200 "success", so never follow redirects.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+
+	var lastErr error
+	deadHosts := map[string]bool{} // scheme://host:port that failed to connect
+	for _, target := range targetURLs {
+		pu, _ := url.Parse(target)
+		hostKey := ""
+		if pu != nil {
+			hostKey = pu.Scheme + "://" + pu.Host
+		}
+		if deadHosts[hostKey] {
+			continue // no point retrying an unreachable address with another path
+		}
+		req, err := http.NewRequest(method, target, bytes.NewReader(bodyBytes))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		if c.PeerSecret != "" {
+			req.Header.Set("X-Peer-Secret", c.PeerSecret)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			deadHosts[hostKey] = true
+			continue
+		}
+
+		respBytes, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Every peer endpoint answers JSON; an HTML page means we reached
+		// something other than the peer API.
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && json.Valid(respBytes) {
+			markPeerSeen()
+			return respBytes, nil
+		}
+
+		lastErr = fmt.Errorf("peer returned HTTP %d: %s", resp.StatusCode, truncateForError(respBytes))
+	}
+
+	_ = updatePeerConfig(func(p *PeerConfig) { p.IsConnected = false })
+	return nil, lastErr
 }

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -248,8 +249,28 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 var frpDir = "/etc/frp"
 
-func writeAPIError(w http.ResponseWriter, r *http.Request, code, msg string) {
-	http.Error(w, msg, http.StatusInternalServerError)
+// writeAPIError is the single way backend handlers report failures:
+// stable JSON {error_code, error, hint} + journal entry.
+func writeAPIError(w http.ResponseWriter, r *http.Request, code, detail string) {
+	info, ok := errCatalog[code]
+	if !ok {
+		info = errInfo{Status: http.StatusBadRequest, Msg: "request failed", Hint: ""}
+		code = "E-SYS-01"
+	}
+	msg := info.Msg
+	if detail != "" {
+		msg = detail
+	}
+	ep := ""
+	if r != nil {
+		ep = r.Method + " " + r.URL.Path
+	}
+	recordError(code, ep, msg)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(info.Status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error_code": code, "error": msg, "hint": info.Hint,
+	})
 }
 
 func linkLabelFromString(s string) string { return s }
@@ -262,14 +283,6 @@ func linkLabelFromString(s string) string { return s }
 
 var runSystemctl = func(args ...string) error {
 	return nil // agent uses matrixExec
-}
-
-func sendToPeer(path, method string, body interface{}) (json.RawMessage, error) {
-	return nil, nil // peer comm is controller-managed
-}
-
-func sendToPeerTimeout(path, method string, body interface{}, timeout time.Duration) (json.RawMessage, error) {
-	return nil, nil
 }
 
 type PeerApplyCarrierRequest struct {
@@ -286,12 +299,41 @@ func applyBenchmarkCarrier(target string) (string, error) {
 // The agent's local peerRecord doesn't have these — they come from the
 // controller's desired state via the WSS protocol.
 
-// CleanHost normalizes a host address (strips brackets, whitespace).
-func CleanHost(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "[")
-	s = strings.TrimSuffix(s, "]")
-	return s
+// CleanHost parses and extracts the raw host or IP from an input string,
+// stripping URL schemes (http://, https://, etc.), ports, paths, and IPv6 brackets.
+func CleanHost(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+
+	// If it contains scheme prefix (e.g. "http://", "https://")
+	if strings.Contains(input, "://") {
+		if u, err := url.Parse(input); err == nil && u.Host != "" {
+			input = u.Host
+		} else {
+			// fallback: strip up to ://
+			parts := strings.SplitN(input, "://", 2)
+			input = parts[1]
+		}
+	}
+
+	// Remove trailing paths or query params if any remain
+	if slashIdx := strings.Index(input, "/"); slashIdx != -1 {
+		input = input[:slashIdx]
+	}
+	if qIdx := strings.Index(input, "?"); qIdx != -1 {
+		input = input[:qIdx]
+	}
+
+	// If host contains port (e.g., "example.com:8080" or "[::1]:8080")
+	if host, _, err := net.SplitHostPort(input); err == nil {
+		return strings.Trim(host, "[]")
+	}
+
+	// Strip IPv6 brackets if "[::1]"
+	input = strings.Trim(input, "[]")
+	return input
 }
 
 var backhaulDir = "/etc/backhaul"
