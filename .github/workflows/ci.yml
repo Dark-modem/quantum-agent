@@ -6,8 +6,12 @@ on:
 jobs:
   build-vet-test:
     runs-on: ubuntu-latest
+    env:
+      GOPRIVATE: github.com/Dark-modem/*
     steps:
       - uses: actions/checkout@v4
+      - name: Allow Go to fetch the private quantum-protocol module
+        run: git config --global url."https://x-access-token:${{ secrets.CI_GIT_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
