@@ -79,6 +79,7 @@ func TestAgentCapsIncludeHardening(t *testing.T) {
 // ---- desired v2 application through the manager ----
 
 func TestApplyDesiredV2StartsTunnelsAndAcks(t *testing.T) {
+	withTempConfig(t)
 	registerV2TestDriver(t)
 	d := testDesiredV2()
 	ack := agentApplyDesiredV2(&d)
@@ -95,6 +96,7 @@ func TestApplyDesiredV2StartsTunnelsAndAcks(t *testing.T) {
 }
 
 func TestApplyDesiredV2RevisionFencing(t *testing.T) {
+	withTempConfig(t)
 	registerV2TestDriver(t)
 	d := testDesiredV2()
 	if ack := agentApplyDesiredV2(&d); !ack.OK {
@@ -130,6 +132,7 @@ func resetV2Runtime() {
 	}
 	agentV2.manager = nil
 	agentV2.balancer = nil
+	agentV2AppliedRevision = ""
 	agentV2.mu.Unlock()
 	agentV2TestDriver = nil
 	// The builtin registry is built once per process; tests that swap
@@ -138,6 +141,9 @@ func resetV2Runtime() {
 }
 
 func registerV2TestDriver(t *testing.T) *engine.FakeEngine {
+	agentV2.mu.Lock()
+	agentV2AppliedRevision = ""
+	agentV2.mu.Unlock()
 	t.Helper()
 	fake := engine.NewFakeEngine("fake")
 	agentV2TestDriver = fake

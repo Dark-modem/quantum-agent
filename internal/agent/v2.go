@@ -48,6 +48,33 @@ type agentV2Runtime struct {
 
 var agentV2 agentV2Runtime
 
+// agentV2AppliedRevision is the in-memory fencing floor for v2 desired
+// state. The process's authority (disk is only the boot backup): tests
+// run without a writable configDir, and fencing must not depend on it.
+var agentV2AppliedRevision string
+
+// agentV2FenceAccepts reports whether revision is strictly newer than
+// everything applied so far (disk state included).
+func agentV2FenceAccepts(revision string) bool {
+	agentV2.mu.Lock()
+	floor := agentV2AppliedRevision
+	agentV2.mu.Unlock()
+	if st := agentLoadState(); st.AppliedRevision > floor {
+		floor = st.AppliedRevision
+	}
+	return protocol.RevisionNewer(revision, floor)
+}
+
+// agentV2RecordApplied moves the fencing floor forward (memory first,
+// disk best-effort).
+func agentV2RecordApplied(revision string) {
+	agentV2.mu.Lock()
+	if protocol.RevisionNewer(revision, agentV2AppliedRevision) {
+		agentV2AppliedRevision = revision
+	}
+	agentV2.mu.Unlock()
+}
+
 // agentV2RuntimeRef returns (and lazily builds) the v2 runtime.
 func agentV2RuntimeRef() (*engine.Manager, *forwardBalancer, error) {
 	agentV2.mu.Lock()
@@ -111,9 +138,9 @@ func (s *agentSession) handleDesiredV2(data []byte) {
 // idempotently; stale/equal revisions are refused.
 func agentApplyDesiredV2(d *protocol.DesiredV2) agentAck {
 	ack := agentAck{Revision: d.Revision, OK: true, Kind: "desired-v2"}
-	if st := agentLoadState(); !protocol.RevisionNewer(d.Revision, st.AppliedRevision) {
+	if !agentV2FenceAccepts(d.Revision) {
 		ack.OK = false
-		ack.Error = fmt.Sprintf("stale or duplicate revision %s (applied %s)", d.Revision, st.AppliedRevision)
+		ack.Error = fmt.Sprintf("stale or duplicate revision %s", d.Revision)
 		return ack
 	}
 	mgr, bal, err := agentV2RuntimeRef()
@@ -185,6 +212,7 @@ func agentApplyDesiredV2(d *protocol.DesiredV2) agentAck {
 
 	// 4. Record the applied revision (boot replay + fencing depend on
 	// it; agentRecordAck does the same for the online path).
+	agentV2RecordApplied(d.Revision)
 	if err := agentMutateState(func(st *agentPersistedState) {
 		st.AppliedRevision = d.Revision
 		st.DesiredStatus = "applied"
