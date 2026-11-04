@@ -111,4 +111,14 @@ exit $fail
 LAB
 rc=$?
 echo "== hardening lab: exit $rc =="
+echo
+echo "MANUAL VM CHECKLIST (the part a netns cannot do — run once on a"
+echo "disposable server before production; every line is a pass/fail):"
+echo "  1. install-agent.sh --server ... --token ... --enable-firewall --open 443/tcp"
+echo "  2. ssh into the server from OUTSIDE on the pre-existing port  -> must work"
+echo "  3. push a profile moving SSH to a new port (safe-apply armed)  -> new port answers"
+echo "  4. let the 120 s timer fire WITHOUT confirming                 -> old path works again,"
+echo "     journal-*.json.rolledback exists, drop-in restored"
+echo "  5. re-apply, confirm via the panel within 120 s                -> stays applied"
+echo "  6. push key_only:true with no key installed                    -> plan shows BLOCKED"
 exit "$rc"
