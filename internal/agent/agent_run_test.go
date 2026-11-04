@@ -221,8 +221,13 @@ func TestAgentWSRoundTrip(t *testing.T) {
 
 	select {
 	case h := <-helloCh:
-		if h.ID != ident.ID || h.Version != panelVersion || h.OS != runtime.GOOS || len(h.Caps) != 4 {
+		// Phase 2A: caps grew by hardening, and hello now carries the
+		// negotiated-version offer (MaxVersion) + the engine catalog.
+		if h.ID != ident.ID || h.Version != panelVersion || h.OS != runtime.GOOS || len(h.Caps) != 5 || h.MaxVersion != 2 {
 			t.Fatalf("hello = %+v", h)
+		}
+		if len(h.EngineCatalog) == 0 {
+			t.Fatalf("hello engine catalog empty: %+v", h)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("no hello")

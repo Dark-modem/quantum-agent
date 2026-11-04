@@ -113,3 +113,32 @@ func agentRevisionNewer(cand, cur string) bool { return protocol.RevisionNewer(c
 func agentEncode(typ string, payload any) ([]byte, error) { return protocol.Encode(typ, payload) }
 
 func agentDecode(raw []byte) (string, json.RawMessage, error) { return protocol.Decode(raw) }
+
+// Phase 2A aliases: v2 report and handshake types.
+type (
+	agentHeartbeatV2   = protocol.HeartbeatV2
+	agentStateReportV2 = protocol.StateReportV2
+)
+
+// v2 session helpers (implemented in v2.go).
+const (
+	agentProtoVersionV2  = protocol.ProtoVersionV2
+	agentMaxProtoVersion = protocol.MaxSupportedVersion
+)
+
+func agentEncodeV2(typ string, payload any) ([]byte, error) {
+	return protocol.EncodeVersioned(protocol.ProtoVersionV2, typ, payload)
+}
+
+type agentDesiredV2 = protocol.DesiredV2
+
+const agentCapHardening = protocol.CapHardening
+
+const (
+	agentCmdHardeningDetect   = protocol.CmdHardeningDetect
+	agentCmdHardeningPlan     = protocol.CmdHardeningPlan
+	agentCmdHardeningApply    = protocol.CmdHardeningApply
+	agentCmdHardeningConfirm  = protocol.CmdHardeningConfirm
+	agentCmdHardeningRollback = protocol.CmdHardeningRollback
+	agentCmdHardeningStatus   = protocol.CmdHardeningStatus
+)

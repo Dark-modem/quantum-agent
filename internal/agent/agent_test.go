@@ -884,8 +884,18 @@ func TestAgentEnrollCLI(t *testing.T) {
 		t.Fatalf("request = %s token %q", gotPath, gotToken)
 	}
 	if gotBody.OS != runtime.GOOS || gotBody.Arch != runtime.GOARCH || gotBody.Version != panelVersion ||
-		gotBody.Name != "edge-1" || len(gotBody.Caps) != 4 {
+		gotBody.Name != "edge-1" || len(gotBody.Caps) != 5 {
 		t.Fatalf("enroll body = %+v", gotBody)
+	}
+	// CapHardening is advertised since Phase 2A (HARDENING.md §5c).
+	hasHardening := false
+	for _, c := range gotBody.Caps {
+		if c == "hardening" {
+			hasHardening = true
+		}
+	}
+	if !hasHardening {
+		t.Fatalf("enroll caps lack hardening: %+v", gotBody.Caps)
 	}
 	ident, ok := agentLoadIdentity()
 	if !ok || ident.ID != "agt_enr" || ident.Key != "aabbcc" || ident.BasePath != "panel" || ident.Name != "edge-1" || ident.Server != srv.URL {

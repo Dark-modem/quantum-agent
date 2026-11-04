@@ -127,3 +127,14 @@ type EngineSpec struct {
 	ID      string
 	Enabled bool
 }
+
+// ForwardAddresser is an optional capability: engines whose tunnels can
+// carry forwarded service traffic report where new connections should be
+// delivered (e.g. the remote mesh address for L3 tunnels). The local
+// balancer type-asserts for it; engines without it are excluded from
+// balancing groups.
+type ForwardAddresser interface {
+	// ForwardAddress returns the delivery target for a tunnel instance.
+	// ok=false when the address is not currently known.
+	ForwardAddress(inst Instance) (host string, port int, ok bool)
+}

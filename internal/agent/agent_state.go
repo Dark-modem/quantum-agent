@@ -59,12 +59,15 @@ type agentWSStatus struct {
 // DesiredStatus is "pending" (received, apply in flight or deferred),
 // "applied" (acknowledged ok) or "failed" (acknowledged with an error).
 type agentPersistedState struct {
-	Desired         *agentDesired  `json:"desired"`
-	DesiredStatus   string         `json:"desired_status,omitempty"`
-	AppliedRevision string         `json:"applied_revision,omitempty"`
-	LastAck         *agentAck      `json:"last_ack,omitempty"`
-	WS              *agentWSStatus `json:"ws,omitempty"`
-	UpdatedAt       int64          `json:"updated_at,omitempty"`
+	Desired       *agentDesired `json:"desired"`
+	DesiredStatus string        `json:"desired_status,omitempty"`
+	// DesiredV2Raw is the last v2 desired document, journaled for boot
+	// replay without the panel (same contract as Desired above).
+	DesiredV2Raw    json.RawMessage `json:"desired_v2,omitempty"`
+	AppliedRevision string          `json:"applied_revision,omitempty"`
+	LastAck         *agentAck       `json:"last_ack,omitempty"`
+	WS              *agentWSStatus  `json:"ws,omitempty"`
+	UpdatedAt       int64           `json:"updated_at,omitempty"`
 }
 
 func agentStatePath() string { return filepath.Join(configDir, "agent-state.json") }

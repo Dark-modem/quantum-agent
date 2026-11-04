@@ -31,6 +31,9 @@ type FakeEngine struct {
 
 	health   map[string]Health
 	counters map[string]Counters
+
+	forwardAddr map[string]string
+	forwardPort map[string]int
 }
 
 // NewFakeEngine returns a healthy, empty FakeEngine with the given ID.
@@ -47,6 +50,8 @@ func NewFakeEngine(id string) *FakeEngine {
 		running:     map[string]Instance{},
 		health:      map[string]Health{},
 		counters:    map[string]Counters{},
+		forwardAddr: map[string]string{},
+		forwardPort: map[string]int{},
 		binaryPath:  "/nonexistent/" + id,
 	}
 }
@@ -236,3 +241,28 @@ func (f *FakeEngine) Uninstall(ctx context.Context) error {
 
 // Compile-time check that FakeEngine really is a Driver.
 var _ Driver = (*FakeEngine)(nil)
+
+// SetForwardAddress scripts the ForwardAddresser capability for one
+// tunnel (empty host removes it).
+func (f *FakeEngine) SetForwardAddress(tunnelID, host string, port int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if host == "" {
+		delete(f.forwardAddr, tunnelID)
+		delete(f.forwardPort, tunnelID)
+		return
+	}
+	f.forwardAddr[tunnelID] = host
+	f.forwardPort[tunnelID] = port
+}
+
+// ForwardAddress implements the optional ForwardAddresser capability.
+func (f *FakeEngine) ForwardAddress(inst Instance) (string, int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h, ok := f.forwardAddr[inst.TunnelID]
+	if !ok {
+		return "", 0, false
+	}
+	return h, f.forwardPort[inst.TunnelID], true
+}

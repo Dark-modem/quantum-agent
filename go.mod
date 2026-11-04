@@ -10,4 +10,5 @@ require (
 
 require golang.org/x/sys v0.28.0 // indirect
 
-replace github.com/Dark-modem/quantum-protocol => ../quantum-protocol
+
+replace github.com/Dark-modem/quantum-protocol => ../wt-phase2-protocol

@@ -314,6 +314,23 @@ func agentResumeNodeBundle(bundle string) (matrixNodeApplyResult, error) {
 // the controller is reachable the desired is retried and its ack delivered.
 func agentReconcilePending(link agentLink) {
 	st := agentLoadState()
+	// v2 replay first (same contract, no panel needed): the last v2
+	// desired document is re-applied through the engine Manager +
+	// balancer + hardening module.
+	if st.DesiredV2Raw != nil && st.DesiredStatus == "pending" {
+		var d agentDesiredV2
+		if err := json.Unmarshal(st.DesiredV2Raw, &d); err == nil && d.Revision != "" {
+			log.Printf("[agent] boot replay of v2 desired revision %s (no controller needed)", d.Revision)
+			agentMu.Lock()
+			ack := agentApplyDesiredV2(&d)
+			agentMu.Unlock()
+			if ack.OK {
+				agentRecordAck(d.Revision, ack)
+			} else {
+				log.Printf("[agent] offline v2 reconcile of revision %s stays pending (retries after connect): %s", d.Revision, ack.Error)
+			}
+		}
+	}
 	if st.Desired == nil || st.DesiredStatus != "pending" {
 		return
 	}
@@ -374,8 +391,27 @@ func agentRunCommand(cmd agentCommand) agentCommandResult {
 	// Typed firewall/port (Session 1) and netopt (Session 2) operations:
 	// dispatched to their delivered handlers with a confirm gate for
 	// mutations and an audit entry on both sides.
-	if strings.HasPrefix(cmd.Op, "firewall.") || strings.HasPrefix(cmd.Op, "port.") || strings.HasPrefix(cmd.Op, "netopt.") {
-		out, err := agentRunTypedOp(cmd.Op, p)
+	if strings.HasPrefix(cmd.Op, "firewall.") || strings.HasPrefix(cmd.Op, "port.") || strings.HasPrefix(cmd.Op, "netopt.") || strings.HasPrefix(cmd.Op, "hardening.") {
+		var (
+			out any
+			err error
+		)
+		if strings.HasPrefix(cmd.Op, "hardening.") {
+			if cerr := agentOpsConfirm(cmd.Op, p); cerr != nil {
+				res.Error = cerr.Error()
+				return res
+			}
+			out, err = agentRunHardeningOp(cmd.Op, p)
+		} else {
+			out, err = agentRunTypedOp(cmd.Op, p)
+		}
+		if err == nil {
+			// Hardening results are structured (§5b): they ride Data in
+			// addition to the v1 text Output.
+			if b, merr := json.Marshal(out); merr == nil {
+				res.Data = b
+			}
+		}
 		if err != nil {
 			res.Error = err.Error()
 			return res

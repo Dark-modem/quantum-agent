@@ -227,6 +227,9 @@ type agentSession struct {
 	rt    *agentRuntime
 	ws    agentWS
 	ident agentIdentity
+	// version is the negotiated protocol version for this session
+	// (1 = v1, 2 = v2). Set from the welcome; 0 until then (v1 rules).
+	version int
 
 	wmu sync.Mutex // serializes WS writes
 
@@ -282,7 +285,13 @@ func (s *agentSession) err() error {
 }
 
 func (s *agentSession) send(typ string, payload any) error {
-	b, err := agentEncode(typ, payload)
+	var b []byte
+	var err error
+	if s.version >= agentProtoVersionV2 {
+		b, err = agentEncodeV2(typ, payload)
+	} else {
+		b, err = agentEncode(typ, payload)
+	}
 	if err != nil {
 		return err
 	}
@@ -365,13 +374,16 @@ func (s *agentSession) serve(ctx context.Context) error {
 	}()
 
 	hostname, _ := os.Hostname()
+	caps := agentCaps()
 	hello := agentHello{
-		ID:       s.ident.ID,
-		Version:  panelVersion,
-		Hostname: hostname,
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		Caps:     []string{agentCapMatrix, agentCapTraffic, agentCapHealth, agentCapNodeDetect},
+		ID:            s.ident.ID,
+		Version:       panelVersion,
+		Hostname:      hostname,
+		OS:            runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		Caps:          caps,
+		MaxVersion:    agentMaxProtoVersion,
+		EngineCatalog: agentEngineCatalog(),
 	}
 	if err := s.send(agentMsgHello, hello); err != nil {
 		s.fail(err)
@@ -387,6 +399,11 @@ func (s *agentSession) serve(ctx context.Context) error {
 		s.fail(uerr)
 		return s.err()
 	}
+	// Version negotiation (v2): the welcome carries the negotiated
+	// version when the controller speaks v2; a v1 controller omits it
+	// and the session stays v1 (MaxVersion in hello is additive, so v1
+	// controllers decode it and drop it).
+	s.version = agentNegotiateOrV1(w.Version)
 	if !w.OK {
 		// Enrollment is dead (revoked / unknown agent): supervisor may
 		// restart us, but re-enrollment is the fix.
@@ -432,7 +449,7 @@ func (s *agentSession) readLoop() {
 			s.fail(err)
 			return
 		}
-		typ, data, derr := agentDecode(raw)
+		typ, envVersion, data, derr := s.decodeInbound(raw)
 		if derr != nil {
 			log.Printf("[agent] dropping connection: %v", derr)
 			s.fail(derr)
@@ -440,6 +457,17 @@ func (s *agentSession) readLoop() {
 		}
 		switch typ {
 		case agentMsgDesired:
+			if envVersion >= agentProtoVersionV2 {
+				// v2 desired: DesiredV2 payload, applied through the
+				// engine Manager + balancer + hardening module.
+				v2data := append([]byte(nil), data...)
+				agentOpsWG.Add(1)
+				go func() {
+					defer agentOpsWG.Done()
+					s.handleDesiredV2(v2data)
+				}()
+				continue
+			}
 			var d agentDesired
 			if uerr := json.Unmarshal(data, &d); uerr != nil {
 				log.Printf("[agent] malformed desired: %v", uerr)
@@ -526,6 +554,18 @@ func (s *agentSession) heartbeatLoop(ctx context.Context) {
 }
 
 func (s *agentSession) sendHeartbeat() {
+	if s.version >= agentProtoVersionV2 {
+		hb := agentHeartbeatV2{
+			TS:      time.Now().Unix(),
+			UptimeS: int64(time.Since(s.rt.start).Seconds()),
+			State:   agentBuildStateReportV2(),
+		}
+		if err := s.send(agentMsgHeartbeat, hb); err != nil {
+			log.Printf("[agent] heartbeat failed: %v", err)
+			s.fail(err)
+		}
+		return
+	}
 	hb := agentHeartbeat{
 		TS:      time.Now().Unix(),
 		UptimeS: int64(time.Since(s.rt.start).Seconds()),
@@ -586,7 +626,10 @@ type agentEnrollResponse struct {
 }
 
 func agentCaps() []string {
-	return []string{agentCapMatrix, agentCapTraffic, agentCapHealth, agentCapNodeDetect}
+	// CapHardening (HARDENING.md §5c): advertised since Phase 2A, where
+	// the hardening module is wired into the dispatcher and desired
+	// state.
+	return []string{agentCapMatrix, agentCapTraffic, agentCapHealth, agentCapNodeDetect, agentCapHardening}
 }
 
 // agentEnroll implements `agent enroll --server <url> --token <token>`:

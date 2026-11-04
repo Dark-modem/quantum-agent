@@ -152,6 +152,11 @@ func (d *MatrixDriver) Uninstall(ctx context.Context) error { return nil }
 // Compile-time check.
 var _ engine.Driver = (*MatrixDriver)(nil)
 
+// agentV2TestDriver, when set (tests only), is registered alongside the
+// builtin drivers so hermetic tests can drive the Manager without host
+// access. Never set in production builds.
+var agentV2TestDriver engine.Driver
+
 // NewAgentEngines returns the agent's engine registry with every builtin
 // driver registered. Callers (the run loop, the lab) add their own
 // drivers on top.
@@ -159,6 +164,11 @@ func NewAgentEngines() (*engine.Registry, error) {
 	reg := engine.NewRegistry()
 	if err := reg.Register(NewMatrixDriver()); err != nil {
 		return nil, err
+	}
+	if agentV2TestDriver != nil {
+		if err := reg.Register(agentV2TestDriver); err != nil {
+			return nil, err
+		}
 	}
 	return reg, nil
 }
@@ -175,4 +185,39 @@ func AgentEngines() (*engine.Registry, error) {
 		matrixDriverReg, _ = NewAgentEngines()
 	})
 	return matrixDriverReg, nil
+}
+
+// ForwardAddress implements the optional engine.ForwardAddresser
+// capability: new connections balanced onto a Matrix tunnel are
+// delivered to the instance's mesh address on the foreign side (the hub
+// IP for a node, the own mesh IP is NOT useful — a hub forwards to its
+// nodes, so the address is the hub's mesh IP when we are a node, or the
+// first registered node's mesh IP when we are the hub). The instance
+// state carries what pairing established; unknown → ok=false.
+func (d *MatrixDriver) ForwardAddress(inst engine.Instance) (string, int, bool) {
+	var p matrixDriverParams
+	if err := json.Unmarshal(inst.Params, &p); err != nil {
+		return "", 0, false
+	}
+	in := matrixInstance{ID: strings.TrimSpace(p.Instance)}
+	if !in.valid() {
+		return "", 0, false
+	}
+	st := loadMatrixInstance(in)
+	if !st.Enabled || st.Network != in.network() {
+		return "", 0, false
+	}
+	if st.Role == "node" {
+		if st.Addr == "" {
+			return "", 0, false
+		}
+		return st.Addr, 0, true
+	}
+	// Hub: forward to the first reachable registered node's mesh IP.
+	for _, peer := range st.Peers {
+		if peer.IP != "" {
+			return peer.IP, 0, true
+		}
+	}
+	return "", 0, false
 }
