@@ -150,14 +150,16 @@ say "configuring the mesh (2 iran DCs, 1 foreign DC, 6 servers)..."
 api POST /api/mesh/datacenters '{"name":"Drak","kind":"iran","price_coefficient":1.0}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Chekavak","kind":"iran","price_coefficient":1.5}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Hetzner Germany","kind":"foreign","price_coefficient":1.0}' >/dev/null
-DC_DRAK=$(api GET /api/mesh/datacenters | jq_get "[d['id'] for d in json.load(sys.stdin)['datacenters'] if d['name']=='Drak'][0]")
-DC_HZ=$(api GET /api/mesh/datacenters | jq_get "[d['id'] for d in json.load(sys.stdin)['datacenters'] if d['name']=='Hetzner Germany'][0]")
+DC_RAW=$(api GET /api/mesh/datacenters)
+echo "[e2e] DC_RAW=${DC_RAW:0:200}"
+DC_DRAK=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']=='Drak'][0]")
+DC_HZ=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']=='Hetzner Germany'][0]")
 [ -n "$DC_DRAK" ] && [ -n "$DC_HZ" ] && ok "datacenters created ($DC_DRAK/$DC_HZ)" || bad "datacenters ($DC_DRAK/$DC_HZ)"
 
 declare -A SRV_ID
 declare -A SRV_IP
 mkserver() { # name role dcid ip
-  SRV_ID[$1]=$(api POST /api/mesh/servers "{\"name\":\"$1\",\"role\":\"$2\",\"datacenter_id\":$3,\"address\":\"$4\"}" | jq_get "json.load(sys.stdin)['id']")
+  SRV_ID[$1]=$(api POST /api/mesh/servers "{\"name\":\"$1\",\"role\":\"$2\",\"datacenter_id\":$3,\"address\":\"$4\"}" | jq_get "d['id']")
   SRV_IP[$1]=$4
   if [ -z "${SRV_ID[$1]}" ]; then bad "server $1 creation returned no id"; fi
 }
@@ -182,12 +184,12 @@ GEN2=$(api POST /api/mesh/topologies/generate "{
   \"iran_servers\":[${SRV_ID[ir-chk-1]},${SRV_ID[ir-chk-2]}],
   \"foreign_servers\":[${SRV_ID[hz-fra-1]},${SRV_ID[hz-fra-2]}],
   \"tunnels_per_pair\":2,\"engines\":[\"matrix\",\"fake\"],\"enabled\":true}")
-TOPO1=$(echo "$GEN1" | jq_get "json.load(sys.stdin)['topology_id']" 2>"$LAB/gen1.err")
-N1=$(echo "$GEN1" | jq_get "len(json.load(sys.stdin)['tunnels'])" 2>/dev/null)
+TOPO1=$(echo "$GEN1" | jq_get "d['topology_id']" 2>"$LAB/gen1.err")
+N1=$(echo "$GEN1" | jq_get "len(d['tunnels'])" 2>/dev/null)
 [ "$N1" = "8" ] && ok "drak-hz generated (2x2x2=8 tunnels)" || bad "drak-hz generated ($N1 tunnels) raw=$GEN1 && tail -12 $LAB/api.log 2>/dev/null"
 
 # Patch every fake tunnel's engine_params with its remote server's lab IP.
-python - "$PANEL_PORT" "$LAB/admin.cookies" "$CSRF" "$SINK_PORT" <<'PYEOF'
+python3 - "$PANEL_PORT" "$LAB/admin.cookies" "$CSRF" "$SINK_PORT" <<'PYEOF'
 import json, sys, urllib.request
 
 port, cookies, csrf, sink = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
@@ -205,7 +207,7 @@ def call(method, path, body=None):
 servers = {s["name"]: s["address"] for s in call("GET", "/api/mesh/servers")}
 patched = 0
 for tname in ("drak-hz", "chekavak-hz"):
-    topos = call("GET", "/api/mesh/topologies")
+    topos = call("GET", "/api/mesh/topologies")["topologies"]
     topo = [t for t in topos if t["name"] == tname][0]
     full = call("GET", f"/api/mesh/topologies/{topo['id']}")
     for t in full.get("tunnels", []):
@@ -223,21 +225,27 @@ check $? "fake tunnel engine_params patched (lab_addr = remote lab IP)"
 
 # 4. enroll + link 6 real agents --------------------------------------------
 say "enrolling 6 real agents..."
-ENROLL_FILES=""
 for i in "${!NS_ALL[@]}"; do
   ns=${NS_ALL[$i]}; name=${ns#q-}; ipaddr=${IP_ALL[$i]}
   role=iran; case "$ns" in *fra*) role=foreign;; esac
   sid=${SRV_ID[$name]}
-  tok=$(api POST /api/agents/tokens "{\"role\":\"$role\",\"label\":\"$name\",\"expires_days\":1}" | jq_get "json.load(sys.stdin)['token']")
+  tok=$(api POST /api/agents/tokens "{\"role\":\"$role\",\"label\":\"$name\",\"expires_days\":1}" | jq_get "d['token']")
+  # The enroll URL MUST carry the panel's base path (the real panel
+  # randomizes it) — and the panel IP is reachable from every netns via
+  # the bridge gateway.
   sudo ip netns exec "$ns" env GRE_PANEL_DIR=$LAB/agents/$name \
-    $LAB/quantum-agent enroll --server "http://$PANEL_IP:$PANEL_PORT" --token "$tok" --name "$name" \
+    $LAB/quantum-agent enroll --server "http://$PANEL_IP:$PANEL_PORT$PANEL_BASE" --token "$tok" --name "$name" \
     > "$LAB/enroll-$name.log" 2>&1
   aid=$(sudo ip netns exec "$ns" env GRE_PANEL_DIR=$LAB/agents/$name \
-    $LAB/quantum-agent status 2>/dev/null | jq_get "json.load(sys.stdin)['id']" 2>/dev/null)
-  echo "$name=$aid" >> "$LAB/agent-ids"
+    $LAB/quantum-agent status 2>/dev/null | jq_get "d['id']" 2>/dev/null)
+  if [ -z "$aid" ]; then
+    bad "agent $name enroll failed"
+    echo "[e2e] enroll-$name log: $(tail -3 "$LAB/enroll-$name.log" 2>/dev/null)"
+    continue
+  fi
   api POST /api/mesh/agents/$aid/link "{\"server_id\":$sid}" >/dev/null
 done
-AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(json.load(sys.stdin)['agents'])")
+AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(d['agents'])")
 N_AGENTS=$(echo "$AGENTS" | jq_get "len(d)")
 [ "$N_AGENTS" = "6" ] && ok "6 agents enrolled + linked" || bad "agents enrolled ($N_AGENTS/6)"
 
@@ -301,7 +309,7 @@ count_sink() { sudo ip netns exec "$1" sh -c "grep -c 'conn-' /tmp/quantum-e2e/s
 C1=$(count_sink q-hz-fra-1); C2=$(count_sink q-hz-fra-2)
 TOTAL=$((C1+C2))
 [ "$TOTAL" -ge $((N_CONN/2)) ] && ok "forwarded traffic flows ($TOTAL/$N_CONN delivered)" || bad "forwarded traffic ($TOTAL/$N_CONN)"
-P1=$((C1*100/(TOTAL>0?TOTAL:1))); P2=$((C2*100/(TOTAL>0?TOTAL:1)))
+if [ "$TOTAL" -gt 0 ]; then P1=$((C1*100/TOTAL)); P2=$((C2*100/TOTAL)); else P1=0; P2=0; fi
 say "measured split: hz-fra-1=$C1 (${P1}%) hz-fra-2=$C2 (${P2}%) — desired weights 70/30 (both tunnels are 'fake' with equal capability)"
 [ "$TOTAL" -gt 0 ] && ok "weighted split measured (${P1}%/${P2}%)" || bad "weighted split"
 
@@ -382,7 +390,7 @@ curl -s -c $LAB/admin.cookies -X POST "http://127.0.0.1:$PANEL_PORT/api/login" \
 CSRF=$(python3 -c "import json;print(json.load(open('$LAB/login2.json')).get('csrf_token',''))")
 # agents reconnect; give them time, then count distinct applied revisions
 sleep 8
-REVS=$(api GET /api/mesh/agents | jq_get "len({a.get('applied_revision','') for a in json.load(sys.stdin)['agents'] if a.get('applied_revision')})")
+REVS=$(api GET /api/mesh/agents | jq_get "len({a.get('applied_revision','') for a in d['agents'] if a.get('applied_revision')})")
 [ "$REVS" -le 2 ] && ok "panel restart: no revision storm ($REVS distinct applied revisions)" || bad "revision storm ($REVS)"
 
 # 12. wire/payload counters in the usage API ----------------------------------
