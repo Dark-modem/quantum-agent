@@ -100,6 +100,19 @@ func (m *Manager) RunningCount() int {
 	return len(m.running)
 }
 
+// Instance returns a copy of one running instance (with its engine
+// params). The balancer needs the params the Status view deliberately
+// omits — drivers implement ForwardAddresser against the full instance.
+func (m *Manager) Instance(id string) (Instance, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	slot, ok := m.running[id]
+	if !ok {
+		return Instance{}, false
+	}
+	return slot.inst, true
+}
+
 // Reconcile converges to (engines, tunnels). It is safe to call
 // repeatedly with the same desired state (idempotent).
 func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels []TunnelSpec) ReconcileResult {

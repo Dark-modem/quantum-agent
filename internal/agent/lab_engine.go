@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
@@ -106,7 +107,61 @@ func (l *labFakeDriver) Validate(params json.RawMessage) error {
 // EnsureBinary implements Driver: nothing to download.
 func (l *labFakeDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
 
-// Start implements Driver: open the sink listener and count bytes.
+// labOwnsAddr reports whether this host owns addr (the lab contract:
+// engine_params.lab_addr is the REMOTE server's address, so the far end
+// binds the sink and the near end probes it). Phase-5 bug fix: the sink
+// used to bind on EVERY instance — on the near end it squatted the
+// forward listen port (intercepting the very connections the balancer
+// must DNAT), and on both ends the second instance per host failed to
+// bind ("address already in use"), leaving one lab tunnel per host.
+var labOwnsAddr = func(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return true // unspecified: this host by definition
+	}
+	ips := []string{host}
+	if net.ParseIP(host) == nil {
+		resolved, err := net.LookupHost(host)
+		if err != nil {
+			return false
+		}
+		ips = resolved
+	}
+	own := map[string]bool{"127.0.0.1": true, "::1": true}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipn, ok := a.(*net.IPNet); ok {
+				own[ipn.IP.String()] = true
+			}
+		}
+	}
+	for _, ip := range ips {
+		if own[net.ParseIP(ip).String()] {
+			return true
+		}
+	}
+	return false
+}
+
+// labProbeTCP is the near end's end-to-end health probe (the far end's
+// sink IS the tunnel's far side). Seam for tests.
+var labProbeTCP = func(host string, port int, timeout time.Duration) bool {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(port)), timeout)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+// Start implements Driver: the FAR end (lab_addr is one of this host's
+// addresses) opens the sink listener and counts received bytes; the NEAR
+// end binds nothing (it would squat the forward listen port) and its
+// health is a real probe to the far end.
 func (l *labFakeDriver) Start(ctx context.Context, inst engine.Instance) error {
 	var p labParams
 	if err := json.Unmarshal(inst.Params, &p); err != nil {
@@ -122,15 +177,24 @@ func (l *labFakeDriver) Start(ctx context.Context, inst engine.Instance) error {
 	}
 	l.mu.Unlock()
 
+	l.mu.Lock()
+	l.running[inst.TunnelID] = inst
+	l.mu.Unlock()
+	if !labOwnsAddr(p.LabAddr) {
+		return nil // near end: no listener; health probes the far end
+	}
+
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p.LabPort))
 	if err != nil {
+		l.mu.Lock()
+		delete(l.running, inst.TunnelID)
+		l.mu.Unlock()
 		return fmt.Errorf("fake sink on %d: %w", p.LabPort, err)
 	}
 	counter := &atomic.Uint64{}
 	l.mu.Lock()
 	l.sinks[inst.TunnelID] = ln
 	l.payload[inst.TunnelID] = counter
-	l.running[inst.TunnelID] = inst
 	l.mu.Unlock()
 	go func() {
 		for {
@@ -148,13 +212,14 @@ func (l *labFakeDriver) Start(ctx context.Context, inst engine.Instance) error {
 	return nil
 }
 
-// Stop implements Driver: close the sink.
+// Stop implements Driver: close the sink (far end) and forget the instance.
 func (l *labFakeDriver) Stop(inst engine.Instance) error {
 	l.mu.Lock()
 	if ln, ok := l.sinks[inst.TunnelID]; ok {
 		ln.Close()
 		delete(l.sinks, inst.TunnelID)
 	}
+	delete(l.running, inst.TunnelID)
 	l.mu.Unlock()
 	return nil
 }
@@ -162,8 +227,20 @@ func (l *labFakeDriver) Stop(inst engine.Instance) error {
 // Reload implements Driver: params are fixed in the lab (restart path).
 func (l *labFakeDriver) Reload(inst engine.Instance) error { return engine.ErrRestartRequired }
 
-// Health implements Driver.
+// Health implements Driver: the far end reports its listener; the near
+// end reports a real end-to-end probe of the far end's sink (the tunnel
+// health the balancer's "engine" probe mode consumes).
 func (l *labFakeDriver) Health(inst engine.Instance) engine.Health {
+	var p labParams
+	_ = json.Unmarshal(inst.Params, &p)
+	if p.LabAddr != "" && !labOwnsAddr(p.LabAddr) {
+		ok := labProbeTCP(p.LabAddr, p.LabPort, 700*time.Millisecond)
+		detail := "lab fake: far end reachable"
+		if !ok {
+			detail = "lab fake: far end unreachable"
+		}
+		return engine.Health{OK: ok, Detail: detail, LatencyMs: -1}
+	}
 	l.mu.Lock()
 	_, listening := l.sinks[inst.TunnelID]
 	l.mu.Unlock()

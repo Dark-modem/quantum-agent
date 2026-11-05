@@ -17,6 +17,7 @@ package agent
 // in the tests). Zero forwards = zero goroutines (light-agent rule).
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -79,6 +80,17 @@ type balHealthState struct {
 	lastProbe  time.Time
 }
 
+// balTargetDiag is one candidate target's evaluation outcome for one
+// forward rule (structured diagnostics: the report and the debug log).
+type balTargetDiag struct {
+	Forward string `json:"forward"`
+	Tunnel  string `json:"tunnel"`
+	Reason  string `json:"reason"` // selected | unhealthy | weight-0 | no-forward-address
+	Health  string `json:"health,omitempty"`
+	Weight  int    `json:"weight,omitempty"`
+	Addr    string `json:"addr,omitempty"`
+}
+
 // balTickReport is one health+apply pass, for tests and the report.
 type balTickReport struct {
 	Evaluated    int
@@ -87,6 +99,7 @@ type balTickReport struct {
 	DetectedDown []string
 	DetectedUp   []string
 	Errors       []string
+	Targets      []balTargetDiag
 }
 
 type forwardBalancer struct {
@@ -97,6 +110,7 @@ type forwardBalancer struct {
 	desired      protocol.DesiredV2
 	health       map[string]*balHealthState
 	lastRule     string // last applied script (skip no-op applies)
+	lastDiagKey  string // last logged target evaluation (change-keyed log)
 	lastForwards []protocol.ForwardRuntime
 	stop         chan struct{}
 	running      bool
@@ -188,6 +202,22 @@ func (b *forwardBalancer) tick() balTickReport {
 	for _, g := range d.TargetGroups {
 		groups[g.ID] = g
 	}
+	// diag records one candidate's evaluation for the structured report
+	// (and the change-keyed debug log at the end of the pass).
+	diag := func(forward, tid, reason string, h *balHealthState, fa *forwardAddr, weight int) {
+		entry := balTargetDiag{Forward: forward, Tunnel: tid, Reason: reason, Weight: weight}
+		if h != nil {
+			if h.healthy {
+				entry.Health = "up"
+			} else {
+				entry.Health = "down"
+			}
+		}
+		if fa != nil {
+			entry.Addr = net.JoinHostPort(fa.host, fmt.Sprint(fa.port))
+		}
+		rep.Targets = append(rep.Targets, entry)
+	}
 	status := b.mgr.Status()
 	byID := map[string]engine.TunnelStatus{}
 	for _, st := range status {
@@ -222,7 +252,7 @@ func (b *forwardBalancer) tick() balTickReport {
 		case hc.Probe == "tcp" && st.RemoteServer != "":
 			// TCP probe hits the forward target through the tunnel
 			// endpoint; the endpoint host doubles as the probe target.
-			if fa, hasAddr := forwardAddressOf(b.reg, st); hasAddr {
+			if fa, hasAddr := forwardAddressOf(b.mgr, b.reg, st); hasAddr {
 				ok = balancerProbeTCP(fa.host, orDefault(fa.port, 22), time.Duration(hc.TimeoutMS)*time.Millisecond)
 			}
 		default: // "engine" | "icmp": the driver's own health view
@@ -300,16 +330,20 @@ func (b *forwardBalancer) tick() balTickReport {
 			}
 			h := b.health[tid]
 			if h == nil || !h.healthy || !st.Running {
+				diag(fr.ID, tid, "unhealthy", b.health[tid], nil, 0)
 				continue
 			}
 			w, okW := resolveWeight(d.Balancing.Weights, st.TopologyID, st.LocalServer, st.RemoteServer, tid)
 			if !okW || w <= 0 {
+				diag(fr.ID, tid, "weight-0", h, nil, w)
 				continue // weight 0 = excluded from balancing
 			}
-			fa, hasAddr := forwardAddressOf(b.reg, st)
+			fa, hasAddr := forwardAddressOf(b.mgr, b.reg, st)
 			if !hasAddr || fa.host == "" {
+				diag(fr.ID, tid, "no-forward-address", h, nil, w)
 				continue
 			}
+			diag(fr.ID, tid, "selected", h, &fa, w)
 			targets = append(targets, balTarget{TunnelID: tid, IP: fa.host, Port: fa.port, Weight: w})
 			runtime.Targets = append(runtime.Targets, tid)
 			runtime.Weights = append(runtime.Weights, w)
@@ -329,6 +363,18 @@ func (b *forwardBalancer) tick() balTickReport {
 		}
 	}
 	b.lastForwards = forwards
+	// Structured diagnostics, logged when the evaluation changes
+	// (reconcile, health flip, weight change) — never every tick.
+	diagKey := ""
+	for _, t := range rep.Targets {
+		diagKey += fmt.Sprintf("%s|%s|%s|%s|%d;", t.Forward, t.Tunnel, t.Reason, t.Health, t.Weight)
+	}
+	if diagKey != b.lastDiagKey {
+		if out, err := json.Marshal(rep.Targets); err == nil {
+			log.Printf("[balancer] targets: %s", out)
+		}
+		b.lastDiagKey = diagKey
+	}
 	return rep
 }
 
@@ -384,7 +430,12 @@ type forwardAddr struct {
 	port int
 }
 
-func forwardAddressOf(reg *engine.Registry, st engine.TunnelStatus) (forwardAddr, bool) {
+// forwardAddressOf resolves a tunnel's forward address via the driver's
+// ForwardAddresser against the MANAGER'S actual instance. Phase-5 bug
+// fix: this used to fabricate a params-less Instance — drivers read the
+// address from engine_params, so every target resolved to "no address"
+// and the balancer rendered zero DNAT targets (the 100/0 e2e artifact).
+func forwardAddressOf(mgr *engine.Manager, reg *engine.Registry, st engine.TunnelStatus) (forwardAddr, bool) {
 	drv, ok := reg.Driver(st.Engine)
 	if !ok {
 		return forwardAddr{}, false
@@ -393,11 +444,9 @@ func forwardAddressOf(reg *engine.Registry, st engine.TunnelStatus) (forwardAddr
 	if !canAddr {
 		return forwardAddr{}, false
 	}
-	inst := engine.Instance{ // the manager keeps params; status carries ids
-		TunnelID:     st.TunnelID,
-		TopologyID:   st.TopologyID,
-		LocalServer:  st.LocalServer,
-		RemoteServer: st.RemoteServer,
+	inst, okInst := mgr.Instance(st.TunnelID)
+	if !okInst {
+		return forwardAddr{}, false
 	}
 	host, port, ok := fa.ForwardAddress(inst)
 	if !ok || host == "" {

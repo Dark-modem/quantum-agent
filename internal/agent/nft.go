@@ -96,6 +96,18 @@ func renderForwardChain(proto string, r forwardRender) string {
 		// tunnel for its whole lifetime.
 		sel = fmt.Sprintf("jhash ip saddr mod %d", total)
 	}
+	// Per-target ports: lab sinks get one port per tunnel, so targets to
+	// the same foreign host differ by port. The concatenated form
+	// `<addr> . <port>` (verified with nft -c against nftables 1.0.9)
+	// expresses that; the legacy single-port suffix stays for the
+	// uniform case.
+	perTargetPort := false
+	for _, t := range sorted {
+		if t.Port != sorted[0].Port {
+			perTargetPort = true
+			break
+		}
+	}
 	var elems []string
 	lo := 0
 	for _, t := range sorted {
@@ -107,17 +119,21 @@ func renderForwardChain(proto string, r forwardRender) string {
 		if hi >= total {
 			hi = total - 1
 		}
-		// Elements are addresses only; the (fixed) target port rides as
-		// a suffix after the map — the form validated against nft 1.0.9
-		// (nft -c): `map { 0-99 : <addr> } : <port>`.
-		elems = append(elems, fmt.Sprintf("%d-%d : %s", lo, hi, t.IP))
+		if perTargetPort {
+			elems = append(elems, fmt.Sprintf("%d-%d : %s . %d", lo, hi, t.IP, t.Port))
+		} else {
+			// Elements are addresses only; the (fixed) target port rides
+			// as a suffix after the map — the form validated against
+			// nft 1.0.9 (nft -c): `map { 0-99 : <addr> } : <port>`.
+			elems = append(elems, fmt.Sprintf("%d-%d : %s", lo, hi, t.IP))
+		}
 		lo += w
 		if lo >= total {
 			break
 		}
 	}
 	fmt.Fprintf(&b, "  %s dport %d dnat to %s map { %s }", proto, r.ListenPort, sel, strings.Join(elems, ", "))
-	if r.TargetPort > 0 {
+	if !perTargetPort && r.TargetPort > 0 {
 		fmt.Fprintf(&b, " : %d", r.TargetPort)
 	}
 	b.WriteString("\n }\n")
