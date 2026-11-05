@@ -1,10 +1,10 @@
 package agent
 
-// Rolling 60-second tunnel health for Matrix instances. The probe loop runs
-// one round per instance per 60s tick: three ICMP pings per remote side
-// (hub: each paired peer; node: the hub IP) through the matrixExec funnel,
-// plus the service and interface state. A few packets per minute — never a
-// bandwidth test.
+// Rolling tunnel health for Matrix instances. The probe loop runs one
+// round per instance per tick (10s default): three ICMP pings per remote
+// side (hub: each paired peer; node: the hub IP) through the matrixExec
+// funnel, plus the service and interface state. A few packets per tick —
+// never a bandwidth test.
 
 import (
 	"context"
@@ -82,8 +82,11 @@ func agentIfaceUp(name string) bool {
 	return strings.Contains(out, "state UP") // plain-text fallback
 }
 
-// agentHealthInterval is the probe period; a seam for tests.
-var agentHealthInterval = 60 * time.Second
+// agentHealthInterval is the probe period; a seam for tests. 10s (Phase-4):
+// the probe is 3 tiny ICMP packets per target — even at 10s that is never a
+// bandwidth test, and a dead mesh is reported within one tick + probe time
+// instead of up to a minute.
+var agentHealthInterval = 10 * time.Second
 
 // agentHealthLatest keeps the newest health window per matrix instance in
 // memory; StateReport.Health carries these.
@@ -113,7 +116,7 @@ func agentProbeAll() {
 }
 
 // agentProbeInstance runs one probe cycle for in and stores the resulting
-// 60s window. Instances that are not an enabled owned network report
+// probe window. Instances that are not an enabled owned network report
 // service=false → quality "down".
 func agentProbeInstance(in matrixInstance) agentTunnelHealth {
 	matrixMu.Lock()
@@ -135,7 +138,7 @@ func agentProbeInstance(in matrixInstance) agentTunnelHealth {
 	matrixMu.Unlock()
 
 	h := agentTunnelHealth{
-		Instance: in.ID, WindowS: 60, Samples: 3,
+		Instance: in.ID, WindowS: int(agentHealthInterval.Seconds()), Samples: 3,
 		Service: service, IfaceUp: service && agentIfaceUp(in.iface()),
 	}
 	var samples []float64

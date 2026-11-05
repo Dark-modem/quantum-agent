@@ -722,7 +722,7 @@ func TestAgentProbeInstance(t *testing.T) {
 	if h.LatencyMs != 12 || h.JitterMs != 2 || h.LossPct != 0 {
 		t.Fatalf("latency %v jitter %v loss %v", h.LatencyMs, h.JitterMs, h.LossPct)
 	}
-	if h.WindowS != 60 || h.Samples != 3 || h.Quality != "good" {
+	if h.WindowS != int(agentHealthInterval.Seconds()) || h.Samples != 3 || h.Quality != "good" {
 		t.Fatalf("window/samples/quality = %d/%d/%s", h.WindowS, h.Samples, h.Quality)
 	}
 	if snap := agentHealthSnapshot(); len(snap) != 1 || snap[0].Instance != "matrix" {
