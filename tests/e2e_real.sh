@@ -150,7 +150,9 @@ api() { # api METHOD PATH [body] — prints the response body, logs the code
   echo "$m $p http=$code" >> $LAB/api.log
   echo "${out%$'\n'*}"
 }
-jq_get() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)" 2>/dev/null || echo ""; }
+jq_get() { # jq_get FILE python_expr
+  python3 -c "import json;d=json.load(open('$1'));print($2)" 2>/dev/null || echo ""
+}
 
 # 3. mesh configuration ------------------------------------------------------
 say "configuring the mesh (2 iran DCs, 1 foreign DC, 6 servers)..."
@@ -166,7 +168,8 @@ DC_HZ=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']
 declare -A SRV_ID
 declare -A SRV_IP
 mkserver() { # name role dcid ip
-  SRV_ID[$1]=$(api POST /api/mesh/servers "{\"name\":\"$1\",\"role\":\"$2\",\"datacenter_id\":$3,\"address\":\"$4\"}" | jq_get "d['id']")
+  api POST /api/mesh/servers "{\"name\":\"$1\",\"role\":\"$2\",\"datacenter_id\":$3,\"address\":\"$4\"}" > $LAB/srv-tmp.json
+  SRV_ID[$1]=$(jq_get $LAB/srv-tmp.json "d['id']")
   SRV_IP[$1]=$4
   if [ -z "${SRV_ID[$1]}" ]; then bad "server $1 creation returned no id"; fi
 }
@@ -191,8 +194,9 @@ GEN2=$(api POST /api/mesh/topologies/generate "{
   \"iran_servers\":[${SRV_ID[ir-chk-1]},${SRV_ID[ir-chk-2]}],
   \"foreign_servers\":[${SRV_ID[hz-fra-1]},${SRV_ID[hz-fra-2]}],
   \"tunnels_per_pair\":2,\"engines\":[\"matrix\",\"fake\"],\"enabled\":true}")
-TOPO1=$(echo "$GEN1" | jq_get "d['topology_id']" 2>"$LAB/gen1.err")
-N1=$(echo "$GEN1" | jq_get "len(d['tunnels'])" 2>/dev/null)
+echo "$GEN1" > $LAB/gen1.json
+TOPO1=$(jq_get $LAB/gen1.json "d['topology_id']")
+N1=$(jq_get $LAB/gen1.json "len(d['tunnels'])")
 [ "$N1" = "8" ] && ok "drak-hz generated (2x2x2=8 tunnels)" || bad "drak-hz generated ($N1 tunnels) raw=$GEN1 && tail -12 $LAB/api.log 2>/dev/null"
 
 # Patch every fake tunnel's engine_params with its remote server's lab IP.
@@ -236,7 +240,8 @@ for i in "${!NS_ALL[@]}"; do
   ns=${NS_ALL[$i]}; name=${ns#q-}; ipaddr=${IP_ALL[$i]}
   role=iran; case "$ns" in *fra*) role=foreign;; esac
   sid=${SRV_ID[$name]}
-  tok=$(api POST /api/agents/tokens "{\"role\":\"$role\",\"label\":\"$name\",\"expires_days\":1}" | jq_get "d['token']")
+  api POST /api/agents/tokens "{\"role\":\"$role\",\"label\":\"$name\",\"expires_days\":1}" > $LAB/tok-tmp.json
+  tok=$(jq_get $LAB/tok-tmp.json "d['token']")
   # The enroll URL MUST carry the panel's base path (the real panel
   # randomizes it) — and the panel IP is reachable from every netns via
   # the bridge gateway.
@@ -252,7 +257,8 @@ for i in "${!NS_ALL[@]}"; do
   fi
   api POST /api/mesh/agents/$aid/link "{\"server_id\":$sid}" >/dev/null
 done
-AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(d['agents'])")
+api GET /api/mesh/agents > $LAB/agents.json
+AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
 N_AGENTS=$(echo "$AGENTS" | jq_get "len(d)")
 [ "$N_AGENTS" = "6" ] && ok "6 agents enrolled + linked" || bad "agents enrolled ($N_AGENTS/6)"
 
@@ -277,13 +283,15 @@ agentTestWait() { # desc seconds command...
 # Re-fetch: the agents just connected and negotiated — the stale list
 # from enrollment time still shows proto_version 0.
 wait_v2() {
-  AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(json.load(sys.stdin)['agents'])")
+  api GET /api/mesh/agents > $LAB/agents.json
+  AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
   [ "$(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")" = "6" ]
 }
 if agentTestWait "v2 negotiation" 20 wait_v2; then
   ok "v2 negotiated on all 6 agents"
 else
-  AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(json.load(sys.stdin)['agents'])")
+  api GET /api/mesh/agents > $LAB/agents.json
+  AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
   bad "v2 negotiated ($(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
   for ns in "${NS_ALL[@]}"; do
     nm=${ns#q-}
@@ -411,7 +419,8 @@ curl -s -c $LAB/admin.cookies -X POST "http://127.0.0.1:$PANEL_PORT/api/login" \
 CSRF=$(python3 -c "import json;print(json.load(open('$LAB/login2.json')).get('csrf_token',''))")
 # agents reconnect; give them time, then count distinct applied revisions
 sleep 8
-REVS=$(api GET /api/mesh/agents | jq_get "len({a.get('applied_revision','') for a in d['agents'] if a.get('applied_revision')})")
+api GET /api/mesh/agents > $LAB/agents-revs.json
+REVS=$(jq_get $LAB/agents-revs.json "len({a.get('applied_revision','') for a in d['agents'] if a.get('applied_revision')})")
 [ "$REVS" -le 2 ] && ok "panel restart: no revision storm ($REVS distinct applied revisions)" || bad "revision storm ($REVS)"
 
 # 12. wire/payload counters in the usage API ----------------------------------
