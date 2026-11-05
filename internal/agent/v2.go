@@ -217,6 +217,7 @@ func agentApplyDesiredV2(d *protocol.DesiredV2) agentAck {
 		log.Printf("[agent] v2 reconcile reported %d error(s)", len(res.Errors))
 		ack.Detail = map[string]string{}
 		for i, e := range res.Errors {
+			log.Printf("[agent] v2 reconcile error: %s", e)
 			ack.Detail[fmt.Sprintf("reconcile_error_%d", i)] = e
 		}
 	}
