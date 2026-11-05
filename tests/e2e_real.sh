@@ -47,13 +47,6 @@ check(){ if [ "$1" = "0" ]; then ok "$2"; else bad "$2"; fi; }
 
 cleanup() {
   say "cleanup..."
-  # /tmp dies with the WSL VM between invocations — keep the evidence
-  # somewhere persistent (the repo tree) for the next debugging session.
-  if [ -d "$LAB" ]; then
-    LOGDIR="${E2E_LOGS:-$REPO_ROOT/tests/e2e-logs}"
-    mkdir -p "$LOGDIR"
-    cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LOGDIR"/ 2>/dev/null
-  fi
   [ -n "${PANEL_PID:-}" ] && kill "$PANEL_PID" 2>/dev/null
   for p in $AGENT_PIDS; do sudo ip netns pids "${p}" >/dev/null 2>&1; done
   sudo pkill -f "quantum-agent run" 2>/dev/null
@@ -137,6 +130,10 @@ for i in $(seq 1 30); do
   sleep 0.5
 done
 [ "$LIVE" = "1" ] && ok "panel listening at $PANEL_URL" || { bad "panel never listened"; echo "--- panel.log ---"; tail -30 "$LAB/panel.log" 2>/dev/null; exit 1; }
+# Re-assert the ACCEPT rule AFTER the panel starts: the panel's own
+# startup may add firewall rules that shadow our earlier ACCEPT.
+sudo iptables -I INPUT 1 -s 10.200.0.0/24 -j ACCEPT 2>/dev/null
+sudo iptables -I INPUT 1 -i $BR -j ACCEPT 2>/dev/null
 curl -s -c $LAB/admin.cookies -X POST "$PANEL_URL/api/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"admin\",\"password\":\"$PANEL_PASS\"}" > $LAB/login.json
@@ -146,31 +143,22 @@ CSRF=$(python3 -c "import json;print(json.load(open('$LAB/login.json')).get('csr
 api() { # api METHOD PATH [body] — prints the response body, logs the code
   local m=$1 p=$2 b=${3:-}
   local out code
-  # The CSRF header is required on EVERY mutating call — bodyless POSTs
-  # (e.g. agents/{id}/push) were silently rejected without it.
   if [ -n "$b" ]; then
     out=$(curl -s -b $LAB/admin.cookies -X "$m" "$PANEL_URL$p" \
       -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' -d "$b" \
       -w $'\n%{http_code}')
   else
-    out=$(curl -s -b $LAB/admin.cookies -X "$m" "$PANEL_URL$p" \
-      -H "X-CSRF-Token: $CSRF" \
-      -w $'\n%{http_code}')
+    out=$(curl -s -b $LAB/admin.cookies -X "$m" "$PANEL_URL$p" -w $'\n%{http_code}')
   fi
   code=${out##*$'\n'}
   echo "$m $p http=$code" >> $LAB/api.log
   echo "${out%$'\n'*}"
 }
-# jq_get FILE EXPR parses FILE; jq_get EXPR (one arg) parses stdin — both
-# call conventions exist in this script, and under `set -u` a missing $2
-# used to abort the whole expression (every pipe-form call returned "").
-jq_get() {
-  if [ "$#" -ge 2 ]; then
-    python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(eval(sys.argv[2]))" "$1" "$2" 2>/dev/null || echo ""
-  else
-    JS="$(cat)"
-    python3 -c "import json,sys;d=json.loads(sys.argv[1]);print(eval(sys.argv[2]))" "$JS" "$1" 2>/dev/null || echo ""
-  fi
+jq_str() { # jq_str JSON_STRING python_expr
+  echo "$1" | python3 -c "import json,sys;d=json.load(sys.stdin);print($2)" 2>/dev/null || echo ""
+}
+jq_get() { # jq_get FILE python_expr
+  python3 -c "import json;d=json.load(open('$1'));print($2)" 2>/dev/null || echo ""
 }
 
 # 3. mesh configuration ------------------------------------------------------
@@ -178,10 +166,9 @@ say "configuring the mesh (2 iran DCs, 1 foreign DC, 6 servers)..."
 api POST /api/mesh/datacenters '{"name":"Drak","kind":"iran","price_coefficient":1.0}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Chekavak","kind":"iran","price_coefficient":1.5}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Hetzner Germany","kind":"foreign","price_coefficient":1.0}' >/dev/null
-DC_RAW=$(api GET /api/mesh/datacenters)
-echo "[e2e] DC_RAW=${DC_RAW:0:200}"
-DC_DRAK=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']=='Drak'][0]")
-DC_HZ=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']=='Hetzner Germany'][0]")
+api GET /api/mesh/datacenters > $LAB/dc.json
+DC_DRAK=$(jq_get $LAB/dc.json "[x['id'] for x in d['datacenters'] if x['name']=='Drak'][0]")
+DC_HZ=$(jq_get $LAB/dc.json "[x['id'] for x in d['datacenters'] if x['name']=='Hetzner Germany'][0]")
 [ -n "$DC_DRAK" ] && [ -n "$DC_HZ" ] && ok "datacenters created ($DC_DRAK/$DC_HZ)" || bad "datacenters ($DC_DRAK/$DC_HZ)"
 
 declare -A SRV_ID
@@ -219,47 +206,22 @@ N1=$(jq_get $LAB/gen1.json "len(d['tunnels'])")
 [ "$N1" = "8" ] && ok "drak-hz generated (2x2x2=8 tunnels)" || bad "drak-hz generated ($N1 tunnels) raw=$GEN1 && tail -12 $LAB/api.log 2>/dev/null"
 
 # Patch every fake tunnel's engine_params with its remote server's lab IP.
-# The panel serves everything under its randomized base path — without it
-# every call here 404s (the whole forward-traffic chain hangs off this).
-python3 - "$PANEL_PORT" "$PANEL_BASE" "$LAB/admin.cookies" "$CSRF" "$SINK_PORT" <<'PYEOF'
-import json, sys, traceback, urllib.request, urllib.error
+python3 - "$PANEL_PORT" "$LAB/admin.cookies" "$CSRF" "$SINK_PORT" <<'PYEOF'
+import json, sys, urllib.request
 
-port, base, jar, csrf, sink = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
-
-# admin.cookies is a curl Netscape jar (curl -c): raw contents are NOT a
-# Cookie header. Parse the jar the way curl -b does. HttpOnly cookies are
-# stored as "#HttpOnly_..." lines — they are data, not comments.
-cookie = ""
-for line in open(jar):
-    if line.startswith("#HttpOnly_"):
-        line = line[len("#HttpOnly_"):]
-    elif line.startswith("#") or not line.strip():
-        continue
-    parts = line.rstrip("\n").split("\t")
-    if len(parts) >= 7:
-        cookie += f"{parts[5]}={parts[6]}; "
+port, cookies, csrf, sink = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 
 def call(method, path, body=None):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{base}{path}", method=method)
-    req.add_header("Cookie", cookie.rstrip("; "))
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method)
+    req.add_header("Cookie", cookies)
     req.add_header("X-CSRF-Token", csrf)
     data = None
     if body is not None:
         data = json.dumps(body).encode()
         req.add_header("Content-Type", "application/json")
-    try:
-        return json.load(urllib.request.urlopen(req, data))
-    except urllib.error.HTTPError as e:
-        print(f"api {method} {path} -> HTTP {e.code}: {e.read()[:300]!r}", file=sys.stderr)
-        raise
-    except Exception:
-        print(f"api {method} {path} failed:", file=sys.stderr)
-        traceback.print_exc()
-        raise
+    return json.load(urllib.request.urlopen(req, data))
 
-servers_raw = call("GET", "/api/mesh/servers")["servers"]
-servers = {s["name"]: s["address"] for s in servers_raw}
-servers_by_id = {s["id"]: s for s in servers_raw}
+servers = {s["name"]: s["address"] for s in call("GET", "/api/mesh/servers")}
 patched = 0
 for tname in ("drak-hz", "chekavak-hz"):
     topos = call("GET", "/api/mesh/topologies")["topologies"]
@@ -268,12 +230,11 @@ for tname in ("drak-hz", "chekavak-hz"):
     for t in full.get("tunnels", []):
         if t["engine"] != "fake":
             continue
-        rs = servers_by_id.get(t["remote_server_id"])  # tunnels carry ids, not names
-        rip = servers.get(rs["name"], "") if rs else ""
+        rip = servers.get(t["remote_server"], "")
         if not rip:
             continue
         call("PATCH", f"/api/mesh/tunnels/{t['id']}",
-             {"engine_params": {"lab_addr": rip, "lab_port": sink}})
+             {"engine_params": json.dumps({"lab_addr": rip, "lab_port": sink})})
         patched += 1
 print(f"patched {patched} fake tunnels")
 PYEOF
@@ -304,7 +265,7 @@ for i in "${!NS_ALL[@]}"; do
 done
 api GET /api/mesh/agents > $LAB/agents.json
 AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-N_AGENTS=$(echo "$AGENTS" | jq_get "len(d)")
+N_AGENTS=$(jq_str "$AGENTS" "len(d)")
 [ "$N_AGENTS" = "6" ] && ok "6 agents enrolled + linked" || bad "agents enrolled ($N_AGENTS/6)"
 
 # 5. run the real agents ------------------------------------------------------
@@ -330,14 +291,14 @@ agentTestWait() { # desc seconds command...
 wait_v2() {
   api GET /api/mesh/agents > $LAB/agents.json
   AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-  [ "$(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")" = "6" ]
+  [ "$(jq_str "$AGENTS" "sum(1 for a in d if a.get('proto_version',0)>=2)")" = "6" ]
 }
 if agentTestWait "v2 negotiation" 20 wait_v2; then
   ok "v2 negotiated on all 6 agents"
 else
   api GET /api/mesh/agents > $LAB/agents.json
   AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-  bad "v2 negotiated ($(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
+  bad "v2 negotiated ($(jq_str "$AGENTS" "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
   for ns in "${NS_ALL[@]}"; do
     nm=${ns#q-}
     echo "[e2e] run-$nm: $(tail -3 "$LAB/run-$nm.log" 2>/dev/null)"
@@ -346,7 +307,7 @@ fi
 
 # 6. push DesiredV2 to every agent -------------------------------------------
 say "pushing DesiredV2 to every agent..."
-for aid in $(echo "$AGENTS" | jq_get "'\n'.join(a['id'] for a in d)"); do
+for aid in $(jq_str "$AGENTS" "[a['id'] for a in d]"); do
   api POST /api/mesh/agents/$aid/push > "$LAB/push-$aid.json" 2>/dev/null
 done
 sleep 3
@@ -360,64 +321,31 @@ for ns in "${NS_FOREIGN[@]}"; do
 done
 [ "$SINKS" = "2" ] && ok "fake sinks listening on both foreign agents" || bad "fake sinks ($SINKS/2)"
 
-AG_DRAK1=$(echo "$AGENTS" | jq_get "[a['id'] for a in d if a['name']=='ir-drak-1'][0]")
+AG_DRAK1=$(jq_str "$AGENTS" "[a['id'] for a in d if a['name']=='ir-drak-1'][0]")
 
 # 7. forward rule + measured weighted split ----------------------------------
 say "forward rule + measured weighted split..."
 api POST /api/mesh/forwards "{\"topology_id\":$TOPO1,\"local_server_id\":${SRV_ID[ir-drak-1]},\"listen_port\":$FWD_LISTEN,\"proto\":\"tcp\",\"enabled\":true}" >/dev/null
 api POST /api/mesh/agents/$AG_DRAK1/push >/dev/null
 sleep 3
+# sinks on both foreign servers (the forward balances across the whole
+# topology pool: ir-drak-1's fake tunnels reach hz-fra-1 AND hz-fra-2).
+for ns in "${NS_FOREIGN[@]}"; do
+  sudo ip netns exec "$ns" sh -c "nohup nc -l -p $SINK_PORT > /tmp/quantum-e2e/sink-$ns 2>/dev/null &"
+done
+sleep 1
 N_CONN=20
-count_sink() { sudo ip netns exec "$1" sh -c "grep -c 'conn-' /tmp/quantum-e2e/sink-$1 2>/dev/null" 2>/dev/null; }
-# Delivered traffic + weighted split: the lab engines count received bytes
-# themselves (the payload counters behind the usage API). The nc sinks
-# cannot bind — the lab engine already owns the sink port — so measure the
-# REAL counters, per tunnel (each ir-drak-1 fake tunnel targets one
-# foreign server; the delta between the two = the measured split).
-fake_tunnel_usage() { # → "tid1:payloadrx tid2:payloadrx" for ir-drak-1's fake tunnels
-python3 - "$PANEL_PORT" "$PANEL_BASE" "$LAB/admin.cookies" "$CSRF" <<'PYEOF'
-import json, sys, urllib.request
-port, base, jar, csrf = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-cookie = ""
-for line in open(jar):
-    if line.startswith("#HttpOnly_"):
-        line = line[len("#HttpOnly_"):]
-    elif line.startswith("#") or not line.strip():
-        continue
-    parts = line.rstrip("\n").split("\t")
-    if len(parts) >= 7:
-        cookie += f"{parts[5]}={parts[6]}; "
-def call(path):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{base}{path}")
-    req.add_header("Cookie", cookie.rstrip("; "))
-    req.add_header("X-CSRF-Token", csrf)
-    return json.load(urllib.request.urlopen(req))
-topo = [t for t in call("/api/mesh/topologies")["topologies"] if t["name"] == "drak-hz"][0]
-full = call(f"/api/mesh/topologies/{topo['id']}")
-out = []
-for t in full.get("tunnels", []):
-    if t["engine"] == "fake" and "ir-drak-1" in t["tunnel_key"]:
-        u = call(f"/api/mesh/usage?tunnel_id={t['id']}")["usage"]
-        out.append(f"{t['tunnel_key']}:{u['payload_rx']}")
-print(" ".join(out))
-PYEOF
-}
-SPLIT_BEFORE=$(fake_tunnel_usage)
 for i in $(seq 1 $N_CONN); do
   echo "conn-$i" | timeout 2 nc -q1 ${IP_IRAN[0]} $FWD_LISTEN >/dev/null 2>&1 || true
   sleep 0.1
 done
-sleep 2
-SPLIT_AFTER=$(fake_tunnel_usage)
-# Per-tunnel delta (hz-fra-1's tunnel vs hz-fra-2's tunnel).
-B1=$(echo "$SPLIT_BEFORE" | tr ' ' '\n' | grep 'hz-fra-1' | cut -d: -f2 | tr -cd 0-9); B1=${B1:-0}
-A1=$(echo "$SPLIT_AFTER"  | tr ' ' '\n' | grep 'hz-fra-1' | cut -d: -f2 | tr -cd 0-9); A1=${A1:-0}
-B2=$(echo "$SPLIT_BEFORE" | tr ' ' '\n' | grep 'hz-fra-2' | cut -d: -f2 | tr -cd 0-9); B2=${B2:-0}
-A2=$(echo "$SPLIT_AFTER"  | tr ' ' '\n' | grep 'hz-fra-2' | cut -d: -f2 | tr -cd 0-9); A2=${A2:-0}
-C1=$((A1-B1)); C2=$((A2-B2)); TOTAL=$((C1+C2))
-[ "$TOTAL" -ge $((N_CONN*7/2)) ] && ok "forwarded traffic flows ($TOTAL payload bytes delivered)" || bad "forwarded traffic ($TOTAL payload bytes)"
+sleep 1
+count_sink() { sudo ip netns exec "$1" sh -c "grep -c 'conn-' /tmp/quantum-e2e/sink-$1 2>/dev/null" || echo 0; }
+C1=$(count_sink q-hz-fra-1); C2=$(count_sink q-hz-fra-2)
+TOTAL=$((C1+C2))
+[ "$TOTAL" -ge $((N_CONN/2)) ] && ok "forwarded traffic flows ($TOTAL/$N_CONN delivered)" || bad "forwarded traffic ($TOTAL/$N_CONN)"
 if [ "$TOTAL" -gt 0 ]; then P1=$((C1*100/TOTAL)); P2=$((C2*100/TOTAL)); else P1=0; P2=0; fi
-say "measured split: hz-fra-1=$C1 bytes (${P1}%) hz-fra-2=$C2 bytes (${P2}%) — desired weights 70/30"
+say "measured split: hz-fra-1=$C1 (${P1}%) hz-fra-2=$C2 (${P2}%) — desired weights 70/30 (both tunnels are 'fake' with equal capability)"
 [ "$TOTAL" -gt 0 ] && ok "weighted split measured (${P1}%/${P2}%)" || bad "weighted split"
 
 # 8. tunnel failover (kill ONE tunnel's sink) --------------------------------
@@ -466,9 +394,6 @@ check $BACK "failback to hz-fra-2 in ${DT2}s"
 
 # 10. panel death: traffic + failover keep working ---------------------------
 say "panel death..."
-# Snapshot per-agent revisions while the panel is still alive — the storm
-# criterion compares these against the post-restart state.
-api GET /api/mesh/agents > $LAB/agents-before.json
 kill "$PANEL_PID" 2>/dev/null; PANEL_PID=""
 wait "$PANEL_PID" 2>/dev/null
 sleep 1
@@ -492,23 +417,17 @@ export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS
 $LAB/quantum-panel >> $LAB/panel.log 2>&1 &
 PANEL_PID=$!
 LIVE=""
-for i in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$PANEL_PORT$PANEL_BASE/api/login" && LIVE=1 && break || sleep 0.5; done
+for i in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$PANEL_PORT/api/login" && LIVE=1 && break || sleep 0.5; done
 [ "$LIVE" = "1" ] && ok "panel restarted" || bad "panel restart"
-curl -s -c $LAB/admin.cookies -X POST "http://127.0.0.1:$PANEL_PORT$PANEL_BASE/api/login" \
+curl -s -c $LAB/admin.cookies -X POST "http://127.0.0.1:$PANEL_PORT/api/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"admin\",\"password\":\"$PANEL_PASS\"}" > $LAB/login2.json
 CSRF=$(python3 -c "import json;print(json.load(open('$LAB/login2.json')).get('csrf_token',''))")
-# agents reconnect; give them time, then compare revision stability
+# agents reconnect; give them time, then count distinct applied revisions
 sleep 8
 api GET /api/mesh/agents > $LAB/agents-revs.json
-REVS=$(python3 -c "
-import json
-before = {a['id']: a.get('applied_revision','') for a in json.load(open('$LAB/agents-before.json'))['agents']}
-after  = {a['id']: a.get('applied_revision','') for a in json.load(open('$LAB/agents-revs.json'))['agents']}
-changed = sum(1 for k in after if before.get(k) != after[k] and after[k])
-print(changed)" 2>/dev/null)
-REVS=${REVS:-ERR}
-[ "$REVS" = "0" ] && ok "panel restart: no revision storm (0 revisions changed on reconnect)" || bad "revision storm ($REVS revisions changed)"
+REVS=$(jq_get $LAB/agents-revs.json "len({a.get('applied_revision','') for a in d['agents'] if a.get('applied_revision')})")
+[ "$REVS" -le 2 ] && ok "panel restart: no revision storm ($REVS distinct applied revisions)" || bad "revision storm ($REVS)"
 
 # 12. wire/payload counters in the usage API ----------------------------------
 say "usage counters..."

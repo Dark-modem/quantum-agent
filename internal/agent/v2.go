@@ -151,8 +151,17 @@ func (s *agentSession) handleDesiredV2(data []byte) {
 // fencing matches v1: strictly newer revisions only, applied
 // idempotently; stale/equal revisions are refused.
 func agentApplyDesiredV2(d *protocol.DesiredV2) agentAck {
+	return agentApplyDesiredV2Fenced(d, true)
+}
+
+// agentApplyDesiredV2Fenced is the apply with an explicit fencing switch:
+// boot replay of the agent's own journaled document re-applies the exact
+// revision it already ran (idempotent by contract), so it must bypass the
+// newer-revision fence or every agent restart would drop its tunnels
+// until the panel pushes again.
+func agentApplyDesiredV2Fenced(d *protocol.DesiredV2, fence bool) agentAck {
 	ack := agentAck{Revision: d.Revision, OK: true, Kind: "desired-v2"}
-	if !agentV2FenceAccepts(d.Revision) {
+	if fence && !agentV2FenceAccepts(d.Revision) {
 		ack.OK = false
 		ack.Error = fmt.Sprintf("stale or duplicate revision %s", d.Revision)
 		return ack
@@ -214,7 +223,7 @@ func agentApplyDesiredV2(d *protocol.DesiredV2) agentAck {
 	if res := mgr.Reconcile(context.Background(), engs, specs); len(res.Errors) > 0 {
 		// Partial failures do not fail the whole ack: the applied part
 		// stands and the errors ride the next heartbeat's Errors.
-		log.Printf("[agent] v2 reconcile reported %d error(s)", len(res.Errors))
+		log.Printf("[agent] v2 reconcile reported %d error(s): %v", len(res.Errors), res.Errors)
 		ack.Detail = map[string]string{}
 		for i, e := range res.Errors {
 			log.Printf("[agent] v2 reconcile error: %s", e)
