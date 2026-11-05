@@ -386,6 +386,12 @@ func (s *agentSession) serve(ctx context.Context) error {
 		EngineCatalog: agentEngineCatalog(),
 		Engines:       agentEngineInfos(),
 	}
+	// Offer v2: the hello goes out in a V2 envelope (the highest version
+	// this agent speaks). The panel negotiates from the envelope version
+	// and answers with a welcome payload carrying the session version.
+	// A v1-only panel would reject the V2 envelope — the agent then
+	// retries with a V1 envelope (downgrade on rejection).
+	s.version = agentMaxProtoVersion
 	if err := s.send(agentMsgHello, hello); err != nil {
 		s.fail(err)
 		return s.err()

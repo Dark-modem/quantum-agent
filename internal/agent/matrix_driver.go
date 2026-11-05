@@ -165,6 +165,9 @@ func NewAgentEngines() (*engine.Registry, error) {
 	if err := reg.Register(NewMatrixDriver()); err != nil {
 		return nil, err
 	}
+	if err := RegisterLabEngines(reg); err != nil {
+		return nil, err
+	}
 	if agentV2TestDriver != nil {
 		if err := reg.Register(agentV2TestDriver); err != nil {
 			return nil, err

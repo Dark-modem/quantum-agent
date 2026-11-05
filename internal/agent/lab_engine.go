@@ -1,0 +1,213 @@
+package agent
+
+// lab_engine.go — the lab FakeEngine registration (QUANTUM_ENGINES_LAB).
+//
+// Integration/e2e runs need the REAL agent binary to drive more than the
+// matrix engine without host-coupled daemons: setting
+// QUANTUM_ENGINES_LAB=fake registers a scripted FakeEngine driver under
+// the id "fake". It is env-gated so production agents never carry it.
+//
+// Behavior (lab contract):
+//   - Start() opens a TCP sink listener on lab_port (from engine_params)
+//     and counts accepted bytes as REAL payload counters — so heartbeat
+//     reports and the panel usage API carry true numbers for fake
+//     tunnels.
+//   - ForwardAddress() returns lab_addr[:lab_port] from engine_params —
+//     the address the iran-side balancer DNATs new connections to (the
+//     foreign namespace where a sibling agent's sink listens).
+//   - Counters() reports the sink's byte counts (wire == payload: fake
+//     tunnels add no encapsulation overhead, ratio 1.0 by construction).
+//   - Health() reflects the sink listener state.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/Dark-modem/quantum-agent/internal/engine"
+)
+
+// labSinkPort is the engine_params key for the sink listen port.
+const labSinkPort = "lab_port"
+
+type labFakeDriver struct {
+	mu      sync.Mutex
+	running map[string]engine.Instance
+	sinks   map[string]net.Listener // tunnelID -> listener
+	payload map[string]*atomic.Uint64
+}
+
+type labParams struct {
+	LabAddr string `json:"lab_addr"`
+	LabPort int    `json:"lab_port"`
+}
+
+// NewLabFakeDriver builds the lab driver (id "fake").
+func NewLabFakeDriver() *labFakeDriver {
+	return &labFakeDriver{
+		running: map[string]engine.Instance{},
+		sinks:   map[string]net.Listener{},
+		payload: map[string]*atomic.Uint64{},
+	}
+}
+
+// LabEnginesFromEnv returns lab driver ids requested via QUANTUM_ENGINES_LAB.
+func LabEnginesFromEnv() []string {
+	raw := strings.TrimSpace(os.Getenv("QUANTUM_ENGINES_LAB"))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, id := range strings.Split(raw, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// RegisterLabEngines registers the env-requested lab drivers.
+func RegisterLabEngines(reg *engine.Registry) error {
+	for _, id := range LabEnginesFromEnv() {
+		if id == "fake" {
+			if err := reg.Register(NewLabFakeDriver()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+var (
+	_ engine.Driver           = (*labFakeDriver)(nil)
+	_ engine.ForwardAddresser = (*labFakeDriver)(nil)
+	_ engine.Describer        = (*labFakeDriver)(nil)
+)
+
+func (l *labFakeDriver) ID() string { return "fake" }
+
+func (l *labFakeDriver) Validate(params json.RawMessage) error {
+	var p labParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return fmt.Errorf("fake: engine_params: %w", err)
+	}
+	if p.LabAddr == "" || p.LabPort <= 0 {
+		return fmt.Errorf("fake: engine_params must carry lab_addr and lab_port")
+	}
+	return nil
+}
+
+// EnsureBinary implements Driver: nothing to download.
+func (l *labFakeDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
+
+// Start implements Driver: open the sink listener and count bytes.
+func (l *labFakeDriver) Start(ctx context.Context, inst engine.Instance) error {
+	var p labParams
+	if err := json.Unmarshal(inst.Params, &p); err != nil {
+		return err
+	}
+	if p.LabPort <= 0 {
+		return fmt.Errorf("fake: lab_port required")
+	}
+	l.mu.Lock()
+	if _, running := l.running[inst.TunnelID]; running {
+		l.mu.Unlock()
+		return nil // idempotent
+	}
+	l.mu.Unlock()
+
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p.LabPort))
+	if err != nil {
+		return fmt.Errorf("fake sink on %d: %w", p.LabPort, err)
+	}
+	counter := &atomic.Uint64{}
+	l.mu.Lock()
+	l.sinks[inst.TunnelID] = ln
+	l.payload[inst.TunnelID] = counter
+	l.running[inst.TunnelID] = inst
+	l.mu.Unlock()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // listener closed = instance stopped
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				n, _ := io.Copy(io.Discard, c)
+				counter.Add(uint64(n))
+			}(conn)
+		}
+	}()
+	return nil
+}
+
+// Stop implements Driver: close the sink.
+func (l *labFakeDriver) Stop(inst engine.Instance) error {
+	l.mu.Lock()
+	if ln, ok := l.sinks[inst.TunnelID]; ok {
+		ln.Close()
+		delete(l.sinks, inst.TunnelID)
+	}
+	l.mu.Unlock()
+	return nil
+}
+
+// Reload implements Driver: params are fixed in the lab (restart path).
+func (l *labFakeDriver) Reload(inst engine.Instance) error { return engine.ErrRestartRequired }
+
+// Health implements Driver.
+func (l *labFakeDriver) Health(inst engine.Instance) engine.Health {
+	l.mu.Lock()
+	_, listening := l.sinks[inst.TunnelID]
+	l.mu.Unlock()
+	return engine.Health{OK: listening, Detail: "lab fake sink", LatencyMs: -1}
+}
+
+// Counters implements Driver: REAL bytes the sink accepted.
+func (l *labFakeDriver) Counters(inst engine.Instance) engine.Counters {
+	l.mu.Lock()
+	c, ok := l.payload[inst.TunnelID]
+	l.mu.Unlock()
+	if !ok {
+		return engine.Counters{}
+	}
+	n := c.Load()
+	// No encapsulation overhead on a fake tunnel: wire == payload, both
+	// directions counted as the sink's received bytes for rx and 0 tx
+	// (the sink never sends). Real bytes only — never multiplied.
+	return engine.Counters{WireRx: n, WireKnown: true, PayloadRx: n, PayloadKnown: true}
+}
+
+// Uninstall implements Driver: close every sink (lab keeps no binaries).
+func (l *labFakeDriver) Uninstall(ctx context.Context) error {
+	l.mu.Lock()
+	for _, ln := range l.sinks {
+		ln.Close()
+	}
+	l.sinks = map[string]net.Listener{}
+	l.running = map[string]engine.Instance{}
+	l.mu.Unlock()
+	return nil
+}
+
+// ForwardAddress implements the optional capability from engine_params.
+func (l *labFakeDriver) ForwardAddress(inst engine.Instance) (string, int, bool) {
+	var p labParams
+	if err := json.Unmarshal(inst.Params, &p); err != nil || p.LabAddr == "" {
+		return "", 0, false
+	}
+	return p.LabAddr, p.LabPort, true
+}
+
+// Describe implements the optional capability.
+func (l *labFakeDriver) Describe() engine.EngineInfo {
+	return engine.EngineInfo{ID: "fake", Version: panelVersion,
+		ParamsSchema: json.RawMessage(`{"lab_addr":"<foreign ip>","lab_port":0}`)}
+}
