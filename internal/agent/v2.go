@@ -281,10 +281,19 @@ func agentBuildStateReportV2() *agentStateReportV2 {
 			LatencyMs: st.Health.LatencyMs,
 			WireRx:    st.Counters.WireRx, WireTx: st.Counters.WireTx,
 			PayloadRx: st.Counters.PayloadRx, PayloadTx: st.Counters.PayloadTx,
-			CountersKnown: st.Counters.WireKnown,
+			CountersKnown: st.Counters.WireKnown, // legacy field: wire-known
+			WireKnown:     st.Counters.WireKnown,
+			PayloadKnown:  st.Counters.PayloadKnown,
 		}
+		// Per-direction overhead from real counter pairs only (Phase-4);
+		// each engine's sample accumulates both directions independently.
 		if st.Counters.WireKnown && st.Counters.PayloadKnown && st.Counters.PayloadRx > 0 {
 			tr.OverheadRatio = float64(st.Counters.WireRx) / float64(st.Counters.PayloadRx)
+		}
+		if st.Counters.WireKnown && st.Counters.PayloadKnown && st.Counters.PayloadTx > 0 {
+			tr.OverheadRatioTx = float64(st.Counters.WireTx) / float64(st.Counters.PayloadTx)
+		}
+		if st.Counters.WireKnown || st.Counters.PayloadKnown {
 			es := engines[st.Engine]
 			if es == nil {
 				es = &protocol.EngineOverheadSample{Engine: st.Engine, Tunnels: 0}
@@ -293,7 +302,14 @@ func agentBuildStateReportV2() *agentStateReportV2 {
 			es.Tunnels++
 			es.WireRx += st.Counters.WireRx
 			es.PayloadRx += st.Counters.PayloadRx
-			es.Ratio = float64(es.WireRx) / float64(es.PayloadRx)
+			es.WireTx += st.Counters.WireTx
+			es.PayloadTx += st.Counters.PayloadTx
+			if es.PayloadRx > 0 {
+				es.Ratio = float64(es.WireRx) / float64(es.PayloadRx)
+			}
+			if es.PayloadTx > 0 {
+				es.RatioTx = float64(es.WireTx) / float64(es.PayloadTx)
+			}
 		}
 		out.Tunnels = append(out.Tunnels, tr)
 	}
