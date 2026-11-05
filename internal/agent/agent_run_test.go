@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-protocol"
 	"github.com/gorilla/websocket"
 )
 
@@ -109,7 +110,13 @@ func agentReadEnv(c *websocket.Conn) (string, json.RawMessage, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return agentDecode(raw)
+	// Accept any supported version (the agent offers v2 in hello since
+	// the Phase-2A negotiation fix).
+	_, typ, data, derr := protocol.DecodeAny(raw)
+	if derr != nil {
+		return "", nil, derr
+	}
+	return typ, data, nil
 }
 
 // TestAgentWSRoundTrip speaks the whole protocol against an httptest
