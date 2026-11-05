@@ -99,7 +99,7 @@ need_systemd() { have systemctl || die "systemd is required (no systemctl)"; }
 # ---------------------------------------------------------------------------
 SERVER="" TOKEN="" TOKEN_FILE="" NAME="" ROLE=""
 VERSION="latest" BINARY="" CHECKSUM=""
-SSH_PORT="" ENABLE_FIREWALL=0 WITH_FAIL2BAN=0 NO_START=0 CHECK_ONLY=0 ASSUME_YES=0
+SSH_PORT="" ENABLE_FIREWALL=0 WITH_FAIL2BAN=0 NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0 ASSUME_YES=0
 OPEN_RULES=()
 
 usage() { sed -n '2,40p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; }
@@ -120,13 +120,14 @@ while [[ $# -gt 0 ]]; do
         --with-fail2ban) WITH_FAIL2BAN=1; shift;;
         --no-start)      NO_START=1; shift;;
         --check)         CHECK_ONLY=1; shift;;
+        --verify-only)   VERIFY_ONLY=1; shift;;
         --yes)           ASSUME_YES=1; shift;;
         -h|--help)       usage; exit 0;;
         *) die "unknown argument: $1 (see --help)";;
     esac
 done
 
-[[ -n "$SERVER" || $CHECK_ONLY -eq 1 ]] || die "--server is required (or use --check)"
+[[ -n "$SERVER" || $CHECK_ONLY -eq 1 || $VERIFY_ONLY -eq 1 ]] || die "--server is required (or use --check / --verify-only)"
 if [[ -n "$BINARY" && -z "$CHECKSUM" && -f "${BINARY}.sha256" ]]; then
     CHECKSUM="$(trun 10 awk '{print $1}' "${BINARY}.sha256" 2>/dev/null || true)"
 fi
@@ -566,13 +567,60 @@ check_install() {
 }
 
 # ---------------------------------------------------------------------------
+# verify_binary_only: checksum verification WITHOUT root/systemd (the
+# offline-bundle path: `--verify-only --binary ... --checksum ...`).
+# ---------------------------------------------------------------------------
+verify_binary_only() {
+    local arch; arch="$(arch_tag)"
+    local src want got
+    if [[ -n "$BINARY" ]]; then
+        src="$BINARY"
+        [[ -r "$src" ]] || die "verify-only: cannot read --binary: $src"
+        [[ -n "$CHECKSUM" ]] || die "verify-only: --binary requires --checksum (or a ${src}.sha256 sidecar)"
+        got="$(trun 60 sha256sum "$src" | awk '{print $1}')"
+        [[ "$got" == "$CHECKSUM" ]] \
+            || die "checksum mismatch for $src
+  expected: $CHECKSUM
+  got:      $got"
+        info "checksum verified: $src = $got"
+        return 0
+    fi
+    # No --binary: download from the release and verify (network needed).
+    have curl || have wget || die "verify-only: need curl/wget (or pass --binary)"
+    if [[ "$VERSION" == "latest" ]]; then
+        VERSION="$(release_latest)" || die "verify-only: cannot resolve the latest release tag"
+    fi
+    local url_base="https://github.com/${REPO}/releases/download/${VERSION}"
+    local asset="quantum-agent-linux-${arch}"
+    src="$(mktemp -t quantum-verify.XXXXXX)"
+    download "$url_base/$asset" "$src" || die "verify-only: download failed: $asset"
+    local sums; sums="$(mktemp -t quantum-sums.XXXXXX)"
+    download "$url_base/checksums.txt" "$sums" || die "verify-only: download failed: checksums.txt"
+    want="$(trun 10 awk -v a="$asset" '$2==a || $2=="*"a {print $1}' "$sums")"
+    [[ -n "$want" ]] || die "verify-only: checksums.txt has no entry for $asset"
+    got="$(trun 60 sha256sum "$src" | awk '{print $1}')"
+    [[ "$got" == "$want" ]] \
+        || die "checksum mismatch for $asset
+  expected: $want
+  got:      $got"
+    info "checksum verified: $asset = $got"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+if [[ $VERIFY_ONLY -eq 1 ]]; then verify_binary_only; exit 0; fi   # no root/systemd needed
 need_root
-need_systemd
-if [[ $CHECK_ONLY -eq 1 ]]; then check_install; fi   # read-only, exits
+if [[ $CHECK_ONLY -eq 1 ]]; then
+    need_systemd
+    check_install
+fi
 
 info "installing quantum-agent (arch $(arch_tag), version ${VERSION})"
+install_binary
+# Binary + checksum verified (fetch_binary dies on mismatch BEFORE this
+# point): only NOW do we require systemd for the unit/service work.
+need_systemd
 install_binary
 mkdir -p "$AGENT_DIR"
 enroll

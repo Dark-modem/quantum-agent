@@ -74,7 +74,7 @@ need_systemd() { have systemctl || die "systemd is required"; }
 PORT="7443" BASE_PATH="" USERNAME="admin"
 PASSWORD="" PASSWORD_FILE="" GENERATE=0
 VERSION="latest" BINARY="" CHECKSUM=""
-NO_START=0 CHECK_ONLY=0
+NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0
 
 usage() { sed -n '2,44p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; }
 
@@ -91,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --checksum)       CHECKSUM="${2:-}"; shift 2;;
         --no-start)       NO_START=1; shift;;
         --check)          CHECK_ONLY=1; shift;;
+        --verify-only)    VERIFY_ONLY=1; shift;;
         --yes)            shift;;
         -h|--help)        usage; exit 0;;
         *) die "unknown argument: $1 (see --help)";;
@@ -342,19 +343,67 @@ check_install() {
     [[ -x "$BIN" ]] || die "not installed: $BIN"
     "$BIN" version 2>/dev/null || true
     trun 15 systemctl is-active quantum-panel.service 2>/dev/null || true
-    [[ -f "$UNIT" ]] && grep -q "ProtectSystem=strict" "$UNIT" && info "hardened unit present" || warn "unit missing or not hardened"
+    if [[ -f "$UNIT" ]] && grep -q "ProtectSystem=strict" "$UNIT"; then
+        info "hardened unit present"
+    else
+        warn "unit missing or not hardened"
+    fi
     verify || true
     exit 0
 }
 
 # ---------------------------------------------------------------------------
+# verify_binary_only: checksum verification WITHOUT root/systemd.
+# ---------------------------------------------------------------------------
+verify_binary_only() {
+    local arch; arch="$(arch_tag)"
+    local src want got
+    if [[ -n "$BINARY" ]]; then
+        src="$BINARY"
+        [[ -r "$src" ]] || die "verify-only: cannot read --binary: $src"
+        [[ -n "$CHECKSUM" ]] || die "verify-only: --binary requires --checksum (or a ${src}.sha256 sidecar)"
+        got="$(trun 60 sha256sum "$src" | awk '{print $1}')"
+        [[ "$got" == "$CHECKSUM" ]] \
+            || die "checksum mismatch for $src
+  expected: $CHECKSUM
+  got:      $got"
+        info "checksum verified: $src = $got"
+        return 0
+    fi
+    have curl || have wget || die "verify-only: need curl/wget (or pass --binary)"
+    if [[ "$VERSION" == "latest" ]]; then
+        VERSION="$(release_latest)" || die "verify-only: cannot resolve the latest release tag"
+    fi
+    local base="https://github.com/${REPO}/releases/download/${VERSION}"
+    local asset="quantum-panel-linux-${arch}"
+    src="$(mktemp -t quantum-verify.XXXXXX)"
+    download "$base/$asset" "$src" || die "verify-only: download failed: $asset"
+    local sums; sums="$(mktemp -t quantum-sums.XXXXXX)"
+    download "$base/checksums.txt" "$sums" || die "verify-only: download failed: checksums.txt"
+    want="$(trun 10 awk -v a="$asset" '$2==a || $2=="*"a {print $1}' "$sums")"
+    [[ -n "$want" ]] || die "verify-only: checksums.txt has no entry for $asset"
+    got="$(trun 60 sha256sum "$src" | awk '{print $1}')"
+    [[ "$got" == "$want" ]] \
+        || die "checksum mismatch for $asset
+  expected: $want
+  got:      $got"
+    info "checksum verified: $asset = $got"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+if [[ $VERIFY_ONLY -eq 1 ]]; then verify_binary_only; exit 0; fi   # no root/systemd needed
 need_root
-need_systemd
-if [[ $CHECK_ONLY -eq 1 ]]; then check_install; fi
+if [[ $CHECK_ONLY -eq 1 ]]; then
+    need_systemd
+    check_install
+fi
 info "installing quantum-panel (arch $(arch_tag), version ${VERSION})"
 install_binary
+# Binary + checksum verified (fetch_binary dies on mismatch BEFORE this
+# point): only NOW do we require systemd for the unit/service work.
+need_systemd
 create_user
 credential_step
 write_unit
