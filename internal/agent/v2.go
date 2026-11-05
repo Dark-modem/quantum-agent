@@ -223,7 +223,7 @@ func agentApplyDesiredV2Fenced(d *protocol.DesiredV2, fence bool) agentAck {
 	if res := mgr.Reconcile(context.Background(), engs, specs); len(res.Errors) > 0 {
 		// Partial failures do not fail the whole ack: the applied part
 		// stands and the errors ride the next heartbeat's Errors.
-		log.Printf("[agent] v2 reconcile reported %d error(s)", len(res.Errors))
+		log.Printf("[agent] v2 reconcile reported %d error(s): %v", len(res.Errors), res.Errors)
 		ack.Detail = map[string]string{}
 		for i, e := range res.Errors {
 			ack.Detail[fmt.Sprintf("reconcile_error_%d", i)] = e
