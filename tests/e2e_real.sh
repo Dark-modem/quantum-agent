@@ -150,6 +150,9 @@ api() { # api METHOD PATH [body] — prints the response body, logs the code
   echo "$m $p http=$code" >> $LAB/api.log
   echo "${out%$'\n'*}"
 }
+jq_str() { # jq_str JSON_STRING python_expr
+  echo "$1" | python3 -c "import json,sys;d=json.load(sys.stdin);print($2)" 2>/dev/null || echo ""
+}
 jq_get() { # jq_get FILE python_expr
   python3 -c "import json;d=json.load(open('$1'));print($2)" 2>/dev/null || echo ""
 }
@@ -159,10 +162,9 @@ say "configuring the mesh (2 iran DCs, 1 foreign DC, 6 servers)..."
 api POST /api/mesh/datacenters '{"name":"Drak","kind":"iran","price_coefficient":1.0}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Chekavak","kind":"iran","price_coefficient":1.5}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Hetzner Germany","kind":"foreign","price_coefficient":1.0}' >/dev/null
-DC_RAW=$(api GET /api/mesh/datacenters)
-echo "[e2e] DC_RAW=${DC_RAW:0:200}"
-DC_DRAK=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']=='Drak'][0]")
-DC_HZ=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']=='Hetzner Germany'][0]")
+api GET /api/mesh/datacenters > $LAB/dc.json
+DC_DRAK=$(jq_get $LAB/dc.json "[x['id'] for x in d['datacenters'] if x['name']=='Drak'][0]")
+DC_HZ=$(jq_get $LAB/dc.json "[x['id'] for x in d['datacenters'] if x['name']=='Hetzner Germany'][0]")
 [ -n "$DC_DRAK" ] && [ -n "$DC_HZ" ] && ok "datacenters created ($DC_DRAK/$DC_HZ)" || bad "datacenters ($DC_DRAK/$DC_HZ)"
 
 declare -A SRV_ID
@@ -259,7 +261,7 @@ for i in "${!NS_ALL[@]}"; do
 done
 api GET /api/mesh/agents > $LAB/agents.json
 AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-N_AGENTS=$(echo "$AGENTS" | jq_get "len(d)")
+N_AGENTS=$(jq_str "$AGENTS" "len(d)")
 [ "$N_AGENTS" = "6" ] && ok "6 agents enrolled + linked" || bad "agents enrolled ($N_AGENTS/6)"
 
 # 5. run the real agents ------------------------------------------------------
@@ -285,14 +287,14 @@ agentTestWait() { # desc seconds command...
 wait_v2() {
   api GET /api/mesh/agents > $LAB/agents.json
   AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-  [ "$(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")" = "6" ]
+  [ "$(jq_str "$AGENTS" "sum(1 for a in d if a.get('proto_version',0)>=2)")" = "6" ]
 }
 if agentTestWait "v2 negotiation" 20 wait_v2; then
   ok "v2 negotiated on all 6 agents"
 else
   api GET /api/mesh/agents > $LAB/agents.json
   AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-  bad "v2 negotiated ($(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
+  bad "v2 negotiated ($(jq_str "$AGENTS" "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
   for ns in "${NS_ALL[@]}"; do
     nm=${ns#q-}
     echo "[e2e] run-$nm: $(tail -3 "$LAB/run-$nm.log" 2>/dev/null)"
@@ -301,7 +303,7 @@ fi
 
 # 6. push DesiredV2 to every agent -------------------------------------------
 say "pushing DesiredV2 to every agent..."
-for aid in $(echo "$AGENTS" | jq_get "[a['id'] for a in d]"); do
+for aid in $(jq_str "$AGENTS" "[a['id'] for a in d]"); do
   api POST /api/mesh/agents/$aid/push > "$LAB/push-$aid.json" 2>/dev/null
 done
 sleep 3
@@ -315,7 +317,7 @@ for ns in "${NS_FOREIGN[@]}"; do
 done
 [ "$SINKS" = "2" ] && ok "fake sinks listening on both foreign agents" || bad "fake sinks ($SINKS/2)"
 
-AG_DRAK1=$(echo "$AGENTS" | jq_get "[a['id'] for a in d if a['name']=='ir-drak-1'][0]")
+AG_DRAK1=$(jq_str "$AGENTS" "[a['id'] for a in d if a['name']=='ir-drak-1'][0]")
 
 # 7. forward rule + measured weighted split ----------------------------------
 say "forward rule + measured weighted split..."
