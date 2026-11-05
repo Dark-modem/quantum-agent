@@ -44,28 +44,36 @@ import (
 // frpID is the engine id used in desired state.
 const frpID = "frp"
 
-// frpParams is the engine_params shape the FRP driver accepts.
+// frpParams is the engine_params shape the FRP driver accepts. One
+// tunnel description is delivered to BOTH ends (the compiler sends the
+// same params to each agent); each end resolves its own side by naming
+// which end hosts frps (frp_server_side must equal that end's server
+// name — the compiler fills Instance.LocalServer with the receiving
+// agent's own server name, so a match means "I am the frps side").
 type frpParams struct {
-	Role       string `json:"role"`                     // "server" (foreign frps) | "client" (iran frpc)
-	Version    string `json:"version"`                  // frp artifact version (cache key)
-	Artifact   string `json:"artifact"`                 // artifact file name on the controller
-	SHA256     string `json:"sha256"`                   // pin: sha256 hex of the artifact
-	Signature  string `json:"signature"`                // pin: base64 ed25519 signature over the artifact
-	ServerAddr string `json:"server_addr,omitempty"`    // client: frps host
-	ServerPort int    `json:"server_port"`              // both: frps bind/control port
-	Token      string `json:"token"`                    // shared frp auth token
-	RemotePort int    `json:"remote_port,omitempty"`    // client: public data port on frps
-	LocalAddr  string `json:"local_addr,omitempty"`     // client: target host on the Iran side
-	LocalPort  int    `json:"local_port,omitempty"`     // client: target port
-	DashPort   int    `json:"dashboard_port,omitempty"` // server: 127.0.0.1 frps webServer port
-	AllowMin   int    `json:"allow_port_min,omitempty"` // server: smallest allowed remote port
-	AllowMax   int    `json:"allow_port_max,omitempty"` // server: largest allowed remote port
+	ServerSide string `json:"server_side"`           // server name hosting frps
+	Version    string `json:"version"`               // frp artifact version (cache key)
+	Artifact   string `json:"artifact"`              // artifact file name on the controller
+	SHA256     string `json:"sha256"`                // pin: sha256 hex of the artifact
+	Signature  string `json:"signature"`             // pin: base64 ed25519 signature over the artifact
+	ServerAddr string `json:"server_addr,omitempty"` // frps host as seen from the frpc side
+	ServerPort int    `json:"server_port"`           // frps bind/control port
+	Token      string `json:"token"`                 // shared frp auth token
+	RemotePort int    `json:"remote_port"`           // public data port on frps
+	LocalAddr  string `json:"local_addr"`            // Iran-side target host for frpc
+	LocalPort  int    `json:"local_port"`            // Iran-side target port
+	DashPort   int    `json:"dashboard_port"`        // frps 127.0.0.1 webServer port (payload counters)
+	AllowMin   int    `json:"allow_port_min"`        // frps smallest allowed remote port
+	AllowMax   int    `json:"allow_port_max"`        // frps largest allowed remote port
 }
 
-// frpValidateParams checks shape only (no side effects, no binary access).
+// frpValidateParams checks the union shape (no side effects, no binary
+// access). The side is not known until Start (it comes from the
+// Instance), so Validate conservatively requires the fields both sides
+// consume.
 func frpValidateParams(p frpParams) error {
-	if p.Role != "server" && p.Role != "client" {
-		return fmt.Errorf("frp: role must be \"server\" or \"client\"")
+	if strings.TrimSpace(p.ServerSide) == "" || len(p.ServerSide) > 128 {
+		return fmt.Errorf("frp: server_side (name of the end hosting frps) required")
 	}
 	if err := frpValidateArtifactPins(p); err != nil {
 		return err
@@ -76,29 +84,39 @@ func frpValidateParams(p frpParams) error {
 	if p.Token == "" || len(p.Token) > 128 || strings.ContainsAny(p.Token, "\"\\ \t\n\r") {
 		return fmt.Errorf("frp: token must be 1-128 chars without quotes, backslash or whitespace")
 	}
-	switch p.Role {
-	case "server":
-		if p.DashPort < 1 || p.DashPort > 65535 {
-			return fmt.Errorf("frp: server needs dashboard_port 1-65535 (localhost payload counters)")
-		}
-		if p.AllowMin < 1 || p.AllowMax > 65535 || p.AllowMin > p.AllowMax {
-			return fmt.Errorf("frp: server needs allow_port_min <= allow_port_max within 1-65535")
-		}
-	case "client":
-		if strings.TrimSpace(p.ServerAddr) == "" {
-			return fmt.Errorf("frp: client needs server_addr")
-		}
-		if p.RemotePort < 1 || p.RemotePort > 65535 {
-			return fmt.Errorf("frp: client needs remote_port 1-65535")
-		}
-		if strings.TrimSpace(p.LocalAddr) == "" {
-			return fmt.Errorf("frp: client needs local_addr")
-		}
-		if p.LocalPort < 1 || p.LocalPort > 65535 {
-			return fmt.Errorf("frp: client needs local_port 1-65535")
-		}
+	if p.RemotePort < 1 || p.RemotePort > 65535 {
+		return fmt.Errorf("frp: remote_port must be 1-65535")
+	}
+	if strings.TrimSpace(p.ServerAddr) == "" {
+		return fmt.Errorf("frp: server_addr required (frps host as seen from the frpc side)")
+	}
+	if strings.TrimSpace(p.LocalAddr) == "" {
+		return fmt.Errorf("frp: local_addr required (Iran-side target host)")
+	}
+	if p.LocalPort < 1 || p.LocalPort > 65535 {
+		return fmt.Errorf("frp: local_port must be 1-65535")
+	}
+	if p.DashPort < 1 || p.DashPort > 65535 {
+		return fmt.Errorf("frp: dashboard_port must be 1-65535 (localhost payload counters)")
+	}
+	if p.AllowMin < 1 || p.AllowMax > 65535 || p.AllowMin > p.AllowMax {
+		return fmt.Errorf("frp: allow_port_min <= allow_port_max within 1-65535 required")
 	}
 	return nil
+}
+
+// frpResolveRole decides this end's role from the instance context:
+// the compiler sets Instance.LocalServer to the receiving agent's own
+// server name, so a match with server_side means "I host frps".
+func frpResolveRole(inst engine.Instance, p frpParams) (string, error) {
+	if inst.LocalServer == p.ServerSide {
+		return "server", nil
+	}
+	if inst.RemoteServer == p.ServerSide {
+		return "client", nil
+	}
+	return "", fmt.Errorf("frp: server_side %q matches neither this instance's local (%q) nor remote (%q) server",
+		p.ServerSide, inst.LocalServer, inst.RemoteServer)
 }
 
 // frpValidateArtifactPins checks the artifact coordinates every role
@@ -187,6 +205,7 @@ func frpProcStop(p frpProcess) {
 // frpInstState is the runtime state of one instance.
 type frpInstState struct {
 	params frpParams
+	role   string
 	cfg    string
 	proc   frpProcess
 }
@@ -262,9 +281,9 @@ func frpEngineDir() string {
 
 // frpRenderConfig renders the frps/frpc TOML for one instance. The token
 // charset was validated, so plain quoting is safe.
-func frpRenderConfig(tunnelID string, p frpParams) string {
+func frpRenderConfig(tunnelID, role string, p frpParams) string {
 	var b strings.Builder
-	switch p.Role {
+	switch role {
 	case "server":
 		fmt.Fprintf(&b, "bindAddr = \"0.0.0.0\"\n")
 		fmt.Fprintf(&b, "bindPort = %d\n", p.ServerPort)
@@ -325,16 +344,20 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = d.Stop(inst) // params changed or dead process: clean restart
 	}
 
+	role, err := frpResolveRole(inst, p)
+	if err != nil {
+		return err
+	}
 	binDir, err := frpEnsureBinary(ctx, p)
 	if err != nil {
 		return err
 	}
 	bin := "frps"
-	if p.Role == "client" {
+	if role == "client" {
 		bin = "frpc"
 	}
 	binPath := binDir + "/" + bin
-	cfg := frpRenderConfig(inst.TunnelID, p)
+	cfg := frpRenderConfig(inst.TunnelID, role, p)
 	cfgPath := frpConfigPath(inst.TunnelID)
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		return fmt.Errorf("frp: config dir: %w", err)
@@ -348,11 +371,11 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		return err
 	}
 	d.mu.Lock()
-	d.runs[inst.TunnelID] = &frpInstState{params: p, cfg: cfgPath, proc: proc}
+	d.runs[inst.TunnelID] = &frpInstState{params: p, role: role, cfg: cfgPath, proc: proc}
 	d.mu.Unlock()
 	// Wire accounting is installed on the server side only (the client's
 	// control port is shared across instances and cannot be attributed).
-	if p.Role == "server" {
+	if role == "server" {
 		if err := frpWireRulesAdd(inst.TunnelID, p.AllowMin, p.AllowMax); err != nil {
 			// Data plane still runs; counters become Unknown honestly.
 			fmt.Fprintf(os.Stderr, "frp: wire accounting unavailable: %v\n", err)
@@ -374,7 +397,7 @@ func (d *FRPDriver) Stop(inst engine.Instance) error {
 	}
 	frpProcStop(st.proc)
 	_ = os.Remove(st.cfg)
-	if st.params.Role == "server" {
+	if st.role == "server" {
 		_ = frpWireRulesDel(inst.TunnelID, st.params.AllowMin, st.params.AllowMax)
 	}
 	return nil
@@ -416,7 +439,7 @@ func (d *FRPDriver) Health(inst engine.Instance) engine.Health {
 	if !alive {
 		return engine.Health{OK: false, Detail: "process exited", LatencyMs: -1}
 	}
-	if st.params.Role == "server" {
+	if st.role == "server" {
 		// Real handshake: the localhost dashboard API answers with auth.
 		start := time.Now()
 		code, err := frpDashStatus(st.params.DashPort, frpDashSecret(inst.TunnelID, st.params))
@@ -441,7 +464,7 @@ func (d *FRPDriver) Counters(inst engine.Instance) engine.Counters {
 	if st == nil {
 		return engine.Counters{}
 	}
-	if st.params.Role != "server" {
+	if st.role != "server" {
 		return engine.Counters{}
 	}
 	out := engine.Counters{}

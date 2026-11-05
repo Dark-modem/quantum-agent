@@ -28,22 +28,21 @@ import (
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
-func frpTestServerParams() frpParams {
+func frpTestParams() frpParams {
 	return frpParams{
-		Role: "server", Version: "0.61.1", Artifact: "frp-0.61.1-linux-amd64.tar.gz",
-		SHA256: strings.Repeat("ab", 32), Signature: "AAAA",
-		ServerPort: 7000, Token: "tok123", DashPort: 17500,
-		AllowMin: 34000, AllowMax: 34010,
-	}
-}
-
-func frpTestClientParams() frpParams {
-	return frpParams{
-		Role: "client", Version: "0.61.1", Artifact: "frp-0.61.1-linux-amd64.tar.gz",
+		ServerSide: "germany", Version: "0.61.1", Artifact: "frp-0.61.1-linux-amd64.tar.gz",
 		SHA256: strings.Repeat("ab", 32), Signature: "AAAA",
 		ServerAddr: "198.51.100.9", ServerPort: 7000, Token: "tok123",
 		RemotePort: 34001, LocalAddr: "127.0.0.1", LocalPort: 5201,
+		DashPort: 17500, AllowMin: 34000, AllowMax: 34010,
 	}
+}
+
+// frpTestInstances builds the two ends of one tunnel: the compiler sets
+// LocalServer to the receiving agent's own server name.
+func frpTestInstances(p frpParams) (serverInst, clientInst engine.Instance) {
+	return engine.Instance{TunnelID: "t1", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(p)},
+		engine.Instance{TunnelID: "t1", LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(p)}
 }
 
 func TestFRPDriverImplementsEngineDriver(t *testing.T) {
@@ -61,46 +60,43 @@ func TestFRPValidateParams(t *testing.T) {
 	if err := d.Validate(json.RawMessage(`not json`)); err == nil {
 		t.Fatal("non-JSON params accepted")
 	}
-	good, _ := json.Marshal(frpTestServerParams())
+	good, _ := json.Marshal(frpTestParams())
 	if err := d.Validate(good); err != nil {
-		t.Fatalf("valid server params rejected: %v", err)
-	}
-	goodC, _ := json.Marshal(frpTestClientParams())
-	if err := d.Validate(goodC); err != nil {
-		t.Fatalf("valid client params rejected: %v", err)
+		t.Fatalf("valid params rejected: %v", err)
 	}
 
-	bad := frpTestServerParams()
-	bad.Role = "gremlin"
+	bad := frpTestParams()
+	bad.ServerSide = ""
 	if err := d.Validate(mustJSON(bad)); err == nil {
-		t.Fatal("bad role accepted")
+		t.Fatal("params without server_side accepted")
 	}
-	bad = frpTestServerParams()
+	bad = frpTestParams()
 	bad.SHA256 = "short"
 	if err := d.Validate(mustJSON(bad)); err == nil {
 		t.Fatal("bad sha256 accepted")
 	}
-	bad = frpTestServerParams()
+	bad = frpTestParams()
 	bad.Token = `has "quote"`
 	if err := d.Validate(mustJSON(bad)); err == nil {
 		t.Fatal("token with quote accepted")
 	}
-	bad = frpTestServerParams()
+	bad = frpTestParams()
 	bad.AllowMin = 10
 	bad.AllowMax = 5
 	if err := d.Validate(mustJSON(bad)); err == nil {
 		t.Fatal("inverted port range accepted")
 	}
-	badC := frpTestClientParams()
+	badC := frpTestParams()
 	badC.RemotePort = 0
 	if err := d.Validate(mustJSON(badC)); err == nil {
-		t.Fatal("client without remote_port accepted")
+		t.Fatal("params without remote_port accepted")
 	}
 }
 
 func TestFRPRenderConfig(t *testing.T) {
-	p := frpTestServerParams()
-	srv := frpRenderConfig("t1", p)
+	p := frpTestParams()
+	srvInst, _ := frpTestInstances(p)
+	srv := frpRenderConfig(srvInst.TunnelID, "server", p)
 	for _, want := range []string{
 		`bindPort = 7000`, `auth.token = "tok123"`,
 		`webServer.port = 17500`, `allowPorts = [{ start = 34000, end = 34010 }]`,
@@ -109,8 +105,7 @@ func TestFRPRenderConfig(t *testing.T) {
 			t.Fatalf("server config missing %q:\n%s", want, srv)
 		}
 	}
-	c := frpTestClientParams()
-	cli := frpRenderConfig("t2", c)
+	cli := frpRenderConfig("t2", "client", p)
 	for _, want := range []string{
 		`serverAddr = "198.51.100.9"`, `serverPort = 7000`,
 		`name = "t2"`, `localPort = 5201`, `remotePort = 34001`,
@@ -196,7 +191,7 @@ func frpPinnedParams(p frpParams, shaHex, sigB64 string) frpParams {
 
 func TestFRPEnsureBinary(t *testing.T) {
 	fetchCalls, shaHex, sigB64 := frpSetTestEnv(t)
-	p := frpPinnedParams(frpTestServerParams(), shaHex, sigB64)
+	p := frpPinnedParams(frpTestParams(), shaHex, sigB64)
 
 	dir, err := frpEnsureBinary(context.Background(), p)
 	if err != nil {
@@ -232,7 +227,7 @@ func TestFRPEnsureBinary(t *testing.T) {
 
 func TestFRPStartStopHealthCounters(t *testing.T) {
 	fetchCalls, shaHex, sigB64 := frpSetTestEnv(t)
-	p := frpPinnedParams(frpTestServerParams(), shaHex, sigB64)
+	p := frpPinnedParams(frpTestParams(), shaHex, sigB64)
 
 	// fake process seam
 	spawned := 0
@@ -277,7 +272,7 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 	t.Cleanup(func() { frpDashHTTP = origDash })
 
 	d := NewFRPDriver()
-	inst := engine.Instance{TunnelID: "t1", Params: mustJSON(p)}
+	inst, _ := frpTestInstances(p)
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -311,7 +306,8 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 	// changed params → restart
 	p2 := p
 	p2.DashPort = 17501
-	if err := d.Start(context.Background(), engine.Instance{TunnelID: "t1", Params: mustJSON(p2)}); err != nil {
+	inst2, _ := frpTestInstances(p2)
+	if err := d.Start(context.Background(), inst2); err != nil {
 		t.Fatalf("restart Start: %v", err)
 	}
 	if spawned != 2 {
@@ -343,7 +339,7 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 
 func TestFRPUninstallRemovesCache(t *testing.T) {
 	fetchCalls, shaHex, sigB64 := frpSetTestEnv(t)
-	p := frpPinnedParams(frpTestServerParams(), shaHex, sigB64)
+	p := frpPinnedParams(frpTestParams(), shaHex, sigB64)
 	origSpawn := frpSpawn
 	frpSpawn = func(binPath, cfgPath string) (frpProcess, error) {
 		return &fakeFRPProcess{}, nil
@@ -354,7 +350,8 @@ func TestFRPUninstallRemovesCache(t *testing.T) {
 	t.Cleanup(func() { frpIptables = origIpt })
 
 	d := NewFRPDriver()
-	inst := engine.Instance{TunnelID: "t9", Params: mustJSON(p)}
+	inst, _ := frpTestInstances(p)
+	inst.TunnelID = "t9"
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -376,7 +373,7 @@ func TestFRPUninstallRemovesCache(t *testing.T) {
 
 func TestFRPManagerReconcile(t *testing.T) {
 	fetchCalls, shaHex, sigB64 := frpSetTestEnv(t)
-	p := frpPinnedParams(frpTestServerParams(), shaHex, sigB64)
+	p := frpPinnedParams(frpTestParams(), shaHex, sigB64)
 	origSpawn := frpSpawn
 	frpSpawn = func(binPath, cfgPath string) (frpProcess, error) {
 		return &fakeFRPProcess{}, nil
@@ -393,7 +390,7 @@ func TestFRPManagerReconcile(t *testing.T) {
 	mgr := engine.NewManager(reg)
 	res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "frp", Enabled: true}},
-		[]engine.TunnelSpec{{ID: "mt1", Engine: "frp", Params: mustJSON(p), Enabled: true}})
+		[]engine.TunnelSpec{{ID: "mt1", Engine: "frp", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(p), Enabled: true}})
 	if len(res.Errors) > 0 {
 		t.Fatalf("reconcile errors: %v", res.Errors)
 	}
