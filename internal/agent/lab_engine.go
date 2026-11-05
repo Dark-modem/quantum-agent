@@ -209,5 +209,5 @@ func (l *labFakeDriver) ForwardAddress(inst engine.Instance) (string, int, bool)
 // Describe implements the optional capability.
 func (l *labFakeDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: "fake", Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"lab_addr":"<foreign ip>","lab_port":<sink port>}`)}
+		ParamsSchema: json.RawMessage(`{"lab_addr":"<foreign ip>","lab_port":0}`)}
 }

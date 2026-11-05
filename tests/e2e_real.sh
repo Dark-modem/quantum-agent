@@ -285,6 +285,10 @@ if agentTestWait "v2 negotiation" 20 wait_v2; then
 else
   AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(json.load(sys.stdin)['agents'])")
   bad "v2 negotiated ($(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
+  for ns in "${NS_ALL[@]}"; do
+    nm=${ns#q-}
+    echo "[e2e] run-$nm: $(tail -3 "$LAB/run-$nm.log" 2>/dev/null)"
+  done
 fi
 
 # 6. push DesiredV2 to every agent -------------------------------------------
