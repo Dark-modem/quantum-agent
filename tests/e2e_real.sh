@@ -130,6 +130,10 @@ for i in $(seq 1 30); do
   sleep 0.5
 done
 [ "$LIVE" = "1" ] && ok "panel listening at $PANEL_URL" || { bad "panel never listened"; echo "--- panel.log ---"; tail -30 "$LAB/panel.log" 2>/dev/null; exit 1; }
+# Re-assert the ACCEPT rule AFTER the panel starts: the panel's own
+# startup may add firewall rules that shadow our earlier ACCEPT.
+sudo iptables -I INPUT 1 -s 10.200.0.0/24 -j ACCEPT 2>/dev/null
+sudo iptables -I INPUT 1 -i $BR -j ACCEPT 2>/dev/null
 curl -s -c $LAB/admin.cookies -X POST "$PANEL_URL/api/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"admin\",\"password\":\"$PANEL_PASS\"}" > $LAB/login.json
