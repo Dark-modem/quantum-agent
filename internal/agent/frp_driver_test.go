@@ -172,7 +172,7 @@ func frpSetTestEnv(t *testing.T) (fetchCalls *int, shaHex, sigB64 string) {
 	engineArtifactPubKeyB64 = pubB64
 	origIdent := frpLoadIdentity
 	frpLoadIdentity = func() (agentIdentity, bool) {
-		return agentIdentity{Server: "http://panel.test:7777", BasePath: "bp"}, true
+		return agentIdentity{Server: "http://panel.test:7777", BasePath: "bp", Name: "germany"}, true
 	}
 	fetchCalls = new(int)
 	origFetch := frpFetchArtifact

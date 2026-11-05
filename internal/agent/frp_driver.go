@@ -127,18 +127,22 @@ func frpValidateParams(p frpParams) error {
 	return nil
 }
 
-// frpResolveRole decides this end's role from the instance context:
-// the compiler sets Instance.LocalServer to the receiving agent's own
-// server name, so a match with server_side means "I host frps".
-func frpResolveRole(inst engine.Instance, p frpParams) (string, error) {
-	if inst.LocalServer == p.ServerSide {
+// frpResolveRole decides this end's role. The tunnel's two end names
+// arrive in Instance.LocalServer/RemoteServer — but both ends see the
+// SAME two names (swapped between fields), so they cannot identify self.
+// The robust self-identifier is the agent's own enrollment name: the
+// operator links agents to mesh servers whose names match the enrollment
+// names (the panel's link step is where that alignment is controlled).
+// name == server_side → this agent hosts frps; anything else → frpc.
+func frpResolveRole(p frpParams) (string, error) {
+	ident, ok := frpLoadIdentity()
+	if !ok {
+		return "", fmt.Errorf("frp: no controller identity — cannot resolve this end's role (fail closed)")
+	}
+	if strings.TrimSpace(p.ServerSide) == ident.Name {
 		return "server", nil
 	}
-	if inst.RemoteServer == p.ServerSide {
-		return "client", nil
-	}
-	return "", fmt.Errorf("frp: server_side %q matches neither this instance's local (%q) nor remote (%q) server",
-		p.ServerSide, inst.LocalServer, inst.RemoteServer)
+	return "client", nil
 }
 
 // frpValidateArtifactPins checks the artifact coordinates every role
@@ -372,7 +376,7 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = d.Stop(inst) // params changed or dead process: clean restart
 	}
 
-	role, err := frpResolveRole(inst, p)
+	role, err := frpResolveRole(p)
 	if err != nil {
 		return err
 	}
