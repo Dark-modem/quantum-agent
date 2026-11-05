@@ -98,7 +98,13 @@ func (d *MatrixDriver) power(op string, inst engine.Instance) error {
 	return nil
 }
 
-// Health implements engine.Driver.
+// Health implements engine.Driver: the systemd unit state AND the latest
+// rolling mesh probe (agent_health.go). A dead mesh behind an active unit
+// must not report OK — the balancer's "engine" probe and StateReportV2
+// both consume this view (Phase-4: a black-holed tunnel was reported
+// healthy because only the unit state was checked). Without a probe
+// window yet (fresh boot, loop not started) the unit state alone decides,
+// so this never reports worse than before.
 func (d *MatrixDriver) Health(inst engine.Instance) engine.Health {
 	var p matrixDriverParams
 	if err := json.Unmarshal(inst.Params, &p); err != nil {
@@ -112,12 +118,29 @@ func (d *MatrixDriver) Health(inst engine.Instance) engine.Health {
 	if !st.Enabled || st.Network != in.network() {
 		return engine.Health{OK: false, Detail: "no owned Matrix network on instance " + in.ID, LatencyMs: -1}
 	}
-	ok := matrixServiceActive(in)
-	detail := "unit active"
-	if !ok {
-		detail = "unit not active"
+	if !matrixServiceActive(in) {
+		return engine.Health{OK: false, Detail: "unit not active", LatencyMs: -1}
 	}
-	return engine.Health{OK: ok, Detail: detail, LatencyMs: -1}
+	// Unit active — consult the latest probe window when one exists.
+	agentHealthMu.Lock()
+	w, has := agentHealthLatest[in.ID]
+	agentHealthMu.Unlock()
+	return agentHealthWithWindow("unit active", w, has)
+}
+
+// agentHealthWithWindow combines the "unit active" verdict with the latest
+// rolling probe window. Pure so the decision table stays hermetically
+// testable; MatrixDriver.Health is the only caller.
+func agentHealthWithWindow(detail string, w agentTunnelHealth, has bool) engine.Health {
+	if !has {
+		// No window yet (fresh boot, probe loop not started): the unit
+		// state alone decides — never worse than the pre-Phase-4 view.
+		return engine.Health{OK: true, Detail: detail, LatencyMs: -1}
+	}
+	if !w.Reachable || w.Quality == "down" {
+		return engine.Health{OK: false, Detail: fmt.Sprintf("%s; mesh unreachable (%s, loss %.0f%%)", detail, w.Quality, w.LossPct), LatencyMs: -1}
+	}
+	return engine.Health{OK: true, Detail: detail + "; mesh " + w.Quality, LatencyMs: w.LatencyMs}
 }
 
 // Counters implements engine.Driver: wire bytes from the instance's

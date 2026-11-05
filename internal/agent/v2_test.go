@@ -513,3 +513,66 @@ func TestHelloCarriesRichCatalog(t *testing.T) {
 		t.Fatalf("hello.Engines lacks the matrix schema: %+v", got.Engines)
 	}
 }
+
+// TestStateReportV2DirectionalCounters pins the Phase-4 directional
+// accounting contract: the report carries the engine's independent Known
+// flags, per-direction overhead ratios from real pairs only, and the
+// engine sample accumulates both directions.
+func TestStateReportV2DirectionalCounters(t *testing.T) {
+	withTempConfig(t)
+	fake := registerV2TestDriver(t)
+	d := testDesiredV2()
+	if ack := agentApplyDesiredV2(&d); !ack.OK {
+		t.Fatalf("apply: %+v", ack)
+	}
+	fake.SetCounters("t1", engine.Counters{
+		WireRx: 1050, WireTx: 210, WireKnown: true,
+		PayloadRx: 1000, PayloadTx: 100, PayloadKnown: true,
+	})
+	rep := agentBuildStateReportV2()
+	tr := findTunnelRuntime(t, rep, "t1")
+	if !tr.WireKnown || !tr.PayloadKnown || !tr.CountersKnown {
+		t.Fatalf("known flags: %+v", tr)
+	}
+	if tr.OverheadRatio != 1.05 || tr.OverheadRatioTx != 2.1 {
+		t.Fatalf("ratios rx=%v tx=%v, want 1.05/2.1", tr.OverheadRatio, tr.OverheadRatioTx)
+	}
+	es := findEngineSample(t, rep, "fake")
+	if es.WireRx != 1050 || es.PayloadRx != 1000 || es.WireTx != 210 || es.PayloadTx != 100 {
+		t.Fatalf("engine sample: %+v", es)
+	}
+	if es.Ratio != 1.05 || es.RatioTx != 2.1 {
+		t.Fatalf("engine ratios: %+v", es)
+	}
+
+	// Payload-unknown engine (the UDP case): the flags are honest, no
+	// overhead ratio is invented, wire bytes still accumulate.
+	fake.SetCounters("t1", engine.Counters{WireRx: 50, WireTx: 5, WireKnown: true})
+	rep = agentBuildStateReportV2()
+	tr = findTunnelRuntime(t, rep, "t1")
+	if !tr.WireKnown || tr.PayloadKnown || tr.OverheadRatio != 0 || tr.OverheadRatioTx != 0 {
+		t.Fatalf("payload-unknown tunnel: %+v", tr)
+	}
+}
+
+func findTunnelRuntime(t *testing.T, rep *protocol.StateReportV2, id string) *protocol.TunnelRuntime {
+	t.Helper()
+	for i := range rep.Tunnels {
+		if rep.Tunnels[i].TunnelID == id {
+			return &rep.Tunnels[i]
+		}
+	}
+	t.Fatalf("tunnel %s missing from the report", id)
+	return nil
+}
+
+func findEngineSample(t *testing.T, rep *protocol.StateReportV2, eng string) *protocol.EngineOverheadSample {
+	t.Helper()
+	for i := range rep.Engines {
+		if rep.Engines[i].Engine == eng {
+			return &rep.Engines[i]
+		}
+	}
+	t.Fatalf("engine sample %s missing from the report", eng)
+	return nil
+}
