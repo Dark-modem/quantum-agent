@@ -56,6 +56,8 @@ cleanup() {
   done
   sudo ip link del $BR 2>/dev/null
   sudo nft delete table ip quantum-fwd 2>/dev/null
+  sudo iptables -D INPUT -s 10.200.0.0/24 -j ACCEPT 2>/dev/null
+  sudo iptables -D INPUT -i $BR -j ACCEPT 2>/dev/null
   say "cleanup done"
 }
 trap cleanup EXIT
@@ -95,6 +97,11 @@ done
 REACH=0
 for ipaddr in "${IP_ALL[@]}"; do ping -c1 -W1 "$ipaddr" >/dev/null 2>&1 && REACH=$((REACH+1)); done
 [ "$REACH" = "${#IP_ALL[@]}" ] && ok "all 6 namespaces reachable (${REACH}/6)" || bad "namespaces reachable ($REACH/6)"
+
+# The host firewall (ufw, INPUT policy DROP) would block netns→panel TCP:
+# explicitly allow the lab bridge subnet for the duration of the run.
+sudo iptables -I INPUT 1 -s 10.200.0.0/24 -j ACCEPT 2>/dev/null
+sudo iptables -I INPUT 1 -i $BR -j ACCEPT 2>/dev/null
 
 # 2. panel ------------------------------------------------------------------
 say "starting the real panel..."
