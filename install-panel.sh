@@ -74,13 +74,15 @@ need_systemd() { have systemctl || die "systemd is required"; }
 PORT="7443" BASE_PATH="" USERNAME="admin"
 PASSWORD="" PASSWORD_FILE="" GENERATE=0
 VERSION="latest" BINARY="" CHECKSUM=""
-NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0
+NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0 TLS_PORT="7443" SERVER_NAME=""
 
 usage() { sed -n '2,44p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)           PORT="${2:-}"; shift 2;;
+        --tls-port)       TLS_PORT="${2:-}"; shift 2;;
+        --server-name)    SERVER_NAME="${2:-}"; shift 2;;
         --base-path)      BASE_PATH="${2:-}"; shift 2;;
         --username)       USERNAME="${2:-}"; shift 2;;
         --password)       PASSWORD="${2:-}"; shift 2;;
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ "$PORT" =~ ^[0-9]{1,5}$ ]] && (( PORT >= 1 && PORT <= 65535 )) || die "--port wants 1-65535"
+[[ "$TLS_PORT" =~ ^[0-9]{1,5}$ ]] && (( TLS_PORT >= 1 && TLS_PORT <= 65535 )) || die "--tls-port wants 1-65535"
 if [[ -n "$BINARY" && -z "$CHECKSUM" && -f "${BINARY}.sha256" ]]; then
     CHECKSUM="$(trun 10 awk '{print $1}' "${BINARY}.sha256" 2>/dev/null || true)"
 fi
@@ -234,6 +237,26 @@ UNIT
 # ---------------------------------------------------------------------------
 # Initial admin credential (never printed by this script)
 # ---------------------------------------------------------------------------
+tls_selfsigned_step() {
+    # HTTPS from the FIRST start: the panel serves <configDir>/tls/server.crt
+    # + server.key on TLSPort (default 7443) via startHTTPSListener. Without
+    # a cert it would only bind localhost HTTP (upstream behavior).
+    local td="${PANEL_DIR}/tls"
+    if [[ -s "${td}/server.crt" && -s "${td}/server.key" ]]; then
+        info "TLS certificate already present (${td})"
+        return 0
+    fi
+    mkdir -p "$td"; chmod 700 "$td"
+    local cn="quantum-panel"
+    [[ -n "$SERVER_NAME" ]] && cn="$SERVER_NAME"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+        -keyout "${td}/server.key" -out "${td}/server.crt" \
+        -subj "/CN=${cn}" >/dev/null 2>&1
+    chmod 600 "${td}/server.key"; chmod 644 "${td}/server.crt"
+    info "self-signed TLS certificate generated (${td}) — panel serves HTTPS on :${TLS_PORT}"
+}
+
+
 credential_step() {
     local pwfile="${PANEL_DIR}/initial-admin-password"
     if [[ -f "${PANEL_DIR}/panel.json" ]] && grep -q '"pass_hash"' "${PANEL_DIR}/panel.json" 2>/dev/null; then
@@ -271,7 +294,7 @@ credential_step() {
         gen="$(printf '%s\n' "$out" | awk '/^Password:/{print $2}')"
         if [[ -n "$gen" ]]; then
             umask 077; printf '%s\n' "$gen" > "$pwfile"; umask 022
-            warn "generated admin password stored at $pwfile (mode 0600) — READ IT, then delete the file"
+            info "generated admin password stored at $pwfile (mode 0600) — READ IT, then delete the file"
         fi
     else
         info "admin credential set from your input (not displayed here)"
@@ -279,15 +302,16 @@ credential_step() {
     # Username/base-path/port are panel.json fields; write the declared ones
     # for a FIRST install (panel.json may not exist before the binary run).
     if [[ -f "${PANEL_DIR}/panel.json" ]] && have python3; then
-        GRE_PANEL_DIR="$PANEL_DIR" trun 20 python3 - "$USERNAME" "$PORT" "$BASE_PATH" <<'PY' >/dev/null 2>&1 || true
+        GRE_PANEL_DIR="$PANEL_DIR" trun 20 python3 - "$USERNAME" "$PORT" "$BASE_PATH" "$TLS_PORT" <<'PY' >/dev/null 2>&1 || true
 import json, os, sys
 p = os.path.join(os.environ["GRE_PANEL_DIR"], "panel.json")
 cfg = {}
 if os.path.exists(p):
     cfg = json.load(open(p))
-u, port, base = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+u, port, tls_port, base = sys.argv[1], int(sys.argv[2]), int(sys.argv[4]), sys.argv[3]
 cfg.setdefault("username", u)
 cfg.setdefault("port", port)
+cfg.setdefault("tls_port", tls_port)
 if base:
     cfg.setdefault("base_path", base.strip("/"))
 json.dump(cfg, open(p, "w"), indent=2)
@@ -306,9 +330,9 @@ firewall_step() {
         warn "ufw installed but inactive — panel port NOT opened (enable ufw deliberately, with the SSH door verified first)"
         return 0
     fi
-    trun 30 ufw status 2>/dev/null | grep -q "${PORT}/tcp" && { info "panel port already allowed"; return 0; }
-    trun 30 ufw allow "${PORT}/tcp" comment "quantum:installer:panel" >/dev/null
-    info "panel port open: ${PORT}/tcp (tagged quantum:installer:panel)"
+    trun 30 ufw status 2>/dev/null | grep -q "${PORT}/tcp" && { info "panel HTTPS port already allowed"; return 0; }
+    trun 30 ufw allow "${TLS_PORT}/tcp" comment "quantum:installer:panel" >/dev/null
+    info "panel HTTPS port open: ${TLS_PORT}/tcp (tagged quantum:installer:panel)"
 }
 
 # ---------------------------------------------------------------------------
@@ -335,7 +359,7 @@ verify() {
         if trun 6 bash -c "exec 3<>/dev/tcp/127.0.0.1/${PORT}" 2>/dev/null; then probe=1; break; fi
         sleep 1
     done
-    if [[ $probe -eq 1 ]]; then info "panel port ${PORT} answers locally"; else warn "panel port ${PORT} does not answer yet"; ok=0; fi
+    if [[ $probe -eq 1 ]]; then info "panel port ${TLS_PORT} answers locally"; else warn "panel port ${TLS_PORT} does not answer yet"; ok=0; fi
     [[ $ok -eq 1 ]] && info "VERIFY: OK" || { warn "VERIFY: problems above"; return 1; }
 }
 
@@ -405,10 +429,11 @@ install_binary
 # point): only NOW do we require systemd for the unit/service work.
 need_systemd
 create_user
+tls_selfsigned_step
 credential_step
 write_unit
 firewall_step
 start_service
 verify
-info "done. Login over https://<host>:${PORT}${BASE_PATH:+/${BASE_PATH#/}}/ — the panel is management-only;"
+info "done. Login over https://<host>:${TLS_PORT}${BASE_PATH:+/${BASE_PATH#/}}/ — the panel is management-only;"
 info "agents enroll with install-agent.sh against this URL."
