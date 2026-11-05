@@ -317,12 +317,17 @@ func agentReconcilePending(link agentLink) {
 	// v2 replay first (same contract, no panel needed): the last v2
 	// desired document is re-applied through the engine Manager +
 	// balancer + hardening module.
-	if st.DesiredV2Raw != nil && st.DesiredStatus == "pending" {
+	// Replay whenever a v2 document is journaled — "pending" (crashed
+	// before acking) AND "applied" (normal restart). Gating on pending
+	// alone meant every agent restart silently dropped its v2 tunnels
+	// until the panel pushed again; the re-apply is idempotent and
+	// bypasses the revision fence (it IS the agent's own last state).
+	if st.DesiredV2Raw != nil && (st.DesiredStatus == "pending" || st.DesiredStatus == "applied") {
 		var d agentDesiredV2
 		if err := json.Unmarshal(st.DesiredV2Raw, &d); err == nil && d.Revision != "" {
 			log.Printf("[agent] boot replay of v2 desired revision %s (no controller needed)", d.Revision)
 			agentMu.Lock()
-			ack := agentApplyDesiredV2(&d)
+			ack := agentApplyDesiredV2Fenced(&d, false)
 			agentMu.Unlock()
 			if ack.OK {
 				agentRecordAck(d.Revision, ack)
