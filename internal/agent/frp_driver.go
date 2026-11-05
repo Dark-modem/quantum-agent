@@ -234,12 +234,31 @@ func frpProcStop(p frpProcess) {
 	}
 }
 
-// frpInstState is the runtime state of one instance.
+// frpInstState is the runtime state of one instance. The supervisor
+// goroutine (one per RUNNING instance; none when idle) restarts the
+// process if it dies unexpectedly — the engine Manager only reconciles
+// on desired-state changes and boot, so without it a killed frp process
+// would stay dead until the next panel push.
 type frpInstState struct {
-	params frpParams
-	role   string
-	cfg    string
-	proc   frpProcess
+	params  frpParams
+	role    string
+	cfg     string
+	binPath string
+	proc    frpProcess
+	stop    chan struct{}
+	mu      sync.Mutex
+}
+
+func (st *frpInstState) setProc(p frpProcess) {
+	st.mu.Lock()
+	st.proc = p
+	st.mu.Unlock()
+}
+
+func (st *frpInstState) current() frpProcess {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.proc
 }
 
 // FRPDriver implements engine.Driver over frps/frpc.
@@ -402,9 +421,12 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = os.Remove(cfgPath)
 		return err
 	}
+	st := &frpInstState{params: p, role: role, cfg: cfgPath, binPath: binPath,
+		proc: proc, stop: make(chan struct{})}
 	d.mu.Lock()
-	d.runs[inst.TunnelID] = &frpInstState{params: p, role: role, cfg: cfgPath, proc: proc}
+	d.runs[inst.TunnelID] = st
 	d.mu.Unlock()
+	go d.supervise(inst.TunnelID, st) // one goroutine per RUNNING instance
 	// Wire accounting is installed on the server side only (the client's
 	// control port is shared across instances and cannot be attributed).
 	if role == "server" {
@@ -414,6 +436,32 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		}
 	}
 	return nil
+}
+
+// supervise keeps the instance's process alive until Stop: an
+// unexpected exit is restarted with a capped backoff. Exits when the
+// stop channel closes (Stop always closes it before killing the
+// process, so a killed process is never resurrected).
+func (d *FRPDriver) supervise(tunnelID string, st *frpInstState) {
+	backoff := 2 * time.Second
+	for {
+		select {
+		case <-st.stop:
+			return
+		case <-st.current().Done():
+			select {
+			case <-st.stop:
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 15*time.Second {
+				backoff *= 2
+			}
+			if proc, err := frpSpawn(st.binPath, st.cfg); err == nil {
+				st.setProc(proc)
+			}
+		}
+	}
 }
 
 // Stop implements engine.Driver: terminate the process, drop the config
@@ -427,7 +475,8 @@ func (d *FRPDriver) Stop(inst engine.Instance) error {
 	if st == nil {
 		return nil
 	}
-	frpProcStop(st.proc)
+	close(st.stop)
+	frpProcStop(st.current())
 	_ = os.Remove(st.cfg)
 	if st.role == "server" {
 		_ = frpWireRulesDel(inst.TunnelID, st.params.AllowMin, st.params.AllowMax)
@@ -464,7 +513,7 @@ func (d *FRPDriver) Health(inst engine.Instance) engine.Health {
 	}
 	alive := true
 	select {
-	case <-st.proc.Done():
+	case <-st.current().Done():
 		alive = false
 	default:
 	}

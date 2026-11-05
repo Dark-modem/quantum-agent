@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
@@ -454,3 +455,57 @@ func (f *fakeFRPProcess) doneInit() {
 
 var _ = httptest.NewServer // keep import if unused paths change
 var _ = http.StatusOK
+
+// dyingFRPProcess exits on its own shortly after construction.
+type dyingFRPProcess struct{ done chan error }
+
+func newDyingFRPProcess() *dyingFRPProcess {
+	d := &dyingFRPProcess{done: make(chan error, 1)}
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		d.done <- nil
+	}()
+	return d
+}
+
+func (f *dyingFRPProcess) Pid() int                   { return 1 }
+func (f *dyingFRPProcess) Signal(sig os.Signal) error { return nil }
+func (f *dyingFRPProcess) Done() <-chan error         { return f.done }
+
+func TestFRPSupervisorRespawns(t *testing.T) {
+	fetchCalls, _, _ := frpSetTestEnv(t)
+	p := frpTestParams()
+	origSpawn := frpSpawn
+	spawns := 0
+	frpSpawn = func(binPath, cfgPath string) (frpProcess, error) {
+		spawns++
+		return newDyingFRPProcess(), nil
+	}
+	t.Cleanup(func() { frpSpawn = origSpawn })
+	origIpt := frpIptables
+	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { frpIptables = origIpt })
+
+	d := NewFRPDriver()
+	inst, _ := frpTestInstances(p)
+	if err := d.Start(context.Background(), inst); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for spawns < 2 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if spawns < 2 {
+		t.Fatalf("supervisor did not respawn (spawns=%d)", spawns)
+	}
+	if err := d.Stop(inst); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	afterStop := spawns
+	time.Sleep(300 * time.Millisecond)
+	if spawns != afterStop {
+		t.Fatalf("supervisor respawned after Stop (%d -> %d)", afterStop, spawns)
+	}
+	_ = fetchCalls
+}
