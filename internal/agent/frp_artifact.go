@@ -93,10 +93,14 @@ func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("frp: no engine artifact signing key pinned in this build (fail closed)")
 	}
+	name, sha256Hex, sigB64, err := p.frpArtifactPin()
+	if err != nil {
+		return "", err
+	}
 	dir := frpBinDir(p.Version)
 	marker := filepath.Join(dir, "artifact.sha256")
 	if data, err := os.ReadFile(marker); err == nil &&
-		strings.EqualFold(strings.TrimSpace(string(data)), p.SHA256) &&
+		strings.EqualFold(strings.TrimSpace(string(data)), sha256Hex) &&
 		fileExists(filepath.Join(dir, "frps")) && fileExists(filepath.Join(dir, "frpc")) {
 		return dir, nil // cache hit
 	}
@@ -106,11 +110,11 @@ func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 		return "", fmt.Errorf("frp: no controller identity — cannot fetch engine artifact (fail closed)")
 	}
 
-	body, err := frpFetchArtifact(ctx, frpArtifactURL(ident, p.Artifact))
+	body, err := frpFetchArtifact(ctx, frpArtifactURL(ident, name))
 	if err != nil {
 		return "", err
 	}
-	if err := engine.VerifyArtifact(body, p.SHA256, p.Signature, key); err != nil {
+	if err := engine.VerifyArtifact(body, sha256Hex, sigB64, key); err != nil {
 		return "", err
 	}
 
@@ -120,7 +124,7 @@ func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 	if err := frpExtract(body, dir); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(marker, []byte(p.SHA256), 0o600); err != nil {
+	if err := os.WriteFile(marker, []byte(sha256Hex), 0o600); err != nil {
 		return "", fmt.Errorf("frp: cache marker: %w", err)
 	}
 	return dir, nil

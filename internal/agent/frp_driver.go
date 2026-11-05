@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,20 +52,41 @@ const frpID = "frp"
 // name — the compiler fills Instance.LocalServer with the receiving
 // agent's own server name, so a match means "I am the frps side").
 type frpParams struct {
-	ServerSide string `json:"server_side"`           // server name hosting frps
-	Version    string `json:"version"`               // frp artifact version (cache key)
-	Artifact   string `json:"artifact"`              // artifact file name on the controller
-	SHA256     string `json:"sha256"`                // pin: sha256 hex of the artifact
-	Signature  string `json:"signature"`             // pin: base64 ed25519 signature over the artifact
-	ServerAddr string `json:"server_addr,omitempty"` // frps host as seen from the frpc side
-	ServerPort int    `json:"server_port"`           // frps bind/control port
-	Token      string `json:"token"`                 // shared frp auth token
-	RemotePort int    `json:"remote_port"`           // public data port on frps
-	LocalAddr  string `json:"local_addr"`            // Iran-side target host for frpc
-	LocalPort  int    `json:"local_port"`            // Iran-side target port
-	DashPort   int    `json:"dashboard_port"`        // frps 127.0.0.1 webServer port (payload counters)
-	AllowMin   int    `json:"allow_port_min"`        // frps smallest allowed remote port
-	AllowMax   int    `json:"allow_port_max"`        // frps largest allowed remote port
+	ServerSide string `json:"server_side"`     // server name hosting frps
+	Version    string `json:"version"`         // frp artifact version (cache key)
+	Artifact   string `json:"artifact"`        // artifact name TEMPLATE; "{arch}" -> runtime GOARCH
+	SHA256Amd  string `json:"sha256_amd64"`    // pin: sha256 hex of the amd64 artifact
+	SHA256Arm  string `json:"sha256_arm64"`    // pin: sha256 hex of the arm64 artifact
+	SigAmd     string `json:"signature_amd64"` // pin: base64 ed25519 signature (amd64)
+	SigArm     string `json:"signature_arm64"` // pin: base64 ed25519 signature (arm64)
+	ServerAddr string `json:"server_addr"`     // frps host as seen from the frpc side
+	ServerPort int    `json:"server_port"`     // frps bind/control port
+	Token      string `json:"token"`           // shared frp auth token
+	RemotePort int    `json:"remote_port"`     // public data port on frps
+	LocalAddr  string `json:"local_addr"`      // Iran-side target host for frpc
+	LocalPort  int    `json:"local_port"`      // Iran-side target port
+	DashPort   int    `json:"dashboard_port"`  // frps 127.0.0.1 webServer port (payload counters)
+	AllowMin   int    `json:"allow_port_min"`  // frps smallest allowed remote port
+	AllowMax   int    `json:"allow_port_max"`  // frps largest allowed remote port
+}
+
+// frpArtifactPin resolves this host's artifact coordinates by GOARCH.
+// Both architectures' pins ride the tunnel description (one tunnel row
+// reaches an amd64 Iran agent and an arm64 foreign agent), and each end
+// verifies only its own artifact.
+func (p frpParams) frpArtifactPin() (name, sha256Hex, sigB64 string, err error) {
+	arch := strings.ToLower(runtime.GOARCH)
+	if !strings.Contains(p.Artifact, "{arch}") {
+		return "", "", "", fmt.Errorf("frp: artifact template must contain {arch}")
+	}
+	name = strings.ReplaceAll(p.Artifact, "{arch}", arch)
+	switch arch {
+	case "amd64":
+		return name, p.SHA256Amd, p.SigAmd, nil
+	case "arm64":
+		return name, p.SHA256Arm, p.SigArm, nil
+	}
+	return "", "", "", fmt.Errorf("frp: no artifact pin for GOARCH %q", arch)
 }
 
 // frpValidateParams checks the union shape (no side effects, no binary
@@ -126,17 +148,23 @@ func frpValidateArtifactPins(p frpParams) error {
 		strings.ContainsAny(p.Version, "/\\\"' \t\n\r") {
 		return fmt.Errorf("frp: version must be 1-64 safe chars")
 	}
-	if !frpArtifactNameOK(p.Artifact) {
-		return fmt.Errorf("frp: artifact name invalid")
+	if !strings.Contains(p.Artifact, "{arch}") || strings.ContainsAny(p.Artifact, " \t\n\r\"\\") {
+		return fmt.Errorf("frp: artifact must be a name template containing {arch}")
 	}
-	if len(p.SHA256) != 64 {
-		return fmt.Errorf("frp: sha256 must be 64 hex chars")
-	}
-	if _, err := hex.DecodeString(p.SHA256); err != nil {
-		return fmt.Errorf("frp: sha256 must be hex")
-	}
-	if p.Signature == "" || len(p.Signature) > 256 {
-		return fmt.Errorf("frp: signature required (base64 ed25519 over the artifact)")
+	for _, a := range []struct {
+		arch string
+		sha  string
+		sig  string
+	}{{"amd64", p.SHA256Amd, p.SigAmd}, {"arm64", p.SHA256Arm, p.SigArm}} {
+		if len(a.sha) != 64 {
+			return fmt.Errorf("frp: sha256 (%s) must be 64 hex chars", a.arch)
+		}
+		if _, err := hex.DecodeString(a.sha); err != nil {
+			return fmt.Errorf("frp: sha256 (%s) must be hex", a.arch)
+		}
+		if a.sig == "" || len(a.sig) > 256 {
+			return fmt.Errorf("frp: signature (%s) required (base64 ed25519 over the artifact)", a.arch)
+		}
 	}
 	return nil
 }

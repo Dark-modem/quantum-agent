@@ -28,10 +28,16 @@ import (
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
+var frpTestPins = struct{ amd, arm, sigAmd, sigArm string }{
+	strings.Repeat("ab", 32), strings.Repeat("cd", 32), "AAAA", "BBBB",
+}
+
 func frpTestParams() frpParams {
 	return frpParams{
-		ServerSide: "germany", Version: "0.61.1", Artifact: "frp-0.61.1-linux-amd64.tar.gz",
-		SHA256: strings.Repeat("ab", 32), Signature: "AAAA",
+		ServerSide: "germany", Version: "0.61.1",
+		Artifact:  "frp-0.61.1-linux-{arch}.tar.gz",
+		SHA256Amd: frpTestPins.amd, SHA256Arm: frpTestPins.arm,
+		SigAmd: frpTestPins.sigAmd, SigArm: frpTestPins.sigArm,
 		ServerAddr: "198.51.100.9", ServerPort: 7000, Token: "tok123",
 		RemotePort: 34001, LocalAddr: "127.0.0.1", LocalPort: 5201,
 		DashPort: 17500, AllowMin: 34000, AllowMax: 34010,
@@ -71,9 +77,14 @@ func TestFRPValidateParams(t *testing.T) {
 		t.Fatal("params without server_side accepted")
 	}
 	bad = frpTestParams()
-	bad.SHA256 = "short"
+	bad.SHA256Amd = "short"
 	if err := d.Validate(mustJSON(bad)); err == nil {
-		t.Fatal("bad sha256 accepted")
+		t.Fatal("bad amd64 sha256 accepted")
+	}
+	bad = frpTestParams()
+	bad.SHA256Arm = "short"
+	if err := d.Validate(mustJSON(bad)); err == nil {
+		t.Fatal("bad arm64 sha256 accepted")
 	}
 	bad = frpTestParams()
 	bad.Token = `has "quote"`
@@ -167,11 +178,16 @@ func frpSetTestEnv(t *testing.T) (fetchCalls *int, shaHex, sigB64 string) {
 	origFetch := frpFetchArtifact
 	frpFetchArtifact = func(ctx context.Context, url string) ([]byte, error) {
 		*fetchCalls++
-		if !strings.Contains(url, "/bp/api/agent/artifact/frp-0.61.1-linux-amd64.tar.gz") {
+		if !strings.Contains(url, "/bp/api/agent/artifact/frp-0.61.1-linux-") {
 			return nil, fmt.Errorf("unexpected artifact url %q", url)
 		}
 		return body, nil
 	}
+	// the fake artifact must satisfy whatever pins frpTestParams carries
+	frpTestPins.amd = shaHex
+	frpTestPins.arm = shaHex
+	frpTestPins.sigAmd = sigB64
+	frpTestPins.sigArm = sigB64
 	origCfg := configDir
 	configDir = t.TempDir()
 	t.Cleanup(func() {
@@ -183,15 +199,9 @@ func frpSetTestEnv(t *testing.T) (fetchCalls *int, shaHex, sigB64 string) {
 	return fetchCalls, shaHex, sigB64
 }
 
-func frpPinnedParams(p frpParams, shaHex, sigB64 string) frpParams {
-	p.SHA256 = shaHex
-	p.Signature = sigB64
-	return p
-}
-
 func TestFRPEnsureBinary(t *testing.T) {
-	fetchCalls, shaHex, sigB64 := frpSetTestEnv(t)
-	p := frpPinnedParams(frpTestParams(), shaHex, sigB64)
+	fetchCalls, _, _ := frpSetTestEnv(t)
+	p := frpTestParams()
 
 	dir, err := frpEnsureBinary(context.Background(), p)
 	if err != nil {
@@ -210,9 +220,9 @@ func TestFRPEnsureBinary(t *testing.T) {
 	if *fetchCalls != 1 {
 		t.Fatalf("cache hit refetched (%d calls)", *fetchCalls)
 	}
-	// different pins (different artifact) → refetch
+	// different pins (different artifact) → verification fails
 	p2 := p
-	p2.SHA256 = strings.Repeat("cd", 32)
+	p2.SHA256Amd = strings.Repeat("ef", 32)
 	if _, err := frpEnsureBinary(context.Background(), p2); err == nil {
 		t.Fatal("wrong-sha artifact accepted")
 	}
@@ -226,8 +236,8 @@ func TestFRPEnsureBinary(t *testing.T) {
 }
 
 func TestFRPStartStopHealthCounters(t *testing.T) {
-	fetchCalls, shaHex, sigB64 := frpSetTestEnv(t)
-	p := frpPinnedParams(frpTestParams(), shaHex, sigB64)
+	fetchCalls, _, _ := frpSetTestEnv(t)
+	p := frpTestParams()
 
 	// fake process seam
 	spawned := 0
@@ -338,8 +348,8 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 }
 
 func TestFRPUninstallRemovesCache(t *testing.T) {
-	fetchCalls, shaHex, sigB64 := frpSetTestEnv(t)
-	p := frpPinnedParams(frpTestParams(), shaHex, sigB64)
+	fetchCalls, _, _ := frpSetTestEnv(t)
+	p := frpTestParams()
 	origSpawn := frpSpawn
 	frpSpawn = func(binPath, cfgPath string) (frpProcess, error) {
 		return &fakeFRPProcess{}, nil
@@ -372,8 +382,8 @@ func TestFRPUninstallRemovesCache(t *testing.T) {
 }
 
 func TestFRPManagerReconcile(t *testing.T) {
-	fetchCalls, shaHex, sigB64 := frpSetTestEnv(t)
-	p := frpPinnedParams(frpTestParams(), shaHex, sigB64)
+	fetchCalls, _, _ := frpSetTestEnv(t)
+	p := frpTestParams()
 	origSpawn := frpSpawn
 	frpSpawn = func(binPath, cfgPath string) (frpProcess, error) {
 		return &fakeFRPProcess{}, nil
