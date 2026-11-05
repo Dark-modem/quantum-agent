@@ -274,13 +274,23 @@ agentTestWait() { # desc seconds command...
   done
   return 1
 }
-V2N=$(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")
-[ "$V2N" = "6" ] && ok "v2 negotiated on all 6 agents" || bad "v2 negotiated ($V2N/6)"
+# Re-fetch: the agents just connected and negotiated — the stale list
+# from enrollment time still shows proto_version 0.
+wait_v2() {
+  AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(json.load(sys.stdin)['agents'])")
+  [ "$(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")" = "6" ]
+}
+if agentTestWait "v2 negotiation" 20 wait_v2; then
+  ok "v2 negotiated on all 6 agents"
+else
+  AGENTS=$(api GET /api/mesh/agents | jq_get "json.dumps(json.load(sys.stdin)['agents'])")
+  bad "v2 negotiated ($(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
+fi
 
 # 6. push DesiredV2 to every agent -------------------------------------------
 say "pushing DesiredV2 to every agent..."
 for aid in $(echo "$AGENTS" | jq_get "[a['id'] for a in d]"); do
-  api POST /api/mesh/agents/$aid/push > "$LAB/push-$aid.json"
+  api POST /api/mesh/agents/$aid/push > "$LAB/push-$aid.json" 2>/dev/null
 done
 sleep 3
 # fake sinks listening on the foreign agents (both foreign servers host
