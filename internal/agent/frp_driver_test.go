@@ -271,7 +271,7 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 	// dashboard seam
 	origDash := frpDashHTTP
 	frpDashHTTP = func(ctx context.Context, url, user, pass string) (int, []byte, error) {
-		if strings.Contains(url, "/api/status") {
+		if strings.Contains(url, "/api/serverinfo") {
 			return 200, []byte(`{"version":"0.61.1"}`), nil
 		}
 		if strings.Contains(url, "/api/proxy/tcp") {

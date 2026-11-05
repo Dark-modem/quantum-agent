@@ -196,10 +196,12 @@ func frpWireBytes(tunnelID string, allowMin, allowMax int) (rx, tx uint64, ok bo
 	return rx, tx, ok
 }
 
-// frpDashStatus probes the frps web API (used by Health).
+// frpDashStatus probes the frps web API (used by Health). The endpoint is
+// /api/serverinfo on frp >= 0.52 (the legacy /api/status route was removed
+// upstream; found by the frp integration test against real frp v0.61).
 func frpDashStatus(dashPort int, pass string) (int, error) {
 	code, _, err := frpDashHTTP(context.Background(),
-		fmt.Sprintf("http://127.0.0.1:%d/api/status", dashPort), "quantum", pass)
+		fmt.Sprintf("http://127.0.0.1:%d/api/serverinfo", dashPort), "quantum", pass)
 	return code, err
 }
 
