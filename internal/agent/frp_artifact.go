@@ -149,6 +149,9 @@ func frpExtract(body []byte, dir string) error {
 		if err != nil {
 			return fmt.Errorf("frp: artifact tar: %w", err)
 		}
+		if hdr.Typeflag == tar.TypeDir {
+			continue // the release wraps binaries in a version directory
+		}
 		if hdr.Typeflag != tar.TypeReg {
 			return fmt.Errorf("frp: artifact contains non-regular entry %q", hdr.Name)
 		}
