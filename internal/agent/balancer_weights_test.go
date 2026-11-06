@@ -17,6 +17,8 @@ package agent
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -408,5 +410,85 @@ func TestLabFakeSideAwareSink(t *testing.T) {
 	}
 	if host, port, ok := lab.ForwardAddress(far1); !ok || host != "10.200.0.21" || port != 8443 {
 		t.Fatalf("far ForwardAddress = %s:%d %v", host, port, ok)
+	}
+}
+
+// TestRenderForwardUDPNftCheck validates the rendered UDP (and TCP)
+// per-target dnat rules against the REAL kernel parser: nft -c in a
+// throwaway transaction (no rules are applied). Root-gated — skipped
+// without CAP_NET_ADMIN or without nft installed. This closes the
+// Phase-5 report item "confirm the render with a UDP forward rule and
+// nft -c on both families" (the two families the renderer emits: tcp
+// and udp; IPv6 targets do not exist in DesiredV2 yet, so no ip6 table
+// is rendered).
+func TestRenderForwardUDPNftCheck(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root-gated: nft -c needs CAP_NET_ADMIN")
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft not installed")
+	}
+	script := renderForwardNFT([]forwardRender{{ID: "fw-udp-check", ListenPort: 8443, Proto: "both", TargetPort: 8443,
+		Targets: []balTarget{
+			{TunnelID: "t1", IP: "10.200.0.21", Port: 8443, Weight: 70},
+			{TunnelID: "t2", IP: "10.200.0.22", Port: 8444, Weight: 30},
+		}}})
+	for _, chain := range []string{"fw_fw_udp_check_tcp", "fw_fw_udp_check_udp"} {
+		if !strings.Contains(script, "chain "+chain+" ") {
+			t.Fatalf("render missing the %s chain:\n%s", chain, script)
+		}
+	}
+	name, err := writeTempFile("quantum-nftcheck-*.nft", script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(name)
+	out, err := exec.Command("nft", "-c", "-f", name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nft -c rejected the render: %v\n%s\nscript:\n%s", err, out, script)
+	}
+}
+
+// TestBalancerSwitchBackStickyAway pins the failback semantics the panel's
+// default policy (SwitchBackS=300) relies on: a recovered target is NOT
+// re-admitted before the sticky-away window elapses, and IS re-admitted
+// once it does. Clock-driven via the balancer's nowFn seam.
+func TestBalancerSwitchBackStickyAway(t *testing.T) {
+	h := newBalHarness(t)
+	d := newWeightTestDesired(t)
+	d.Balancing.Failover = protocol.FailoverRules{SwitchBackS: 300}
+	reconcileWeightDesired(t, h, &d)
+	h.bal.Reconcile(&d)
+
+	// t1 dies and is excluded.
+	h.fake.SetHealth("t1", engine.Health{OK: false})
+	h.bal.tick()
+	h.bal.tick()
+	if dist := numgenDistribution(t, h.lastScript()); len(dist) != 1 || dist["10.189.0.3"] != 10000 {
+		t.Fatalf("exclusion: %v", dist)
+	}
+
+	// t1 recovers — but the sticky-away window defers re-admission.
+	h.fake.SetHealth("t1", engine.Health{OK: true})
+	for i := 0; i < 3; i++ {
+		h.mu.Lock()
+		h.now = h.now.Add(60 * time.Second) // 3 minutes: still inside the 300s window
+		h.mu.Unlock()
+		h.bal.tick()
+	}
+	if dist := numgenDistribution(t, h.lastScript()); len(dist) != 1 || dist["10.189.0.3"] != 10000 {
+		t.Fatalf("sticky-away must keep the target out for 300s: %v", dist)
+	}
+
+	// Past the window (wentDownAt + 300s), the next healthy tick re-admits.
+	h.mu.Lock()
+	h.now = h.now.Add(200 * time.Second)
+	h.mu.Unlock()
+	rep := h.bal.tick()
+	if len(rep.DetectedUp) != 1 || rep.DetectedUp[0] != "t1" {
+		t.Fatalf("post-window re-admission: %+v", rep.DetectedUp)
+	}
+	if dist := numgenDistribution(t, h.lastScript()); len(dist) != 2 || dist["10.189.0.2"] < 6800 || dist["10.189.0.2"] > 7200 {
+		t.Fatalf("post-window distribution: %v", dist)
 	}
 }

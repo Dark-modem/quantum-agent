@@ -143,6 +143,13 @@ sudo iptables -I FORWARD 1 -s 10.200.0.0/24 -d 10.200.0.0/24 -j ACCEPT 2>/dev/nu
 say "starting the real panel..."
 export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS
 mkdir -p $LAB/panel
+# Pin the port BEFORE first start: the panel's preferred port (7777) is
+# held by a boot-time process on this machine and the panel's auto-switch
+# watcher rebinds the listener mid-run (observed as connection-refused on
+# the scripted calls and the enroll POSTs). A pre-set port keeps the
+# listener stable for the whole run.
+PANEL_PORT=7779
+printf '{"port": %d}\n' "$PANEL_PORT" > $LAB/panel/panel.json
 $LAB/quantum-panel > $LAB/panel.log 2>&1 &
 PANEL_PID=$!
 # First start generates the config: random base path + first free port,
@@ -274,6 +281,14 @@ TOPO1=$(jq_get $LAB/gen1.json "d['topology_id']")
 N1=$(jq_get $LAB/gen1.json "len(d['tunnels'])")
 [ "$N1" = "8" ] && ok "drak-hz generated (2x2x2=8 tunnels)" || bad "drak-hz generated ($N1 tunnels) raw=$GEN1 && tail -12 $LAB/api.log 2>/dev/null"
 
+# The panel's default failover policy is SwitchBackS=300 (a 300-second
+# sticky-away before a recovered target is re-admitted). The balancer
+# honors it correctly — but these sections test the MECHANICS (failure
+# detection, exclusion, re-admission), so the lab topologies opt out of
+# the sticky window; the sticky-away semantics are covered hermetically
+# by TestBalancerSwitchBackStickyAway.
+TOPO1_ID=$(jq_get $LAB/gen1.json "d['topology_id']")
+api PATCH "/api/mesh/topologies/$TOPO1_ID" '{"failover":{"switch_back_s":0}}' > /dev/null
 refresh_panel_addr   # follow the panel port before every HTTP phase
 # Patch every fake tunnel's engine_params with its remote server's lab IP.
 # A short settle after the config burst: the panel rejects a connection
@@ -615,7 +630,16 @@ T0=$(date +%s.%N)
 # Precondition: the dnat map must be live BEFORE the injection — "the
 # target vanished" means nothing if it was never rendered.
 if ! nft_map | grep -q "dnat"; then bad "precondition: no dnat rendered before the failover injection"; fi
+# The injection MUST provably install: a silently-failing block would
+# make "the target did not vanish" meaningless (Phase-5 report UNVERIFIED
+# item: the port-scoped rules were swallowed by 2>/dev/null).
 block_target q-ir-drak-1 "$IP_HZ1" "$P1_PORT"
+if sudo ip netns exec q-ir-drak-1 iptables -C OUTPUT -d "$IP_HZ1" -p tcp --dport "$P1_PORT" -j DROP 2>/dev/null \
+   && sudo ip netns exec q-ir-drak-1 iptables -C FORWARD -d "$IP_HZ1" -p tcp --dport "$P1_PORT" -j DROP 2>/dev/null; then
+  ok "port-scoped injection rules verified present (OUTPUT+FORWARD, $IP_HZ1:$P1_PORT)"
+else
+  bad "port-scoped injection rules NOT installed"
+fi
 # Detection = the target disappearing from the KERNEL ruleset (the agent
 # re-renders on the health flip) while the chain itself still exists.
 DETECTED=0
@@ -626,9 +650,16 @@ while [ $(date +%s) -lt $DEADLINE ]; do
 done
 T1=$(date +%s.%N)
 DT=$(python3 -c "print(f'{$T1-$T0:.1f}')")
-if [ "$DETECTED" = "1" ]; then ok "tunnel failover: hz-fra-1 excluded from the nft map in ${DT}s (detection)"; else bad "tunnel failover: hz-fra-1 not excluded within 20s"; fi
+if [ "$DETECTED" = "1" ]; then ok "tunnel failover: hz-fra-1 excluded from the nft map in ${DT}s (detection)"; else bad "tunnel failover: hz-fra-1 not excluded within 45s"; fi
 FAILOVER_TIME=$DT
-# New traffic must now flow 100% to hz-fra-2.
+# New traffic must now flow to the survivor only. SHORT-BURST STATISTICAL
+# NOTE (closes the Phase-5 report's short-burst UNVERIFIED item): with
+# n=200 connections the binomial standard error at p=0.7 is
+# sqrt(0.7*0.3/200) ≈ 3.2pp — a ±2pp band is statistically meaningless at
+# this burst size, so this check asserts DELIVERY only (bytes reached the
+# survivor, none the blocked target). Proportional assertions with the
+# ±2pp band are made exclusively on the 10,000-connection bursts, where
+# σ ≈ 0.45pp.
 SB1=$(fake_tunnel_usage)
 send_conns 200
 wait_usage "$(echo "$SB1" | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)" || true
@@ -659,7 +690,7 @@ while [ $(date +%s) -lt $DEADLINE ]; do
 done
 T1=$(date +%s.%N)
 DT2=$(python3 -c "print(f'{$T1-$T0:.1f}')")
-if [ "$DETECTED2" = "1" ]; then ok "whole foreign server excluded from the nft map in ${DT2}s"; else bad "whole server not excluded within 20s"; fi
+if [ "$DETECTED2" = "1" ]; then ok "whole foreign server excluded from the nft map in ${DT2}s"; else bad "whole server not excluded within 45s"; fi
 WHOLE_SERVER_TIME=$DT2
 # Recovery of the server: traffic returns to the 70/30 split.
 T0=$(date +%s.%N)
@@ -788,7 +819,7 @@ DEADLINE=$(( $(date +%s) + 45 ))
 FLIPPED=0
 while [ $(date +%s) -lt $DEADLINE ]; do
   # hz-fra-1's range must now be the MINOR share (0-29 for 30%).
-  if nft_map | grep -q "0-29 : $IP_HZ1"; then FLIPPED=1; break; fi
+  if nft_map | grep -q "0-29 : $IP_HZ1" && nft_map | grep -q "30-99 : $IP_HZ2"; then FLIPPED=1; break; fi
   sleep 0.3
 done
 if [ "$FLIPPED" = "1" ]; then ok "weight change re-rendered the nft map (30/70 ranges)"; else bad "weight change did not re-render the nft map"; fi
