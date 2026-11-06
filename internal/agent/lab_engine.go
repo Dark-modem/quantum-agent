@@ -234,7 +234,10 @@ func (l *labFakeDriver) Health(inst engine.Instance) engine.Health {
 	var p labParams
 	_ = json.Unmarshal(inst.Params, &p)
 	if p.LabAddr != "" && !labOwnsAddr(p.LabAddr) {
-		ok := labProbeTCP(p.LabAddr, p.LabPort, 700*time.Millisecond)
+		// 2s: matches the real matrix engine's probe-window tolerance — a
+		// single tight dial under forwarded-traffic load flapped the
+		// health view and churned the ruleset (Phase-5 e2e).
+		ok := labProbeTCP(p.LabAddr, p.LabPort, 2*time.Second)
 		detail := "lab fake: far end reachable"
 		if !ok {
 			detail = "lab fake: far end unreachable"

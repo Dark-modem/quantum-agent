@@ -99,8 +99,11 @@ func renderForwardChain(proto string, r forwardRender) string {
 	// Per-target ports: lab sinks get one port per tunnel, so targets to
 	// the same foreign host differ by port. The concatenated form
 	// `<addr> . <port>` (verified with nft -c against nftables 1.0.9)
-	// expresses that; the legacy single-port suffix stays for the
-	// uniform case.
+	// expresses that. Phase-5 bug: the single-port suffix used the RULE's
+	// TargetPort even when the driver's ForwardAddress carried a
+	// different (correct) port — a single remaining target was DNATed to
+	// a port nothing listened on. The target's own port ALWAYS wins;
+	// TargetPort is only the fallback when a driver gave none.
 	perTargetPort := false
 	for _, t := range sorted {
 		if t.Port != sorted[0].Port {
@@ -108,6 +111,7 @@ func renderForwardChain(proto string, r forwardRender) string {
 			break
 		}
 	}
+	uniformPort := sorted[0].Port
 	var elems []string
 	lo := 0
 	for _, t := range sorted {
@@ -119,7 +123,7 @@ func renderForwardChain(proto string, r forwardRender) string {
 		if hi >= total {
 			hi = total - 1
 		}
-		if perTargetPort {
+		if perTargetPort || (uniformPort > 0 && uniformPort != r.TargetPort) {
 			elems = append(elems, fmt.Sprintf("%d-%d : %s . %d", lo, hi, t.IP, t.Port))
 		} else {
 			// Elements are addresses only; the (fixed) target port rides
@@ -133,7 +137,7 @@ func renderForwardChain(proto string, r forwardRender) string {
 		}
 	}
 	fmt.Fprintf(&b, "  %s dport %d dnat to %s map { %s }", proto, r.ListenPort, sel, strings.Join(elems, ", "))
-	if !perTargetPort && r.TargetPort > 0 {
+	if !perTargetPort && !(uniformPort > 0 && uniformPort != r.TargetPort) && r.TargetPort > 0 {
 		fmt.Fprintf(&b, " : %d", r.TargetPort)
 	}
 	b.WriteString("\n }\n")
