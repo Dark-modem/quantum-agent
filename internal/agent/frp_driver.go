@@ -219,7 +219,9 @@ var frpSpawn = func(binPath, cfgPath string) (frpProcess, error) {
 }
 
 // frpProcStop terminates a process: SIGINT (frp's graceful stop), then
-// SIGKILL after a short grace period.
+// SIGKILL after a short grace period. Every wait is capped: a process
+// wedged in graceful drain (open client connections) must never block
+// Stop — worst case the exit is leaked to the OS reaper instead.
 func frpProcStop(p frpProcess) {
 	if p == nil {
 		return
@@ -229,8 +231,11 @@ func frpProcStop(p frpProcess) {
 	case <-p.Done():
 		return
 	case <-time.After(3 * time.Second):
-		_ = p.Signal(os.Kill)
-		<-p.Done()
+	}
+	_ = p.Signal(os.Kill)
+	select {
+	case <-p.Done():
+	case <-time.After(5 * time.Second):
 	}
 }
 

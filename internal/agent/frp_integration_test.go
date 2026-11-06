@@ -122,6 +122,15 @@ func frpIntegrationArtifact(t *testing.T, dir string) (body []byte, shaHex, sigB
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
+	// The real GitHub release wraps the binaries in a version DIRECTORY
+	// entry; include one here so extraction is exercised against the
+	// production tarball shape (directory entries must be skipped, not
+	// refused).
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "frp_0.61.1/", Mode: int64(0o755), Typeflag: tar.TypeDir,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"frps", "frpc"} {
 		content, err := os.ReadFile(filepath.Join(dir, "src-"+name))
 		if err != nil {
@@ -174,8 +183,13 @@ func TestFRPIntegration(t *testing.T) {
 	configDir = cfg
 	t.Cleanup(func() { configDir = origConfigDir })
 	origIdent := frpLoadIdentity
+	// The identity's Name is the role resolver's self-identifier: it must
+	// equal params.server_side on the frps end ("germany") and differ on
+	// the frpc end. The seam is swapped between the two Starts below —
+	// in production the two agents have separate identities.
+	identName := "germany"
 	frpLoadIdentity = func() (agentIdentity, bool) {
-		return agentIdentity{Server: artURL, BasePath: ""}, true
+		return agentIdentity{Server: artURL, BasePath: "", Name: identName}, true
 	}
 	t.Cleanup(func() { frpLoadIdentity = origIdent })
 	origKey := engineArtifactPubKeyB64
@@ -243,8 +257,8 @@ func TestFRPIntegration(t *testing.T) {
 	_, stopSink := tcpSink(t, fmt.Sprintf("127.0.0.1:%d", sinkPort))
 	defer stopSink()
 
-	// Real pins, real params — one tunnel description serves both ends
-	// (ServerSide resolution), same shape desired state carries.
+	// Real pins, real params — one tunnel description serves both ends,
+	// same shape desired state carries.
 	p := frpParams{
 		ServerSide: "germany", Version: "0.61.1",
 		Artifact:  "frp-0.61.1-linux-{arch}.tar.gz",
@@ -253,8 +267,13 @@ func TestFRPIntegration(t *testing.T) {
 		RemotePort: remotePort, LocalAddr: "127.0.0.1", LocalPort: sinkPort,
 		DashPort: dashPort, AllowMin: remotePort - 10, AllowMax: remotePort + 10,
 	}
-	srvInst := engine.Instance{TunnelID: "t-int-srv", LocalServer: "germany",
-		RemoteServer: "iran", Params: mustJSON(p)}
+	// Compiler shape: BOTH ends receive the tunnel's local/remote names in
+	// the same fields — the compiler does not swap them per agent (the
+	// remote end sees its OWN name in RemoteServer). The role therefore
+	// resolves from the enrollment identity, not from these fields. The
+	// identity seam below is swapped between the two Starts accordingly.
+	srvInst := engine.Instance{TunnelID: "t-int-srv", LocalServer: "iran",
+		RemoteServer: "germany", Params: mustJSON(p)}
 	cliInst := engine.Instance{TunnelID: "t-int-cli", LocalServer: "iran",
 		RemoteServer: "germany", Params: mustJSON(p)}
 
@@ -275,13 +294,17 @@ func TestFRPIntegration(t *testing.T) {
 		}
 	}
 
-	// Start both ends (real frps + frpc processes).
+	// Start both ends (real frps + frpc processes). The identity seam is
+	// swapped so each end resolves its own role from its own enrollment
+	// name — in production the two agents have separate identities.
+	identName = "germany"
 	if err := dSrv.Start(ctx, srvInst); err != nil {
 		t.Fatalf("frps start: %v", err)
 	}
 	// frpc's loginFailExit default means ONE refused connection exits the
 	// client permanently — the control port must be live first.
 	waitTCP(t, fmt.Sprintf("127.0.0.1:%d", ctrlPort), 15*time.Second)
+	identName = "iran"
 	if err := dCli.Start(ctx, cliInst); err != nil {
 		t.Fatalf("frpc start: %v", err)
 	}

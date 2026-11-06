@@ -509,3 +509,42 @@ func TestFRPSupervisorRespawns(t *testing.T) {
 	}
 	_ = fetchCalls
 }
+
+// TestFRPRoleResolutionBothEnds: the SAME tunnel description resolved by
+// the two ends' enrollment names must give server on the frps end and
+// client on the frpc end.
+func TestFRPRoleResolutionBothEnds(t *testing.T) {
+	p := frpTestParams() // ServerSide: "germany"
+	origIdent := frpLoadIdentity
+	t.Cleanup(func() { frpLoadIdentity = origIdent })
+
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Name: "germany"}, true
+	}
+	if role, err := frpResolveRole(p); err != nil || role != "server" {
+		t.Fatalf("germany end: role=%q err=%v, want server", role, err)
+	}
+
+	// same description, other end
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Name: "iran"}, true
+	}
+	if role, err := frpResolveRole(p); err != nil || role != "client" {
+		t.Fatalf("iran end: role=%q err=%v, want client", role, err)
+	}
+
+	// an unrelated enrollment name still serves the frpc end (only the
+	// server_side host runs frps)
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Name: "third-node"}, true
+	}
+	if role, err := frpResolveRole(p); err != nil || role != "client" {
+		t.Fatalf("third-node end: role=%q err=%v, want client", role, err)
+	}
+
+	// no identity: fail closed
+	frpLoadIdentity = func() (agentIdentity, bool) { return agentIdentity{}, false }
+	if _, err := frpResolveRole(p); err == nil {
+		t.Fatal("missing identity accepted")
+	}
+}
