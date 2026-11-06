@@ -161,7 +161,7 @@ type engineProcState interface {
 	setProc(frpProcess)
 }
 
-func engineSupervise(stop <-chan struct{}, st engineProcState, binPath, cfgPath string) {
+func engineSupervise(stop <-chan struct{}, st engineProcState, binPath, cfgPath string, spawn func(string, string) (frpProcess, error)) {
 	backoff := 2 * time.Second
 	for {
 		select {
@@ -176,7 +176,7 @@ func engineSupervise(stop <-chan struct{}, st engineProcState, binPath, cfgPath 
 			if backoff < 15*time.Second {
 				backoff *= 2
 			}
-			if proc, err := frpSpawn(binPath, cfgPath); err == nil {
+			if proc, err := spawn(binPath, cfgPath); err == nil {
 				st.setProc(proc)
 			}
 		}
