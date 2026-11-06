@@ -370,7 +370,10 @@ func TestFRPIntegration(t *testing.T) {
 	if err := dCli.Start(ctx, cliInst); err != nil {
 		t.Fatalf("frpc restart: %v", err)
 	}
-	waitTCP(t, fmt.Sprintf("127.0.0.1:%d", remotePort), 15*time.Second)
+	// frpc reconnects on its own after an frps outage, but frp's internal
+	// reconnect backoff can exceed 15s (lab-measured 43s worst case) —
+	// poll long enough for the self-healing path.
+	waitTCP(t, fmt.Sprintf("127.0.0.1:%d", remotePort), 60*time.Second)
 	sendAndExpect(t, remotePort, "after-restart")
 
 	// LAB-LOOPBACK overhead: direct sink vs through the tunnel.
