@@ -548,3 +548,33 @@ func TestFRPRoleResolutionBothEnds(t *testing.T) {
 		t.Fatal("missing identity accepted")
 	}
 }
+
+func TestFRPForwardAddress(t *testing.T) {
+	fetchCalls, _, _ := frpSetTestEnv(t)
+	p := frpTestParams()
+	origSpawn := frpSpawn
+	frpSpawn = func(binPath, cfgPath string) (frpProcess, error) {
+		return &fakeFRPProcess{}, nil
+	}
+	t.Cleanup(func() { frpSpawn = origSpawn })
+	origIpt := frpIptables
+	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { frpIptables = origIpt })
+
+	d := NewFRPDriver()
+	srvInst, _ := frpTestInstances(p)
+	if err := d.Start(context.Background(), srvInst); err != nil {
+		t.Fatal(err)
+	}
+	host, port, ok := d.ForwardAddress(srvInst)
+	if !ok || host != "127.0.0.1" || port != 34001 {
+		t.Fatalf("server end ForwardAddress = %s:%d ok=%v", host, port, ok)
+	}
+	if err := d.Stop(srvInst); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := d.ForwardAddress(srvInst); ok {
+		t.Fatal("ForwardAddress ok after Stop")
+	}
+	_ = fetchCalls
+}

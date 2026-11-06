@@ -278,8 +278,9 @@ func NewFRPDriver() *FRPDriver {
 }
 
 var (
-	_ engine.Driver    = (*FRPDriver)(nil)
-	_ engine.Describer = (*FRPDriver)(nil)
+	_ engine.Driver           = (*FRPDriver)(nil)
+	_ engine.Describer        = (*FRPDriver)(nil)
+	_ engine.ForwardAddresser = (*FRPDriver)(nil)
 )
 
 // ID implements engine.Driver.
@@ -361,6 +362,27 @@ func frpRenderConfig(tunnelID, role string, p frpParams) string {
 		fmt.Fprintf(&b, "remotePort = %d\n", p.RemotePort)
 	}
 	return b.String()
+}
+
+// ForwardAddress implements the optional engine.ForwardAddresser
+// capability: the delivery target new connections are DNATed to when
+// this tunnel is part of a balancing group. The target loops back into
+// the tunnel toward the Iran-side service (frps data listener on the
+// frps end, the frps address as seen from the frpc end): server role →
+// 127.0.0.1:remote_port; client role → server_addr:remote_port. The
+// explicit remote_port always wins over the rule's listen port (the
+// frps listener is bound to it).
+func (d *FRPDriver) ForwardAddress(inst engine.Instance) (string, int, bool) {
+	d.mu.Lock()
+	st := d.runs[inst.TunnelID]
+	d.mu.Unlock()
+	if st == nil {
+		return "", 0, false
+	}
+	if st.role == "server" {
+		return "127.0.0.1", st.params.RemotePort, true
+	}
+	return st.params.ServerAddr, st.params.RemotePort, true
 }
 
 // frpDashSecret derives the localhost-only dashboard password (never
