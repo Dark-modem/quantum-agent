@@ -363,10 +363,12 @@ func TestFRPIntegration(t *testing.T) {
 	if err := dSrv.Stop(srvInst); err != nil {
 		t.Fatalf("stop after kill: %v", err)
 	}
+	identName = "germany" // the seam is sticky: set it before EVERY Start
 	if err := dSrv.Start(ctx, srvInst); err != nil {
 		t.Fatalf("frps restart: %v", err)
 	}
 	waitTCP(t, fmt.Sprintf("127.0.0.1:%d", ctrlPort), 15*time.Second)
+	identName = "iran"
 	if err := dCli.Start(ctx, cliInst); err != nil {
 		t.Fatalf("frpc restart: %v", err)
 	}
