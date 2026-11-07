@@ -200,6 +200,9 @@ func NewAgentEngines() (*engine.Registry, error) {
 	if err := reg.Register(NewWgDriver()); err != nil {
 		return nil, err
 	}
+	if err := reg.Register(NewRatholeDriver()); err != nil {
+		return nil, err
+	}
 	if err := RegisterLabEngines(reg); err != nil {
 		return nil, err
 	}
