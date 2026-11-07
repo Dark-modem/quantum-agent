@@ -33,11 +33,11 @@ import (
 const wgID = "wireguard"
 
 type wgParams struct {
-	ServerSide string `json:"server_side"` // foreign end name (listens on UDP)
-	Version    string `json:"version"`     // wireguard-go artifact version (fallback; "" = kernel-only)
-	CarrierIP  string `json:"carrier_ip"`  // underlay host the client dials (foreign public)
-	CarrierPort int   `json:"carrier_port"`
-	MTU        int    `json:"mtu"` // 0 = 1420
+	ServerSide  string `json:"server_side"` // foreign end name (listens on UDP)
+	Version     string `json:"version"`     // wireguard-go artifact version (fallback; "" = kernel-only)
+	CarrierIP   string `json:"carrier_ip"`  // underlay host the client dials (foreign public)
+	CarrierPort int    `json:"carrier_port"`
+	MTU         int    `json:"mtu"` // 0 = 1420
 }
 
 // wgValidateParams: the union shape (no side effects).
