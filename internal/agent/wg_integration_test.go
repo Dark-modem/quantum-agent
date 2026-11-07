@@ -50,6 +50,11 @@ func wgIntSkip(t *testing.T) {
 func TestWgIntegration(t *testing.T) {
 	wgIntSkip(t)
 
+	// Persisted key state must survive the restart phase within this run.
+	origCfg := configDir
+	configDir = t.TempDir()
+	t.Cleanup(func() { configDir = origCfg })
+
 	// kernel capability probe: the wireguard module must be loadable.
 	if out, err := exec.Command("sudo", "ip", "link", "add", "wg-probe0", "type", "wireguard").CombinedOutput(); err != nil {
 		t.Skipf("wireguard kernel module unavailable: %v: %s", err, out)
@@ -167,10 +172,10 @@ func TestWgIntegration(t *testing.T) {
 	}
 	ifaceB := mustIfaceName(t, d, "twgb")
 
-	// The key exchange (ENGINE-WG-DESIGN.md): both ends ack their own
-	// public key; the panel pushes peer_public back. The driver applies
-	// it through wgApplyPeer — the exact command shape a restart with
-	// peer_public runs — so the test drives it per end.
+	// The key exchange (ENGINE-WG-DESIGN.md), driven through the REAL
+	// reconcile path: both ends ack their own public key; the panel pushes
+	// peer_public back; Reload applies it LIVE via `wg set` — no
+	// interface recreation, no re-key.
 	d.mu.Lock()
 	pubA := d.runs["twga"].pubB64
 	pubB := d.runs["twgb"].pubB64
@@ -178,13 +183,17 @@ func TestWgIntegration(t *testing.T) {
 	if pubA == "" || pubB == "" {
 		t.Fatal("agent-generated public keys missing")
 	}
+	revA := p
+	revA.PeerPublic = pubB
+	revB := p
+	revB.PeerPublic = pubA
 	serveNS = wgNSA
-	if err := wgApplyPeer(ifaceA, pubB, "", engineSideServer); err != nil {
-		t.Fatalf("server peer: %v", err)
+	if err := d.Reload(engine.Instance{TunnelID: "twga", Params: mustJSON(revA)}); err != nil {
+		t.Fatalf("server peer_public revision must apply live: %v", err)
 	}
 	serveNS = wgNSB
-	if err := wgApplyPeer(ifaceB, pubA, wgIPA+fmt.Sprintf(":%d", wgCarrier), engineSideClient); err != nil {
-		t.Fatalf("client peer: %v", err)
+	if err := d.Reload(engine.Instance{TunnelID: "twgb", Params: mustJSON(revB)}); err != nil {
+		t.Fatalf("client peer_public revision must apply live: %v", err)
 	}
 
 	// Handshake + reachability: ping across the tunnel (forces the
@@ -232,16 +241,56 @@ func TestWgIntegration(t *testing.T) {
 	}
 	t.Logf("lab-loopback WG counters (client view): wire rx=%d tx=%d", c.WireRx, c.WireTx)
 
+	// AGENT RESTART (phase-8 key persistence): the client process dies and
+	// a NEW driver starts from the SAME persisted state — the keypair must
+	// be identical (the panel's ack'd key stays valid), the peer applies
+	// from the revised desired state at Start, and the handshake survives.
+	serveNS = wgNSB
+	if err := d.Stop(instB); err != nil {
+		t.Fatalf("client Stop (restart phase): %v", err)
+	}
+	d2 := NewWgDriver()
+	origIdent2 := frpLoadIdentity
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Server: "http://panel.test", Name: "iran-1"}, true
+	}
+	t.Cleanup(func() { frpLoadIdentity = origIdent2 })
+	if err := d2.Start(context.Background(), engine.Instance{TunnelID: "twgb",
+		LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(revB)}); err != nil {
+		t.Fatalf("client restart Start: %v", err)
+	}
+	d2.mu.Lock()
+	pubB2 := d2.runs["twgb"].pubB64
+	ifaceB2 := d2.runs["twgb"].iface
+	d2.mu.Unlock()
+	if pubB2 != pubB {
+		t.Fatalf("restart re-keyed the tunnel: %s != %s", pubB2, pubB)
+	}
+	pingOK2 := false
+	for i := 0; i < 30; i++ {
+		if out, err := runNS(wgNSB, "ping", "-c", "1", "-W", "1", "10.189.0.1"); err == nil &&
+			strings.Contains(out, " 0% packet loss") {
+			pingOK2 = true
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if !pingOK2 {
+		hs, _ := runNS(wgNSB, "wg", "show", ifaceB2)
+		t.Fatalf("handshake did not survive the agent restart; wg show: %s", hs)
+	}
+	t.Logf("lab-loopback WG agent restart: same keypair (%s…), handshake survived", pubB2[:12])
+
 	// Stop both ends; the interfaces must disappear.
 	serveNS = wgNSA
 	if err := d.Stop(instA); err != nil {
 		t.Fatalf("server Stop: %v", err)
 	}
 	serveNS = wgNSB
-	if err := d.Stop(instB); err != nil {
+	if err := d2.Stop(engine.Instance{TunnelID: "twgb", Params: mustJSON(revB)}); err != nil {
 		t.Fatalf("client Stop: %v", err)
 	}
-	for _, x := range []struct{ ns, iface string }{{wgNSA, ifaceA}, {wgNSB, ifaceB}} {
+	for _, x := range []struct{ ns, iface string }{{wgNSA, ifaceA}, {wgNSB, ifaceB2}} {
 		if out, err := runNS(x.ns, "ip", "link", "show", x.iface); err == nil {
 			t.Fatalf("interface %s still present in %s: %s", x.iface, x.ns, out)
 		}

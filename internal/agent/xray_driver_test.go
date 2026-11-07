@@ -147,6 +147,10 @@ func xraySetTestEnv(t *testing.T) (spawned *int, leaked *strings.Builder) {
 	}
 	origIpt := frpIptables
 	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	// The through-tunnel probe cannot work against the FAKE xray process
+	// (no listener) — stub it healthy; the integration runs the real dial.
+	origProbe := xrayProbeFn
+	xrayProbeFn = func(int) error { return nil }
 	origCfg := configDir
 	configDir = t.TempDir()
 	t.Cleanup(func() {
@@ -156,6 +160,7 @@ func xraySetTestEnv(t *testing.T) (spawned *int, leaked *strings.Builder) {
 		xraySpawn = origSpawn
 		execCommandJSON = origStats
 		frpIptables = origIpt
+		xrayProbeFn = origProbe
 		configDir = origCfg
 	})
 	return spawned, leaked
@@ -326,10 +331,28 @@ func TestXrayReverseCarrierRules(t *testing.T) {
 	if strings.Contains(string(cj), `"flow"`) {
 		t.Fatalf("bridge carrier carries a flow — mux.cool + vision stalls data:\n%s", cj)
 	}
+	// The warmup probe (PHASE8 1b): the bridge answers probe.quantum with
+	// the blackhole HTTP response, and the probe rule sits BEFORE the
+	// catch-all local rule (first-match-wins).
+	probeRule := strings.Index(string(cj), `"domain":["full:probe.quantum"],"outboundTag":"probe"`)
+	localRule := strings.Index(string(cj), `"outboundTag":"local"`)
+	if probeRule < 0 || localRule < 0 || probeRule > localRule {
+		t.Fatalf("bridge probe rule missing or after the local rule:\n%s", cj)
+	}
+	if !strings.Contains(string(cj), `"tag":"probe","protocol":"blackhole"`) {
+		t.Fatalf("bridge probe outbound missing:\n%s", cj)
+	}
 	serverCfg := xrayBuildConfig(engineSideServer, p)
 	sj, _ := json.Marshal(serverCfg)
 	if strings.Contains(string(sj), `"flow"`) {
 		t.Fatalf("portal vless-in client carries a flow:\n%s", sj)
+	}
+	// The portal's probe inbound rides APIPort+1 when the API is on.
+	if !strings.Contains(string(sj), `"tag":"probe-in"`) || !strings.Contains(string(sj), fmt.Sprint(p.APIPort+1)) {
+		t.Fatalf("portal probe inbound missing:\n%s", sj)
+	}
+	if !strings.Contains(string(sj), `"inboundTag":["probe-in"],"outboundTag":"rev-portal"`) {
+		t.Fatalf("portal probe rule missing:\n%s", sj)
 	}
 	// Validate refuses any flow (fail closed with a clear message).
 	bad := p
@@ -508,6 +531,9 @@ func TestXrayMixedManagerShape(t *testing.T) {
 	execCommandJSON = func(apiPort int, prefix string) (uint64, uint64, bool) {
 		return 1111, 2222, true
 	}
+	// The through-tunnel warmup probe is scripted too (no real listener).
+	origProbeFn := xrayProbeFn
+	xrayProbeFn = func(int) error { return nil }
 	// The FRP dashboard API (Health probe) is scripted too.
 	origDash := frpDashHTTP
 	frpDashHTTP = func(ctx context.Context, url string, user string, pass string) (int, []byte, error) {
@@ -527,6 +553,7 @@ func TestXrayMixedManagerShape(t *testing.T) {
 		xraySpawn = origXSpawn
 		frpDashHTTP = origDash
 		execCommandJSON = origStats
+		xrayProbeFn = origProbeFn
 		frpLoadIdentity = origIdent
 		agentV2TestDriver = origLab
 		matrixDriverRegOnce = sync.Once{}

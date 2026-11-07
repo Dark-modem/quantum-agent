@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -364,5 +366,135 @@ func TestWgKeyExchangeFlow(t *testing.T) {
 	// The ack path (wgPeerPublic) returns it for the panel.
 	if wgPeerPublic(st) != pub {
 		t.Fatal("peer public key not reported")
+	}
+}
+
+// TestWgTwoAgentKeyPersistence: two agents' worth of state in one test.
+// Keys persist per tunnel (0600) across driver recreation (agent
+// restart); the panel's peer_public revision applies LIVE via `wg set`
+// (Reload nil — no restart, no interface recreation, no re-key); a
+// non-peer params change still requires a restart.
+func TestWgTwoAgentKeyPersistence(t *testing.T) {
+	cmds, _ := wgSetTestEnv(t)
+	origCfg := configDir
+	t.Cleanup(func() { configDir = origCfg })
+	dirA, dirB := t.TempDir(), t.TempDir()
+
+	p := wgTestParams()
+	dA := NewWgDriver() // agent A (foreign, server role)
+	configDir = dirA
+	instA := engine.Instance{TunnelID: "twp-a", LocalServer: "germany", RemoteServer: "iran",
+		Params: mustJSON(p)}
+	if err := dA.Start(context.Background(), instA); err != nil {
+		t.Fatalf("A start: %v", err)
+	}
+	dA.mu.Lock()
+	pubA := dA.runs["twp-a"].pubB64
+	dA.mu.Unlock()
+	fi, err := os.Stat(filepath.Join(dirA, "wg", "twp-a.key"))
+	if err != nil {
+		t.Fatalf("persisted key file missing: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("key file mode %v, want 0600", fi.Mode().Perm())
+	}
+
+	origIdent := frpLoadIdentity
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Server: "http://panel.test", Name: "iran-1"}, true
+	}
+	t.Cleanup(func() { frpLoadIdentity = origIdent })
+	dB := NewWgDriver() // agent B (Iran, client role)
+	configDir = dirB
+	instB := engine.Instance{TunnelID: "twp-b", LocalServer: "iran", RemoteServer: "germany",
+		Params: mustJSON(p)}
+	if err := dB.Start(context.Background(), instB); err != nil {
+		t.Fatalf("B start: %v", err)
+	}
+	dB.mu.Lock()
+	pubB := dB.runs["twp-b"].pubB64
+	dB.mu.Unlock()
+
+	// The panel's peer_public revision on B: LIVE apply, no restart.
+	*cmds = (*cmds)[:0]
+	revB := p
+	revB.PeerPublic = pubA
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(revB)}); err != nil {
+		t.Fatalf("peer_public revision must apply live, got: %v", err)
+	}
+	joined := strings.Join(*cmds, "\n")
+	if !strings.Contains(joined, "peer "+pubA+" endpoint 203.0.113.9:25110") {
+		t.Fatalf("live peer apply missing:\n%s", joined)
+	}
+	if strings.Contains(joined, "link del qwg") {
+		t.Fatalf("revision recreated the interface:\n%s", joined)
+	}
+	// The revision is recorded in the state: a second identical Reload is a no-op.
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(revB)}); err != nil {
+		t.Fatalf("second identical revision: %v", err)
+	}
+
+	// Peer revocation (peer_public back to empty) removes the kernel peer.
+	*cmds = (*cmds)[:0]
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(p)}); err != nil {
+		t.Fatalf("revocation revision: %v", err)
+	}
+	if !strings.Contains(strings.Join(*cmds, "\n"), "peer "+pubA+" remove") {
+		t.Fatalf("revocation missing the kernel peer remove:\n%s", strings.Join(*cmds, "\n"))
+	}
+	// Re-apply for the restart phase.
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(revB)}); err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+
+	// Agent restart: a NEW driver on the SAME persisted state re-keys
+	// NOTHING, and the revised desired state (with peer_public) applies
+	// the peer at Start.
+	*cmds = (*cmds)[:0]
+	dB2 := NewWgDriver()
+	instB2 := instB
+	instB2.Params = mustJSON(revB)
+	if err := dB2.Start(context.Background(), instB2); err != nil {
+		t.Fatalf("B restart: %v", err)
+	}
+	dB2.mu.Lock()
+	pubB2, privB2 := dB2.runs["twp-b"].pubB64, dB2.runs["twp-b"].privB64
+	dB2.mu.Unlock()
+	dB.mu.Lock()
+	privB := dB.runs["twp-b"].privB64
+	dB.mu.Unlock()
+	if pubB2 != pubB || privB2 != privB {
+		t.Fatal("restart regenerated the keypair")
+	}
+	if !strings.Contains(strings.Join(*cmds, "\n"), "peer "+pubA) {
+		t.Fatalf("restart did not apply the peer from the revised state:\n%s", strings.Join(*cmds, "\n"))
+	}
+
+	// Server side: same persistence + its revision pins the client's /32.
+	*cmds = (*cmds)[:0]
+	configDir = dirA            // back to agent A's state dir
+	frpLoadIdentity = origIdent // agent A's identity (germany, server role)
+	dA2 := NewWgDriver()
+	revA := p
+	revA.PeerPublic = pubB
+	if err := dA2.Start(context.Background(), engine.Instance{TunnelID: "twp-a",
+		LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(revA)}); err != nil {
+		t.Fatalf("A restart: %v", err)
+	}
+	dA2.mu.Lock()
+	pubA2 := dA2.runs["twp-a"].pubB64
+	dA2.mu.Unlock()
+	if pubA2 != pubA {
+		t.Fatal("server restart regenerated the keypair")
+	}
+	if !strings.Contains(strings.Join(*cmds, "\n"), "peer "+pubB+" allowed-ips 10.189.0.2/32") {
+		t.Fatalf("server peer shape after restart:\n%s", strings.Join(*cmds, "\n"))
+	}
+
+	// A non-peer change (MTU) still requires a restart.
+	mtu := revB
+	mtu.MTU = 1380
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(mtu)}); err != engine.ErrRestartRequired {
+		t.Fatalf("MTU change must require a restart, got %v", err)
 	}
 }

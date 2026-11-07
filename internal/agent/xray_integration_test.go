@@ -384,6 +384,26 @@ while True:
 		t.Fatalf("carrier never came up; server log: %s", bhIntTail(t, dir, "server"))
 	}
 
+	// Warmup gate (PHASE8 1b): route the driver's through-tunnel probe
+	// into the SERVER namespace (the probe port lives inside xrNSA) and
+	// expect the bridge's HTTP answer — the REAL round trip.
+	origProbeFn := xrayProbeFn
+	xrayProbeFn = func(int) error {
+		out, err := runNS(xrNSA, "sh", "-c",
+			fmt.Sprintf("printf 'GET /probe HTTP/1.0\\r\\nHost: probe.quantum\\r\\n\\r\\n' | timeout 3 nc 127.0.0.1 %d 2>/dev/null | head -c 5", 21599+1))
+		if err == nil && strings.HasPrefix(out, "HTTP/") {
+			return nil
+		}
+		return fmt.Errorf("probe: %q %v", out, err)
+	}
+	t.Cleanup(func() { xrayProbeFn = origProbeFn })
+	// EARLY in the warmup the tunnel must NOT be reported healthy: the
+	// balancer must not route to a tunnel whose channel pool is not up.
+	if h := dServer.Health(serverInst); h.OK {
+		t.Fatalf("health reported OK before the through-tunnel probe: %+v", h)
+	}
+	t.Logf("lab-loopback warmup gate: Health correctly unhealthy before the probe")
+
 	// iperf3 target on the IRAN end (the tunnel carries connections from
 	// the foreign dokodemo INTO this listener).
 	mustNS(xrNSB, "sh", "-c",
@@ -423,6 +443,11 @@ while True:
 		t.Fatalf("full tunnel path never answered; portal log: %s", bhIntTail(t, dir, "server"))
 	}
 	t.Logf("lab-loopback full-tunnel TCP probe OK (warmup complete)")
+	// With the path answering, the warmup gate must OPEN (probe ok).
+	if h := dServer.Health(serverInst); !h.OK {
+		t.Fatalf("health still unhealthy after the probe succeeded: %+v", h)
+	}
+	t.Logf("lab-loopback warmup gate: Health healthy after the probe (%s)", "api ok, tunnel probe ok")
 
 	// Per-direction measurement, lab-loopback labeled. The forward path:
 	// foreign iperf3 client → the DOKODEMO on its own end (127.0.0.1:25401)

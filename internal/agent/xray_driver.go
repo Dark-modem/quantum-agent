@@ -18,6 +18,7 @@ package agent
 // values.
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/hex"
@@ -28,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 
 	"strings"
 	"sync"
@@ -215,9 +217,16 @@ type xraySniffing struct {
 }
 
 type xrayOutboundSettings struct {
-	Vnext   []xrayVnext `json:"vnext,omitempty"`
-	Address string      `json:"address,omitempty"`
-	Port    int         `json:"port,omitempty"`
+	Vnext    []xrayVnext            `json:"vnext,omitempty"`
+	Address  string                 `json:"address,omitempty"`
+	Port     int                    `json:"port,omitempty"`
+	Response *xrayBlackholeResponse `json:"response,omitempty"`
+}
+
+// xrayBlackholeResponse is the blackhole outbound's optional answer
+// ({"response":{"type":"http"}} answers probes with an HTTP 403).
+type xrayBlackholeResponse struct {
+	Type string `json:"type"`
 }
 
 type xrayVnext struct {
@@ -350,6 +359,20 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 			{Type: "field", InboundTag: []string{"dokodemo-" + fmt.Sprint(p.PublicPort)}, OutboundTag: "rev-portal"},
 		}}
 		if p.APIPort > 0 {
+			// The warmup probe entry (RUNBOOK/PHASE8: Health must not
+			// report the tunnel healthy until a through-tunnel probe
+			// succeeds). A loopback dokodemo asking for probe.quantum
+			// rides the reverse channel to the bridge, whose blackhole
+			// answers HTTP — a full round trip proves the channel
+			// CARRIES DATA, not just that the carrier TCP accepted.
+			cfg.Inbounds = append(cfg.Inbounds, xrayInbound{
+				Tag: "probe-in", Listen: "127.0.0.1", Port: p.APIPort + 1, Protocol: "dokodemo-door",
+				Settings:       &xrayInboundSettings{Address: xrayProbeHost, Port: 80, Network: "tcp"},
+				StreamSettings: &xrayStreamSettings{Network: "tcp"},
+			})
+			cfg.Routing.Rules = append(cfg.Routing.Rules, xrayRoutingRule{
+				Type: "field", InboundTag: []string{"probe-in"}, OutboundTag: "rev-portal",
+			})
 			cfg.Inbounds = append(cfg.Inbounds, xrayInbound{
 				Tag: "api-in", Listen: "127.0.0.1", Port: p.APIPort, Protocol: "dokodemo-door",
 				Settings:       &xrayInboundSettings{Address: "127.0.0.1"},
@@ -382,6 +405,11 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 			},
 		},
 		{Tag: "local", Protocol: "freedom"},
+		// The warmup probe's answer: connections the portal sent down the
+		// reverse channel asking for probe.quantum get an HTTP response
+		// from the blackhole — a full round trip through the channel.
+		{Tag: "probe", Protocol: "blackhole",
+			Settings: &xrayOutboundSettings{Response: &xrayBlackholeResponse{Type: "http"}}},
 	}
 	cfg.Reverse = &xrayReverse{Bridges: []xrayBridge{{Tag: "rev-bridge", Domain: xrayPortalDomain}}}
 	cfg.Routing = &xrayRouting{Rules: []xrayRoutingRule{
@@ -394,6 +422,10 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 		// filter; first-match-wins made the local rule dead code).
 		{Type: "field", InboundTag: []string{"rev-bridge"},
 			Domain: []string{"full:" + xrayPortalDomain}, OutboundTag: "carrier-out"},
+		// The probe MUST come before the catch-all local rule
+		// (first-match-wins).
+		{Type: "field", InboundTag: []string{"rev-bridge"},
+			Domain: []string{"full:" + xrayProbeHost}, OutboundTag: "probe"},
 		{Type: "field", InboundTag: []string{"rev-bridge"}, OutboundTag: "local"},
 	}}
 	return cfg
@@ -652,7 +684,27 @@ func (d *XrayDriver) Health(inst engine.Instance) engine.Health {
 		if err != nil {
 			return engine.Health{OK: false, Detail: "stats API not answering", LatencyMs: lat}
 		}
-		return engine.Health{OK: true, Detail: "xray server running, api ok", LatencyMs: lat}
+		// Warmup gate (PHASE8 1b): NOT healthy until a through-tunnel
+		// probe succeeds. The bridge registers its reverse-channel pool
+		// lazily; before that, public connections hit an empty worker
+		// list and are dropped — the balancer must not route yet. The
+		// probe rides the portal's loopback probe inbound through the
+		// reverse channel and expects the bridge's HTTP answer.
+		probeDeadline := time.Now().Add(1600 * time.Millisecond)
+		delays := []time.Duration{0, 300 * time.Millisecond, 800 * time.Millisecond}
+		var lastErr error
+		for _, d := range delays {
+			if d > 0 {
+				if time.Now().After(probeDeadline) {
+					break
+				}
+				time.Sleep(d)
+			}
+			if lastErr = xrayProbeFn(st.params.APIPort + 1); lastErr == nil {
+				return engine.Health{OK: true, Detail: "xray server running, api ok, tunnel probe ok", LatencyMs: lat}
+			}
+		}
+		return engine.Health{OK: false, Detail: "through-tunnel probe failed (warmup or broken channel): " + lastErr.Error(), LatencyMs: lat}
 	}
 	return engine.Health{OK: true, Detail: "xray process running", LatencyMs: -1}
 }
@@ -687,6 +739,36 @@ func (d *XrayDriver) Counters(inst engine.Instance) engine.Counters {
 // xrayStatTraffic queries the StatsService via `xray api statsquery`
 // (the real binary's own gRPC client — no protobuf dependency here) and
 // returns (uplink, downlink) for the given tag prefix.
+// xrayTunnelProbe sends a tiny HTTP request through the FULL tunnel: the
+// portal's probe-in inbound (dokodemo → probe.quantum:80) rides the
+// reverse channel to the bridge, whose blackhole answers HTTP — a full
+// round trip proves the channel carries DATA (the local dokodemo accept
+// alone proves nothing: it completes before the far end is dialed).
+func xrayTunnelProbe(probePort int) error {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(probePort)), 3*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write([]byte("GET /probe HTTP/1.0\r\nHost: " + xrayProbeHost + "\r\n\r\n")); err != nil {
+		return err
+	}
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return err
+	}
+	if !bytes.HasPrefix(buf[:n], []byte("HTTP/")) {
+		return fmt.Errorf("unexpected probe answer %q", buf[:n])
+	}
+	return nil
+}
+
+// xrayProbeFn seams the through-tunnel probe (hermetic tests stub it; the
+// integration runs the real dial through the tunnel).
+var xrayProbeFn = xrayTunnelProbe
+
 func xrayStatsPing(apiPort int) error {
 	up, down, ok := xrayStatTraffic(apiPort, "inbound>>>")
 	if !ok {

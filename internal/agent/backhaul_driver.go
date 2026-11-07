@@ -572,9 +572,14 @@ func backhaulTunnelStatus(webPort int) (string, error) {
 
 // Counters implements engine.Driver: the SERVER end reports the wire
 // view (iptables accounting on the carrier port); per-port payload bytes
-// exist only as upstream's humanized dashboard strings (v0.7.2) — not
+// exist only as upstream's humanized dashboard strings — not
 // machine-parseable, so payload stays Unknown, honestly (the balancer
 // treats Unknown-payload tunnels as wire-only per the design note).
+// PHASE8 1c re-check (2026-11-08): v0.7.2 is still the latest upstream
+// release (v0.5.1…v0.7.2 line); NO release (up to v0.7.2, Sep 2025)
+// exposes machine-readable stats — no API, no Prometheus, no usage
+// endpoint in any release note. Keep Unknown; re-check on the next
+// upstream release.
 func (d *BackhaulDriver) Counters(inst engine.Instance) engine.Counters {
 	d.mu.Lock()
 	st := d.runs[inst.TunnelID]

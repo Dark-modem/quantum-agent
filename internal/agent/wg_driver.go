@@ -181,9 +181,43 @@ func (d *WgDriver) Validate(params json.RawMessage) error {
 	return wgValidateParams(p)
 }
 
-// Start implements engine.Driver: create the interface, generate keys,
-// configure the peer, bring it up. The peer public key rides the ack
-// detail (see ENGINE-WG-DESIGN.md key-exchange flow).
+// wgKeyState is the persisted per-tunnel keypair (0600 under
+// configDir/wg): agent restarts and panel revisions must never re-key a
+// tunnel — the panel's peer_public revision targets the ACK'D key, and a
+// regenerated key would orphan it.
+type wgKeyState struct {
+	PrivateKey string `json:"private_key"`
+	PublicKey  string `json:"public_key"`
+}
+
+// wgLoadOrGenKeys loads the tunnel's persisted keypair, generating and
+// saving one (0600) only when none exists.
+func wgLoadOrGenKeys(tunnelID string) (pubB64, privB64 string, err error) {
+	dir := filepath.Join(configDir, "wg")
+	path := filepath.Join(dir, tunnelID+".key")
+	if b, rerr := os.ReadFile(path); rerr == nil {
+		var ks wgKeyState
+		if json.Unmarshal(b, &ks) == nil && ks.PrivateKey != "" && ks.PublicKey != "" {
+			return ks.PublicKey, ks.PrivateKey, nil
+		}
+	}
+	pubB64, privB64, err = wgKeypair()
+	if err != nil {
+		return "", "", err
+	}
+	if merr := os.MkdirAll(dir, 0o700); merr != nil {
+		return "", "", merr
+	}
+	b, _ := json.Marshal(wgKeyState{PrivateKey: privB64, PublicKey: pubB64})
+	if werr := os.WriteFile(path, b, 0o600); werr != nil {
+		return "", "", werr
+	}
+	return pubB64, privB64, nil
+}
+
+// Start implements engine.Driver: create the interface, load-or-generate
+// the persisted keypair, configure the peer, bring it up. The peer public
+// key rides the ack detail (see ENGINE-WG-DESIGN.md key-exchange flow).
 func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 	var p wgParams
 	if err := json.Unmarshal(inst.Params, &p); err != nil {
@@ -207,7 +241,10 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if err != nil {
 		return err
 	}
-	pubB64, privB64, err := wgKeypair()
+	// Load-or-generate the PERSISTED per-tunnel keypair: a restart (or a
+	// second Start after Stop) must never re-key a tunnel — the panel's
+	// peer_public revision targets the ack'd key.
+	pubB64, privB64, err := wgLoadOrGenKeys(inst.TunnelID)
 	if err != nil {
 		return fmt.Errorf("wg: keypair: %w", err)
 	}
@@ -350,7 +387,11 @@ func (d *WgDriver) Stop(inst engine.Instance) error {
 	return nil
 }
 
-// Reload implements engine.Driver: equal params are a no-op.
+// Reload implements engine.Driver: equal params are a no-op; a
+// peer_public-only change applies LIVE via `wg set` — no interface
+// recreation, no re-key, no instance restart (the panel's revision
+// targets the ack'd key). Any other params change still requires a
+// restart.
 func (d *WgDriver) Reload(inst engine.Instance) error {
 	var p wgParams
 	if err := json.Unmarshal(inst.Params, &p); err != nil {
@@ -367,7 +408,37 @@ func (d *WgDriver) Reload(inst engine.Instance) error {
 	if strings.EqualFold(strings.TrimSpace(string(ab)), strings.TrimSpace(string(bb))) {
 		return nil
 	}
+	if wgParamsPeerOnlyChange(st.params, p) {
+		if p.PeerPublic != "" {
+			endpoint := ""
+			if st.role == engineSideClient {
+				endpoint = net.JoinHostPort(strings.TrimSpace(p.CarrierIP), fmt.Sprint(p.CarrierPort))
+			}
+			if err := wgApplyPeer(st.iface, p.PeerPublic, endpoint, st.role); err != nil {
+				return fmt.Errorf("wg: peer apply: %w", err)
+			}
+		} else if st.params.PeerPublic != "" {
+			// The peer was revoked: remove it from the kernel config.
+			if err := wgCmd("wg", "set", st.iface, "peer", st.params.PeerPublic, "remove"); err != nil {
+				return fmt.Errorf("wg: peer remove: %w", err)
+			}
+		}
+		d.mu.Lock()
+		st.params = p
+		d.mu.Unlock()
+		return nil
+	}
 	return engine.ErrRestartRequired
+}
+
+// wgParamsPeerOnlyChange reports whether two param sets differ ONLY in
+// peer_public (the live-appliable field).
+func wgParamsPeerOnlyChange(a, b wgParams) bool {
+	a2, b2 := a, b
+	a2.PeerPublic, b2.PeerPublic = "", ""
+	ab, _ := json.Marshal(a2)
+	bb, _ := json.Marshal(b2)
+	return strings.EqualFold(strings.TrimSpace(string(ab)), strings.TrimSpace(string(bb)))
 }
 
 // Health implements engine.Driver: process/interface alive, handshake
