@@ -142,9 +142,10 @@ func xrayResolveRole(p xrayParams) (engineSide, error) {
 // ---- typed Xray config (marshaled — never string-concatenated) ----
 
 type xrayUser struct {
-	ID    string `json:"id"`
-	Flow  string `json:"flow,omitempty"`
-	Level int    `json:"level"`
+	ID         string `json:"id"`
+	Flow       string `json:"flow,omitempty"`
+	Level      int    `json:"level"`
+	Encryption string `json:"encryption"`
 }
 
 // xrayRealityServer is the Reality decryption block for the VLESS
@@ -227,6 +228,12 @@ type xrayOutbound struct {
 	Protocol       string                `json:"protocol"`
 	Settings       *xrayOutboundSettings `json:"settings,omitempty"`
 	StreamSettings *xrayStreamClient     `json:"streamSettings,omitempty"`
+	Mux            *xrayMux              `json:"mux,omitempty"`
+}
+
+type xrayMux struct {
+	Enabled     bool `json:"enabled"`
+	Concurrency int  `json:"concurrency"`
 }
 
 type xrayAPI struct {
@@ -241,6 +248,7 @@ type xrayRoutingRule struct {
 }
 
 type xrayConfig struct {
+	Reverse   *xrayReverse   `json:"reverse,omitempty"`
 	Log       *xrayLog       `json:"log,omitempty"`
 	Inbounds  []xrayInbound  `json:"inbounds"`
 	Outbounds []xrayOutbound `json:"outbounds"`
@@ -268,14 +276,37 @@ type xrayPolicyLevel struct {
 	StatsUserDownlink bool `json:"statsUserDownlink,omitempty"`
 }
 
-// xrayBuildConfig renders the end's config through typed structs.
-// Server end: VLESS+Reality inbound (carrier), dokodemo-door inbound
-// (public data port, routes to the vless outbound), the StatsService
-// loopback API + policy when api_port > 0. Client end: vless outbound
-// with Reality client settings + freedom outbound; no listening ports.
+type xrayReverse struct {
+	Bridges []xrayBridge `json:"bridges,omitempty"`
+	Portals []xrayPortal `json:"portals,omitempty"`
+}
+
+type xrayBridge struct {
+	Tag    string `json:"tag"`
+	Domain string `json:"domain"`
+}
+
+type xrayPortal struct {
+	Tag    string `json:"tag"`
+	Domain string `json:"domain"`
+}
+
+// xrayPortalDomain is the internal domain both ends share for the
+// reverse channel (it is NOT a DNS name — the routing matches on it).
+const xrayPortalDomain = "quantum.rev.internal"
+
+// xrayBuildConfig renders the end's config through typed structs, using
+// Xray's NATIVE REVERSE feature (bridge/portal) — the frp-equivalent
+// shape: the Iran end (bridge) dials OUT to the foreign portal, keeping
+// reverse channels open; public connections on the foreign dokodemo ride
+// those channels to the Iran-local service. Role decides which half:
+// SERVER (foreign) = portal; CLIENT (iran) = bridge + the vless-out
+// carrier with Reality client settings.
 func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 	cfg := xrayConfig{Log: &xrayLog{LogLevel: "warning"}}
 	if role == engineSideServer {
+		// Portal: the Reality carrier inbound feeds the reverse portal;
+		// the public dokodemo rides the reverse channels toward Iran.
 		cfg.Inbounds = []xrayInbound{
 			{
 				Tag: "vless-in", Listen: "0.0.0.0", Port: p.CarrierPort, Protocol: "vless",
@@ -298,20 +329,17 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 				Tag: "dokodemo-" + fmt.Sprint(p.PublicPort), Listen: "0.0.0.0", Port: p.PublicPort,
 				Protocol: "dokodemo-door",
 				Settings: &xrayInboundSettings{
-					Address: p.LocalAddr, Port: p.LocalPort, Network: "tcp,udp",
+					Address: p.LocalAddr, Port: p.LocalPort, Network: "tcp",
 				},
 			},
 		}
-		// dokodemo traffic routes into the vless carrier outbound.
-		cfg.Outbounds = []xrayOutbound{
-			{Tag: "vless-out", Protocol: "vless", Settings: &xrayOutboundSettings{
-				Vnext: []xrayVnext{{Address: p.RemoteAddr, Port: p.CarrierPort,
-					Users: []xrayUser{{ID: p.UUID, Flow: p.Flow}}}},
-			}},
-		}
+		cfg.Outbounds = []xrayOutbound{{Tag: "direct", Protocol: "freedom"}}
+		cfg.Reverse = &xrayReverse{Portals: []xrayPortal{{Tag: "rev-portal", Domain: xrayPortalDomain}}}
+		cfg.Routing = &xrayRouting{Rules: []xrayRoutingRule{
+			{Type: "field", InboundTag: []string{"vless-in"}, OutboundTag: "rev-portal"},
+			{Type: "field", InboundTag: []string{"dokodemo-" + fmt.Sprint(p.PublicPort)}, OutboundTag: "rev-portal"},
+		}}
 		if p.APIPort > 0 {
-			// The loopback StatsService: a dokodemo inbound on 127.0.0.1
-			// bridging gRPC into the api service (upstream Xray shape).
 			cfg.Inbounds = append(cfg.Inbounds, xrayInbound{
 				Tag: "api-in", Listen: "127.0.0.1", Port: p.APIPort, Protocol: "dokodemo-door",
 				Settings:       &xrayInboundSettings{Address: "127.0.0.1"},
@@ -320,18 +348,17 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 			cfg.API = &xrayAPI{Tag: "api-in", Services: []string{"StatsService"}}
 			cfg.Stats = &struct{}{}
 			cfg.Policy = &xrayPolicy{Levels: map[string]xrayPolicyLevel{"0": {}}}
-			cfg.Routing = &xrayRouting{Rules: []xrayRoutingRule{{
+			cfg.Routing.Rules = append(cfg.Routing.Rules, xrayRoutingRule{
 				Type: "field", InboundTag: []string{"api-in"}, OutboundTag: "api",
-			}}}
-			// The api outbound (protocol: api → the StatsService handler).
+			})
 			cfg.Outbounds = append(cfg.Outbounds, xrayOutbound{Tag: "api", Protocol: "blackhole"})
 		}
 		return cfg
 	}
-	// Client end: vless outbound with Reality client settings; freedom
-	// dials the destination embedded by the foreign dokodemo.
+	// Bridge: the vless outbound dials OUT through Reality; the reverse
+	// bridge rides it and forwards to freedom (the Iran-local service).
 	cfg.Outbounds = []xrayOutbound{
-		{Tag: "vless-out", Protocol: "vless",
+		{Tag: "carrier-out", Protocol: "vless",
 			StreamSettings: &xrayStreamClient{
 				Network: "tcp", Security: "reality",
 				Reality: &xrayRealityClient{
@@ -341,19 +368,15 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 			},
 			Settings: &xrayOutboundSettings{
 				Vnext: []xrayVnext{{Address: p.RemoteAddr, Port: p.CarrierPort,
-					Users: []xrayUser{{ID: p.UUID, Flow: p.Flow}}}},
+					Users: []xrayUser{{ID: p.UUID, Flow: p.Flow, Encryption: "none"}}}},
 			},
 		},
-		{Tag: "direct", Protocol: "freedom"},
+		{Tag: "local", Protocol: "freedom"},
 	}
-	// The client also listens per forwarded port? NO — the forwarded
-	// service is IRAN-local: the foreign dokodemo carries the destination
-	// embedded, and the client's vless inbound (server side of the
-	// carrier) routes it to freedom. The client end needs the vless
-	// INBOUND (it is the receiver of the carrier connection) + freedom.
-	cfg.Inbounds = []xrayInbound{{
-		Tag: "vless-in", Listen: "0.0.0.0", Port: p.CarrierPort, Protocol: "vless",
-		Settings: &xrayInboundSettings{Clients: []xrayUser{{ID: p.UUID, Flow: p.Flow}}, Decryption: "none"},
+	cfg.Reverse = &xrayReverse{Bridges: []xrayBridge{{Tag: "rev-bridge", Domain: xrayPortalDomain}}}
+	cfg.Routing = &xrayRouting{Rules: []xrayRoutingRule{
+		{Type: "field", InboundTag: []string{"rev-bridge"}, OutboundTag: "carrier-out"},
+		{Type: "field", InboundTag: []string{"rev-bridge"}, OutboundTag: "local"},
 	}}
 	return cfg
 }
