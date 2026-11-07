@@ -101,6 +101,132 @@ func TestWgValidateParams(t *testing.T) {
 	if err := d.Validate(raw); err == nil {
 		t.Fatal("tiny MTU accepted")
 	}
+	good := p
+	good.PeerPublic = strings.Repeat("cD", 21) + "=="
+	raw, _ = json.Marshal(good)
+	if err := d.Validate(raw); err != nil {
+		t.Fatalf("valid 44-char peer_public rejected: %v", err)
+	}
+	for _, badPub := range []string{"PLACEHOLDER", strings.Repeat("cD", 22), "not base64!!=="} {
+		badP := p
+		badP.PeerPublic = badPub
+		raw, _ = json.Marshal(badP)
+		if err := d.Validate(raw); err == nil {
+			t.Fatalf("bad peer_public %q accepted", badPub)
+		}
+	}
+}
+
+// TestWgToolExecMapping locks the wgToolExec binary mapping: wg exits 0
+// even on "Invalid subcommand", so a wrong mapping is a SILENT no-op (the
+// kernel never gets configured and every command "succeeds" — found by
+// the netns integration test).
+func TestWgToolExecMapping(t *testing.T) {
+	origRunner := runner
+	t.Cleanup(func() { runner = origRunner })
+	var name string
+	var gotArgs []string
+	runner = func(ctx context.Context, n string, a ...string) ([]byte, error) {
+		name, gotArgs = n, a
+		return nil, nil
+	}
+	for _, c := range []struct {
+		in       []string
+		wantBin  string
+		wantArgs []string
+	}{
+		{[]string{"wg", "set", "qwg1", "private-key", "/tmp/k"}, "wg", []string{"set", "qwg1", "private-key", "/tmp/k"}},
+		{[]string{"ip", "link", "add", "qwg1", "type", "wireguard"}, "ip", []string{"link", "add", "qwg1", "type", "wireguard"}},
+		{[]string{"show", "qwg1", "transfer"}, "wg", []string{"show", "qwg1", "transfer"}},
+	} {
+		if _, err := wgToolExec(c.in...); err != nil {
+			t.Fatalf("%v: %v", c.in, err)
+		}
+		if name != c.wantBin || strings.Join(gotArgs, " ") != strings.Join(c.wantArgs, " ") {
+			t.Fatalf("%v → %s %v, want %s %v", c.in, name, gotArgs, c.wantBin, c.wantArgs)
+		}
+	}
+}
+
+// TestWgIfaceBytesParsesIPSDirections: the payload counters must read the
+// RX and TX rows of `ip -s link show` separately (the old line-4 hack
+// reported RX packets as TX bytes).
+func TestWgIfaceBytesParsesIPSDirections(t *testing.T) {
+	orig := wgRun
+	wgRun = func(iface string, args ...string) (string, error) {
+		return `3: qwgb: <POINTOPOINT,NOARP,UP,LOWER_UP>
+    link/none
+    RX: bytes packets errors dropped  missed  mcast
+      184711     2873      0       0       0       0
+    TX: bytes packets errors dropped carrier  collsns
+      214000000   150000      0       0       0       0
+`, nil
+	}
+	t.Cleanup(func() { wgRun = orig })
+	rx, tx, ok := wgIfaceBytes("qwgb")
+	if !ok {
+		t.Fatal("parse failed")
+	}
+	if rx != 184711 {
+		t.Fatalf("rx = %d, want 184711", rx)
+	}
+	if tx != 214000000 {
+		t.Fatalf("tx = %d, want 214000000", tx)
+	}
+}
+
+// TestWgPeerApplicationShape: with peer_public set, the SERVER installs
+// the peer with allowed-ips pinned to the client's tunnel address, and
+// the CLIENT pins the carrier endpoint + keepalive. Without peer_public
+// NO peer is configured at all — a real wg binary rejects invalid keys,
+// so there is no placeholder (found by the netns integration test).
+func TestWgPeerApplicationShape(t *testing.T) {
+	cmds, _ := wgSetTestEnv(t)
+	d := NewWgDriver()
+	peerPub := strings.Repeat("cD", 21) + "=="
+	// The env stub's identity is "germany" (server role); the client-role
+	// half needs an Iran identity.
+	origIdent := frpLoadIdentity
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Server: "http://panel.test", Name: "iran-1"}, true
+	}
+	p := wgTestParams()
+	p.PeerPublic = peerPub
+	inst := engine.Instance{TunnelID: "tw2", LocalServer: "iran", RemoteServer: "germany",
+		Params: mustJSON(p)}
+	if err := d.Start(context.Background(), inst); err != nil {
+		t.Fatalf("client Start: %v", err)
+	}
+	frpLoadIdentity = origIdent
+	joined := strings.Join(*cmds, "\n")
+	want := "peer " + peerPub + " endpoint 203.0.113.9:25110 persistent-keepalive 15 allowed-ips 10.189.0.1/32"
+	if !strings.Contains(joined, want) {
+		t.Fatalf("client peer shape missing %q:\n%s", want, joined)
+	}
+
+	*cmds = (*cmds)[:0]
+	p2 := wgTestParams()
+	p2.PeerPublic = peerPub
+	inst2 := engine.Instance{TunnelID: "tw2b", LocalServer: "germany", RemoteServer: "iran",
+		Params: mustJSON(p2)}
+	if err := d.Start(context.Background(), inst2); err != nil {
+		t.Fatalf("server Start: %v", err)
+	}
+	joined = strings.Join(*cmds, "\n")
+	if !strings.Contains(joined, "peer "+peerPub+" allowed-ips 10.189.0.2/32") {
+		t.Fatalf("server peer shape missing the client tunnel address:\n%s", joined)
+	}
+
+	// No peer_public: no peer command at all (no placeholder).
+	*cmds = (*cmds)[:0]
+	inst3 := engine.Instance{TunnelID: "tw2c", LocalServer: "iran", RemoteServer: "germany",
+		Params: mustJSON(wgTestParams())}
+	if err := d.Start(context.Background(), inst3); err != nil {
+		t.Fatalf("peerless client Start: %v", err)
+	}
+	if strings.Contains(strings.Join(*cmds, "\n"), " peer ") {
+		t.Fatalf("peer configured without peer_public:\n%s", strings.Join(*cmds, "\n"))
+	}
 }
 
 func TestWgIfaceNameDisjointFromMatrix(t *testing.T) {

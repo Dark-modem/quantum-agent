@@ -18,9 +18,12 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 
 	"regexp"
 	"strings"
@@ -38,6 +41,11 @@ type wgParams struct {
 	CarrierIP   string `json:"carrier_ip"`  // underlay host the client dials (foreign public)
 	CarrierPort int    `json:"carrier_port"`
 	MTU         int    `json:"mtu"` // 0 = 1420
+	// PeerPublic is the OTHER end's WireGuard public key (base64). The
+	// panel learns both ends' keys from the ack details and pushes them
+	// back in a later desired revision; empty = no peer installed yet
+	// (the end still listens/serves — no tunnel traffic flows).
+	PeerPublic string `json:"peer_public,omitempty"`
 }
 
 // wgValidateParams: the union shape (no side effects).
@@ -53,6 +61,15 @@ func wgValidateParams(p wgParams) error {
 	}
 	if p.MTU != 0 && (p.MTU < 1280 || p.MTU > 9000) {
 		return fmt.Errorf("wg: mtu must be 0 (=1420) or 1280-9000")
+	}
+	if p.PeerPublic != "" {
+		// A WireGuard public key: 32 bytes, base64 (44 chars, ends '=').
+		if len(p.PeerPublic) != 44 || !strings.HasSuffix(p.PeerPublic, "=") {
+			return fmt.Errorf("wg: peer_public must be a 44-char base64 public key")
+		}
+		if _, err := base64.StdEncoding.DecodeString(p.PeerPublic); err != nil {
+			return fmt.Errorf("wg: peer_public is not valid base64")
+		}
 	}
 	return nil
 }
@@ -99,17 +116,19 @@ func wgIfaceName(tunnelID string) (string, error) {
 // wgKeypair generates an X25519 keypair (base64, WireGuard's format).
 // The PRIVATE key never leaves the agent: it goes into the 0600 instance
 // state and the kernel only.
+//
+// Always stdlib crypto/ecdh — never derive the public key through the wg
+// CLI: `wg pubkey` reads the private key from STDIN, and the old
+// `<priv-as-argument>` form silently returned a valid-looking key for the
+// WRONG pair (peers never matched the interfaces' own keys — every
+// handshake was rejected; found by the netns integration test).
 func wgKeypair() (pubB64, privB64 string, err error) {
-	if out, err := wgRun("", "genkey"); err == nil {
-		privB64 = strings.TrimSpace(out)
-		if pub, err := wgRun("", "pubkey", privB64); err == nil {
-			return strings.TrimSpace(pub), privB64, nil
-		}
-	}
-	// No wg tools: generate directly (the key format is raw X25519 b64).
-	// crypto/ecdh would be ideal; x25519 from the curve25519 path via
-	// golang.org/x/crypto is already an indirect dep of the agent.
-	priv, pub, err := wgX25519Keypair()
+	// NB: wgX25519Keypair returns (pub, priv) — swapping these two names
+	// silently shipped the PRIVATE key as the public one (the kernel
+	// accepts any 32 bytes as a private key, so every interface came up
+	// with a key nobody else knew; peers never matched. Found by the
+	// netns integration test).
+	pub, priv, err := wgX25519Keypair()
 	if err != nil {
 		return "", "", err
 	}
@@ -235,8 +254,23 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 		return fmt.Errorf("wg: up: %w", err)
 	}
 
-	// WireGuard configuration via `wg set` (private key stays local).
-	if err := wgCmd("wg", "set", iface, "private-key", "/dev/stdin", privB64); err != nil {
+	// WireGuard configuration via `wg set`. The private key goes through
+	// a 0600 file that is removed right after the command: never argv
+	// (ps exposure), and never "/dev/stdin <key>" — wg parses the value
+	// AFTER the file as the next attribute and refuses the whole call
+	// (found by the netns integration test).
+	keyFile := filepath.Join(configDir, "wg", iface+".key")
+	if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
+		_ = wgCmd("ip", "link", "del", iface)
+		return fmt.Errorf("wg: key dir: %w", err)
+	}
+	if err := os.WriteFile(keyFile, []byte(privB64+"\n"), 0o600); err != nil {
+		_ = wgCmd("ip", "link", "del", iface)
+		return fmt.Errorf("wg: key file: %w", err)
+	}
+	err = wgCmd("wg", "set", iface, "private-key", keyFile)
+	os.Remove(keyFile)
+	if err != nil {
 		_ = wgCmd("ip", "link", "del", iface)
 		return fmt.Errorf("wg: private key: %w", err)
 	}
@@ -245,22 +279,46 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 			_ = wgCmd("ip", "link", "del", iface)
 			return fmt.Errorf("wg: listen-port: %w", err)
 		}
-	} else {
-		// The client dials the foreign carrier; the peer public key arrives
-		// in a later desired revision (ENGINE-WG-DESIGN.md key exchange).
-		if err := wgCmd("wg", "set", iface, "peer", "PLACEHOLDER", "endpoint",
-			net.JoinHostPort(strings.TrimSpace(p.CarrierIP), fmt.Sprint(p.CarrierPort)),
-			"persistent-keepalive", "15"); err != nil {
+	}
+	st := &wgInstState{params: p, role: role, iface: iface, privB64: privB64,
+		pubB64: pubB64, stop: make(chan struct{})}
+	// The peer's public key arrives in a later desired revision
+	// (ENGINE-WG-DESIGN.md key exchange: both ends ack their own key, the
+	// panel pushes peer_public back). NB: no placeholder peer — a real wg
+	// binary rejects an invalid key outright (found by the netns
+	// integration test).
+	if p.PeerPublic != "" {
+		endpoint := ""
+		if role == engineSideClient {
+			endpoint = net.JoinHostPort(strings.TrimSpace(p.CarrierIP), fmt.Sprint(p.CarrierPort))
+		}
+		if err := wgApplyPeer(iface, p.PeerPublic, endpoint, role); err != nil {
 			_ = wgCmd("ip", "link", "del", iface)
 			return fmt.Errorf("wg: peer: %w", err)
 		}
 	}
-	st := &wgInstState{params: p, role: role, iface: iface, privB64: privB64,
-		pubB64: pubB64, stop: make(chan struct{})}
 	d.mu.Lock()
 	d.runs[inst.TunnelID] = st
 	d.mu.Unlock()
 	return nil
+}
+
+// wgApplyPeer installs the OTHER end's public key. AllowedIPs is strictly
+// the peer's address inside the tunnel /30 (foreign .1, Iran .2) — never
+// a catch-all. The client also pins the carrier endpoint + keepalive.
+func wgApplyPeer(iface, peerPub, endpoint string, role engineSide) error {
+	args := []string{"wg", "set", iface, "peer", strings.TrimSpace(peerPub)}
+	if role == engineSideClient {
+		args = append(args, "endpoint", endpoint, "persistent-keepalive", "15")
+	}
+	var peerAddr string
+	if role == engineSideServer {
+		peerAddr = wgTunnelSelf(wgParams{}, engineSideClient) // 10.189.0.2
+	} else {
+		peerAddr = wgTunnelSelf(wgParams{}, engineSideServer) // 10.189.0.1
+	}
+	args = append(args, "allowed-ips", peerAddr+"/32")
+	return wgCmd(args...)
 }
 
 // wgTunnelSelf returns this end's address inside the tunnel /30:
@@ -404,20 +462,35 @@ func wgIfaceBytes(iface string) (uint64, uint64, bool) {
 	if err != nil {
 		return 0, 0, false
 	}
+	// `ip -s link show <if>`:
+	//     3: qwgb: <...>
+	//         link/none
+	//     RX: bytes packets errors dropped ...
+	//        <bytes> <packets> ...
+	//     TX: bytes packets errors dropped ...
+	//        <bytes> <packets> ...
 	sc := bufio.NewScanner(strings.NewReader(out))
-	line := 0
 	var rx, tx uint64
+	section := ""
 	for sc.Scan() {
-		line++
-		if line != 4 {
+		f := strings.Fields(sc.Text())
+		if len(f) == 0 {
 			continue
 		}
-		fields := strings.Fields(sc.Text())
-		if len(fields) < 3 {
-			return 0, 0, false
+		switch {
+		case strings.HasPrefix(f[0], "RX:"):
+			section = "RX"
+			continue
+		case strings.HasPrefix(f[0], "TX:"):
+			section = "TX"
+			continue
+		case section == "RX" && len(f) >= 1:
+			fmt.Sscanf(f[0], "%d", &rx)
+			section = ""
+		case section == "TX" && len(f) >= 1:
+			fmt.Sscanf(f[0], "%d", &tx)
+			section = ""
 		}
-		fmt.Sscanf(fields[1], "%d", &rx)
-		fmt.Sscanf(fields[2], "%d", &tx)
 	}
 	return rx, tx, true
 }
@@ -453,18 +526,21 @@ var wgCmd = func(args ...string) error {
 	return err
 }
 
-// wgToolExec shells out to the real tool.
+// wgToolExec shells out to the real tool. Callers pass EITHER the binary
+// ("ip link add …", "wg set …") OR a bare wg subcommand ("show <if>
+// transfer" from wgRun). NB: wg exits 0 even on "Invalid subcommand" —
+// a wrong mapping here is a SILENT no-op (the kernel never gets
+// configured and every command "succeeds"); found by the netns
+// integration test.
 var wgToolExec = func(args ...string) (string, error) {
-	bin := "wg"
-	if len(args) > 0 && (args[0] == "ip" || args[0] == "genkey" || args[0] == "pubkey") {
-		if args[0] == "genkey" || args[0] == "pubkey" {
-			bin = "wg"
-		} else {
-			bin = args[0]
-			args = args[1:]
+	bin, rest := "wg", args
+	if len(args) > 0 {
+		switch args[0] {
+		case "ip", "wg":
+			bin, rest = args[0], args[1:]
 		}
 	}
-	out, err := runCmdTimeout(10*time.Second, bin, args...)
+	out, err := runCmdTimeout(10*time.Second, bin, rest...)
 	return string(out), err
 }
 
