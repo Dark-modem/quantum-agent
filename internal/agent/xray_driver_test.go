@@ -88,7 +88,10 @@ func xrayTestParams() xrayParams {
 		ServerName: "www.microsoft.com", Dest: "www.microsoft.com:443",
 		ShortID: "0123abcd", RealityPublicKey: "i0TZbrs0j3aiB2e8J4j0DqM-uEHoOmQna8a0yaU3Mhc",
 		RealityPrivateKey: "qJmA9N5S_9fNnE2wC8bXlQ0V0kL2wE8dG7fH6jK5lM0",
-		Flow:              "xtls-rprx-vision", UUID: "b831381d-6324-4d53-ad4f-8cda48b30811",
+		// Flow stays EMPTY: the reverse carrier multiplexes by itself
+		// (mux.cool); vision flow stalls all data through it (lab-verified,
+		// see xrayValidateParams).
+		Flow: "", UUID: "b831381d-6324-4d53-ad4f-8cda48b30811",
 		APIPort: 21599,
 	}
 }
@@ -302,6 +305,39 @@ func TestXrayRenderConfigShapes(t *testing.T) {
 	// public half).
 	if strings.Contains(string(cj), p.RealityPrivateKey) {
 		t.Fatal("client config carries the PRIVATE key")
+	}
+}
+
+// TestXrayReverseCarrierRules locks in the two reverse-channel fixes found
+// in the 2026-11-08 lab (xray v24.12.31):
+//   - the bridge's FIRST routing rule must be scoped to the internal
+//     domain; without it, first-match-wins sends portal-returned traffic
+//     back into the carrier (routing loop: 11,705 dials vs 5);
+//   - the carrier must not set vision flow: the reverse link's underlying
+//     protocol is mux.cool and vision stalls all data (validate rejects it).
+func TestXrayReverseCarrierRules(t *testing.T) {
+	p := xrayTestParams()
+	clientCfg := xrayBuildConfig(engineSideClient, p)
+	cj, _ := json.Marshal(clientCfg)
+	wantDomain := `{"type":"field","inboundTag":["rev-bridge"],"domain":["full:quantum.rev.internal"],"outboundTag":"carrier-out"}`
+	if !strings.Contains(string(cj), wantDomain) {
+		t.Fatalf("bridge first rule lacks the internal-domain filter (routing loop):\n%s", cj)
+	}
+	if strings.Contains(string(cj), `"flow"`) {
+		t.Fatalf("bridge carrier carries a flow — mux.cool + vision stalls data:\n%s", cj)
+	}
+	serverCfg := xrayBuildConfig(engineSideServer, p)
+	sj, _ := json.Marshal(serverCfg)
+	if strings.Contains(string(sj), `"flow"`) {
+		t.Fatalf("portal vless-in client carries a flow:\n%s", sj)
+	}
+	// Validate refuses any flow (fail closed with a clear message).
+	bad := p
+	bad.Flow = "xtls-rprx-vision"
+	raw, _ := json.Marshal(bad)
+	d := NewXrayDriver()
+	if err := d.Validate(raw); err == nil || !strings.Contains(err.Error(), "flow must be empty") {
+		t.Fatalf("vision flow accepted: %v", err)
 	}
 }
 

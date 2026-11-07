@@ -121,6 +121,15 @@ func xrayValidateParams(p xrayParams) error {
 	if strings.Contains(p.Flow, "\"") || strings.Contains(p.Flow, "\n") || len(p.Flow) > 64 {
 		return fmt.Errorf("xray: flow invalid")
 	}
+	// The driver's carrier is ALWAYS the bridge/portal reverse link, whose
+	// underlying protocol is mux.cool (upstream docs: "the reverse proxy
+	// has Mux enabled by default"). Vision flow corrupts the mux.cool
+	// framing: with flow=xtls-rprx-vision the reverse channel establishes
+	// but DATA STALLS (lab-verified 2026-11-08, xray v24.12.31: vision
+	// variant hung, flow-empty variant carried 2.3 Gbit/s). Fail closed.
+	if strings.TrimSpace(p.Flow) != "" {
+		return fmt.Errorf("xray: flow must be empty — the reverse carrier multiplexes by itself (mux.cool); vision flow stalls all data through it")
+	}
 	if p.APIPort < 0 || p.APIPort > 65535 {
 		return fmt.Errorf("xray: api_port out of range")
 	}
@@ -244,6 +253,7 @@ type xrayAPI struct {
 type xrayRoutingRule struct {
 	Type        string   `json:"type"`
 	InboundTag  []string `json:"inboundTag,omitempty"`
+	Domain      []string `json:"domain,omitempty"`
 	OutboundTag string   `json:"outboundTag"`
 }
 
@@ -375,7 +385,15 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 	}
 	cfg.Reverse = &xrayReverse{Bridges: []xrayBridge{{Tag: "rev-bridge", Domain: xrayPortalDomain}}}
 	cfg.Routing = &xrayRouting{Rules: []xrayRoutingRule{
-		{Type: "field", InboundTag: []string{"rev-bridge"}, OutboundTag: "carrier-out"},
+		// Upstream docs (reverse bridge): ONLY the channel-establishment
+		// requests carry the internal domain — route THOSE to the carrier.
+		// Everything else arriving from the portal must go to the local
+		// service; without the domain filter the first rule matches all
+		// bridge traffic and portal-returned data LOOPS back into the
+		// carrier (lab-verified: 11,705 dials in seconds vs 5 with the
+		// filter; first-match-wins made the local rule dead code).
+		{Type: "field", InboundTag: []string{"rev-bridge"},
+			Domain: []string{"full:" + xrayPortalDomain}, OutboundTag: "carrier-out"},
 		{Type: "field", InboundTag: []string{"rev-bridge"}, OutboundTag: "local"},
 	}}
 	return cfg

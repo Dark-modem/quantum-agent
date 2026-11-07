@@ -12,7 +12,8 @@
 //	         ./internal/agent/ -count=1 -v   (as root; iperf3, ip needed)
 //
 // Requires: Linux root, network (builds Xray-core from source at the
-// pinned tag), iperf3. Cleanup is trap-driven.
+// pinned tag), iperf3, openssl, python3 (the local Reality-dest TLS
+// endpoint), nc. Cleanup is trap-driven.
 
 package agent
 
@@ -152,6 +153,7 @@ const (
 	xrCarrier = 25443 // VLESS+Reality carrier (foreign)
 	xrPublic  = 25401 // dokodemo data port (foreign)
 	xrIperf   = 25402 // iperf3 server (Iran end target)
+	xrDest    = 25499 // local Reality-dest TLS endpoint (Iran end)
 	xrVethA   = "v-xr-a"
 	xrVethB   = "v-xr-b"
 )
@@ -206,6 +208,61 @@ func TestXrayIntegration(t *testing.T) {
 	if out, err := runNS(xrNSB, "ping", "-c", "1", "-W", "2", xrIPA); err != nil {
 		t.Fatalf("underlay unreachable: %v: %s", err, out)
 	}
+
+	// Same-run underlay baseline (the lab rules: the ratio is computed
+	// against the SAME run's baseline, never a different run's).
+	const xrBase = 25498
+	mustNS(xrNSB, "sh", "-c", fmt.Sprintf("nohup iperf3 -s -p %d > /dev/null 2>&1 &", xrBase))
+	defer func() { _, _ = runNS(xrNSB, "pkill", "-f", fmt.Sprintf("iperf3 -s -p %d", xrBase)) }()
+	time.Sleep(time.Second)
+	if base, berr := runNS(xrNSA, "sh", "-c",
+		fmt.Sprintf("timeout 30 iperf3 -c %s -p %d -t 3 2>&1 | grep -E 'sender|receiver'", xrIPB, xrBase)); berr == nil {
+		t.Logf("lab-loopback UNDERLAY baseline (no tunnel): %s", strings.TrimSpace(base))
+	}
+
+	// Local Reality-dest TLS endpoint (self-signed CA for CN=www.microsoft.com
+	// installed into the SHARED fs — both netns trust it). The Reality
+	// server mirrors this cert during handshakes; without a reachable dest
+	// every handshake dies (the earlier "carrier up but no data" mystery).
+	crt, key := "/tmp/xr-int-server.crt", "/tmp/xr-int-server.key"
+	caFile := "/usr/local/share/ca-certificates/quantum-xray-int.crt"
+	if out, err := exec.Command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+		"-days", "2", "-keyout", key, "-out", crt, "-subj", "/CN=www.microsoft.com",
+		"-addext", "subjectAltName=DNS:www.microsoft.com").CombinedOutput(); err != nil {
+		t.Fatalf("openssl self-signed: %v: %s", err, out)
+	}
+	if out, err := exec.Command("sudo", "cp", crt, caFile).CombinedOutput(); err != nil {
+		t.Fatalf("install CA: %v: %s", err, out)
+	}
+	if out, err := exec.Command("sudo", "update-ca-certificates").CombinedOutput(); err != nil {
+		t.Fatalf("update-ca-certificates: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		exec.Command("sudo", "rm", "-f", caFile).Run()
+		exec.Command("sudo", "update-ca-certificates").Run()
+		exec.Command("rm", "-f", crt, key).Run()
+	})
+	destSrv := fmt.Sprintf(`nohup python3 -c "
+import ssl, socket, os, threading
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain('%s', '%s')
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('0.0.0.0', %d)); s.listen(16)
+open('/tmp/xr-int-dest.pid','w').write(str(os.getpid()))
+def h(c):
+    try:
+        t = ctx.wrap_socket(c, server_side=True)
+        t.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi')
+        t.close()
+    except Exception:
+        try: c.close()
+        except Exception: pass
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=h, args=(c,), daemon=True).start()
+" > /dev/null 2>&1 &`, crt, key, xrDest)
+	mustNS(xrNSB, "sh", "-c", destSrv)
+	t.Cleanup(func() { runNS(xrNSB, "sh", "-c", "kill $(cat /tmp/xr-int-dest.pid) 2>/dev/null || true") })
 
 	// R5-style artifact server (REAL listener).
 	artLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -271,10 +328,18 @@ func TestXrayIntegration(t *testing.T) {
 		SigAmd: sigB64, SigArm: sigB64,
 		RemoteAddr: xrIPA, CarrierPort: xrCarrier,
 		PublicPort: xrPublic, LocalAddr: "127.0.0.1", LocalPort: xrIperf,
-		ServerName: "www.microsoft.com", Dest: "www.microsoft.com:443",
+		// Dest is the LOCAL TLS endpoint in xrNSB (the netns cannot reach
+		// the real internet — egress rides the host VPN; raw-forwarded
+		// traffic cannot dial the camouflage site, which killed every
+		// Reality handshake in earlier runs). The Reality server mirrors
+		// this cert; the SNI stays www.microsoft.com and the netns trust
+		// store carries the lab CA.
+		ServerName: "www.microsoft.com", Dest: fmt.Sprintf("%s:%d", xrIPB, xrDest),
 		ShortID: "0123abcd", RealityPublicKey: realityPub,
 		RealityPrivateKey: realityPriv,
-		Flow:              "xtls-rprx-vision", UUID: "b831381d-6324-4d53-ad4f-8cda48b30811",
+		// Flow must be EMPTY: the reverse carrier multiplexes by itself
+		// (mux.cool); vision stalls all data (see xrayValidateParams).
+		Flow: "", UUID: "b831381d-6324-4d53-ad4f-8cda48b30811",
 		APIPort: 21599,
 	}
 
@@ -339,21 +404,42 @@ func TestXrayIntegration(t *testing.T) {
 		t.Fatal("iperf3 listener in xrNSB never came up")
 	}
 
+	// Plain TCP through the FULL tunnel before any iperf3 run (TASK 3a
+	// checklist): dokodemo → rev-portal → reverse channel → bridge →
+	// freedom → the iperf3 listener. This is also the WARMUP: the bridge
+	// registers its channel pool lazily, and the FIRST public connections
+	// arrive on an empty worker list and are dropped — probe until the
+	// path answers, otherwise the measurement measures the warmup.
+	wDeadline := time.Now().Add(30 * time.Second)
+	pathUp := false
+	for time.Now().Before(wDeadline) {
+		if out, err := runNS(xrNSA, "sh", "-c", fmt.Sprintf("timeout 2 nc -z 127.0.0.1 %d && echo PATHUP", xrPublic)); err == nil && strings.Contains(out, "PATHUP") {
+			pathUp = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !pathUp {
+		t.Fatalf("full tunnel path never answered; portal log: %s", bhIntTail(t, dir, "server"))
+	}
+	t.Logf("lab-loopback full-tunnel TCP probe OK (warmup complete)")
+
 	// Per-direction measurement, lab-loopback labeled. The forward path:
 	// foreign iperf3 client → the DOKODEMO on its own end (127.0.0.1:25401)
 	// → Reality carrier → Iran vless-in → freedom → iperf3 server in
 	// xrNSB. The reverse (-R) flips the data direction on the same path.
 	forward, ferr := runNS(xrNSA, "sh", "-c",
-		fmt.Sprintf("iperf3 -c 127.0.0.1 -p %d -t 3", xrPublic))
+		fmt.Sprintf("timeout 40 iperf3 -c 127.0.0.1 -p %d -t 3", xrPublic))
 	if ferr != nil {
 		t.Fatalf("forward iperf: %v: %s", ferr, forward)
 	}
 	t.Logf("lab-loopback XRAY FORWARD (foreign→Iran through tunnel): %s", strings.TrimSpace(forward))
 	reverse, rerr := runNS(xrNSA, "sh", "-c",
-		fmt.Sprintf("iperf3 -c 127.0.0.1 -p %d -R -t 3 2>&1 | grep -E 'sender|receiver'", xrPublic))
+		fmt.Sprintf("timeout 40 iperf3 -c 127.0.0.1 -p %d -R -t 3 2>&1 | grep -E 'sender|receiver'", xrPublic))
 	if rerr != nil {
 		t.Logf("reverse iperf note: %v: %s", rerr, reverse)
 	}
+	t.Logf("lab-loopback XRAY REVERSE (-R, Iran→foreign data direction): %s", strings.TrimSpace(reverse))
 
 	// Health through the driver (server end, api in the same ns as the
 	// process — but the test process is in the host ns; use the ns curl).
