@@ -26,8 +26,10 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 cleanup() {
     docker rm -f "$CT" >/dev/null 2>&1 || true
     rm -rf tests/.installer-work 2>/dev/null || true
-    echo "== proof: no quantum-test-* resources remain =="
-    docker ps -a --format '{{.Names}}' | grep '^quantum-test' && echo "LEFTOVER CONTAINERS!" || echo "containers: none ✓"
+    echo "== proof: no $PREFIX resources remain =="
+    # Scoped to THIS test's prefix: other sessions may legitimately run
+    # their own quantum-test-* containers (e.g. quantum-test-eng45).
+    docker ps -a --format '{{.Names}}' | grep "^$PREFIX" && echo "LEFTOVER CONTAINERS!" || echo "containers: none ✓"
 }
 trap cleanup EXIT
 
@@ -54,7 +56,7 @@ echo "binary sha256: $REAL_SUM"
 echo "== container up =="
 docker rm -f "$CT" >/dev/null 2>&1 || true
 docker run -d --name "$CT" -v "${WINMOUNT}:/work" ubuntu:24.04 sleep 1200 >/dev/null
-docker exec "$CT" bash -c "apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq shellcheck openssl >/dev/null 2>&1" \
+docker exec "$CT" bash -c "apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq shellcheck openssl curl python3 >/dev/null 2>&1" \
     || { echo "SKIP: container apt failed (no network?)"; exit 0; }
 BIN_IN="/work/tests/.installer-work/quantum-agent-linux-amd64"
 
@@ -111,5 +113,49 @@ else
     bad "missing --checksum case (rc=$rc): $out"
 fi
 
-echo "== results: $pass passed, $fail failed =="
-[ $fail -eq 0 ]
+
+# ---- Phase-7 fixes (RUNBOOK-FIXES items 7, 8, 9 + panel-side 2/3) ----
+# The inner scripts ride /work as files (no nested quoting in the test).
+
+echo "== 7. enroll URL keeps the base path (item 7) =="
+# NB: no pkill here — `pkill -f xstub` would match this bash -c's own
+# command line and kill the shell before the stub starts (fresh container
+# each run, so nothing to clean).
+docker exec "$CT" bash -c 'nohup python3 -c "
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        code = 400 if self.path == \"/mybase/api/agent/enroll\" else 404
+        self.send_response(code); self.send_header(\"Content-Length\", \"0\"); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer((\"127.0.0.1\", 18901), H).serve_forever()
+" > /tmp/stub.log 2>&1 & sleep 1' || true
+# MSYS_NO_PATHCONV=1 (per-call, NOT exported): Git Bash would otherwise
+# translate the "/work/..." file argument into a Windows path before
+# docker.exe sees it.
+if MSYS_NO_PATHCONV=1 docker exec "$CT" bash /work/tests/p7/norm.sh | grep -q "NORMALIZED:http://127.0.0.1:18901/mybase"; then
+    ok "normalize_server_url keeps the base path (item 7)"
+else
+    bad "base-path normalization (item 7)"
+fi
+
+echo "== 9. panel TLS cert has IP SANs + key owned by the service user (items 2/8) =="
+MSYS_NO_PATHCONV=1 docker exec "$CT" bash /work/tests/p7/tls.sh >/dev/null 2>&1 || true
+if docker exec "$CT" bash -c 'openssl x509 -in /etc/quantum-panel/tls/server.crt -noout -text | grep -q "IP Address"'; then
+    ok "panel TLS cert carries IP SANs (item 8)"
+else
+    bad "panel TLS cert missing IP SANs"
+fi
+if docker exec "$CT" bash -c '[ "$(stat -c %U /etc/quantum-panel/tls/server.key)" = "quantum-panel" ]'; then
+    ok "TLS key owned by the service user (item 2)"
+else
+    bad "TLS key ownership wrong"
+fi
+
+echo "== 10. panel.json chowned to the service user (item 3) =="
+out="$( { MSYS_NO_PATHCONV=1 docker exec "$CT" bash /work/tests/p7/owner.sh 2>&1 || true; } | tail -1)"
+if echo "$out" | grep -q "quantum-panel"; then
+    ok "panel.json chowned to the service user (item 3)"
+else
+    bad "panel.json ownership (out=$out)"
+fi
