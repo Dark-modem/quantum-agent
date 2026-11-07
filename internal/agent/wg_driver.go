@@ -46,6 +46,9 @@ type wgParams struct {
 	// back in a later desired revision; empty = no peer installed yet
 	// (the end still listens/serves — no tunnel traffic flows).
 	PeerPublic string `json:"peer_public,omitempty"`
+	// Companion wraps the UDP carrier in fake-TCP ("wireguard@udp2raw"
+	// engine form — 00-ADMIN/ENGINE-COMPANION-DESIGN.md). Nil = plain UDP.
+	Companion *wgCompanion `json:"companion,omitempty"`
 }
 
 // wgValidateParams: the union shape (no side effects).
@@ -70,6 +73,9 @@ func wgValidateParams(p wgParams) error {
 		if _, err := base64.StdEncoding.DecodeString(p.PeerPublic); err != nil {
 			return fmt.Errorf("wg: peer_public is not valid base64")
 		}
+	}
+	if err := p.Companion.validate(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -136,14 +142,18 @@ func wgKeypair() (pubB64, privB64 string, err error) {
 }
 
 type wgInstState struct {
-	params  wgParams
-	role    engineSide
-	iface   string
-	privB64 string
-	pubB64  string
-	stop    chan struct{}
-	proc    frpProcess // wireguard-go fallback process (kernel mode: nil)
-	mu      sync.Mutex
+	params     wgParams
+	role       engineSide
+	iface      string
+	privB64    string
+	pubB64     string
+	stop       chan struct{}
+	proc       frpProcess // wireguard-go fallback process (kernel mode: nil)
+	comp       *wgCompanion
+	compBin    string
+	compProc   frpProcess
+	compStopMu sync.Mutex
+	mu         sync.Mutex
 }
 
 func (st *wgInstState) setProc(p frpProcess) { st.mu.Lock(); st.proc = p; st.mu.Unlock() }
@@ -252,6 +262,14 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if mtu == 0 {
 		mtu = 1420
 	}
+	// A carrier companion adds its own encapsulation overhead: fake-TCP
+	// headers inside the WG UDP packet. With the plain 1420 the inner TCP
+	// segments exceed the path and bulk data blackholes (handshakes and
+	// pings — small packets — still pass, which is exactly the symptom
+	// the integration test caught). Default the wrapped MTU to 1300.
+	if mtu == 1420 && p.Companion != nil && p.Companion.Kind == companionUDP2Raw {
+		mtu = 1300
+	}
 
 	// Create the interface. Kernel module first; wireguard-go fallback
 	// (its process is supervised implicitly — it dies if removed).
@@ -318,17 +336,14 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 		}
 	}
 	st := &wgInstState{params: p, role: role, iface: iface, privB64: privB64,
-		pubB64: pubB64, stop: make(chan struct{})}
+		pubB64: pubB64, stop: make(chan struct{}), comp: p.Companion}
 	// The peer's public key arrives in a later desired revision
 	// (ENGINE-WG-DESIGN.md key exchange: both ends ack their own key, the
 	// panel pushes peer_public back). NB: no placeholder peer — a real wg
 	// binary rejects an invalid key outright (found by the netns
 	// integration test).
 	if p.PeerPublic != "" {
-		endpoint := ""
-		if role == engineSideClient {
-			endpoint = net.JoinHostPort(strings.TrimSpace(p.CarrierIP), fmt.Sprint(p.CarrierPort))
-		}
+		endpoint := wgPeerEndpoint(p, role)
 		if err := wgApplyPeer(iface, p.PeerPublic, endpoint, role); err != nil {
 			_ = wgCmd("ip", "link", "del", iface)
 			return fmt.Errorf("wg: peer: %w", err)
@@ -337,7 +352,34 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 	d.mu.Lock()
 	d.runs[inst.TunnelID] = st
 	d.mu.Unlock()
+	// Carrier companion (wireguard@udp2raw): spawn the fake-TCP wrapper,
+	// supervise it, and manage the kernel RST rule. The WG config above is
+	// UNCHANGED except the client's peer endpoint (127.0.0.1 into the
+	// local udp2raw listener).
+	if p.Companion != nil {
+		if err := wgCompanionStart(st, inst.TunnelID); err != nil {
+			_ = wgCmd("ip", "link", "del", iface)
+			_ = d.Stop(inst)
+			return err
+		}
+		go d.superviseCompanion(st)
+	}
 	return nil
+}
+
+// wgPeerEndpoint computes the peer endpoint for the CLIENT end: the
+// carrier's UDP address, or the loopback udp2raw listener when a
+// companion wraps the carrier.
+func wgPeerEndpoint(p wgParams, role engineSide) string {
+	if role != engineSideClient {
+		return ""
+	}
+	if c := p.Companion; c != nil && c.Kind == companionUDP2Raw {
+		if _, port, err := net.SplitHostPort(c.ListenAddr); err == nil {
+			return net.JoinHostPort("127.0.0.1", port)
+		}
+	}
+	return net.JoinHostPort(strings.TrimSpace(p.CarrierIP), fmt.Sprint(p.CarrierPort))
 }
 
 // wgApplyPeer installs the OTHER end's public key. AllowedIPs is strictly
@@ -383,6 +425,7 @@ func (d *WgDriver) Stop(inst engine.Instance) error {
 	if st.proc != nil {
 		frpProcStop(st.current())
 	}
+	wgCompanionStop(st, inst.TunnelID)
 	_ = wgCmd("ip", "link", "del", st.iface)
 	return nil
 }
@@ -410,10 +453,8 @@ func (d *WgDriver) Reload(inst engine.Instance) error {
 	}
 	if wgParamsPeerOnlyChange(st.params, p) {
 		if p.PeerPublic != "" {
-			endpoint := ""
-			if st.role == engineSideClient {
-				endpoint = net.JoinHostPort(strings.TrimSpace(p.CarrierIP), fmt.Sprint(p.CarrierPort))
-			}
+			// The endpoint rides the REVISED params' companion state.
+			endpoint := wgPeerEndpoint(p, st.role)
 			if err := wgApplyPeer(st.iface, p.PeerPublic, endpoint, st.role); err != nil {
 				return fmt.Errorf("wg: peer apply: %w", err)
 			}

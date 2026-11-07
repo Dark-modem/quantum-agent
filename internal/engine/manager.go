@@ -134,7 +134,7 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 	// disabled/unregistered; uninstall engines that became idle.
 	for id, slot := range m.running {
 		t, ok := want[id]
-		mustStop := !ok || !t.Enabled || !enabledEngines[t.Engine]
+		mustStop := !ok || !t.Enabled || !enabledEngines[BaseEngineID(t.Engine)]
 		if !mustStop {
 			continue
 		}
@@ -149,7 +149,7 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 
 	// 2. Ensure every enabled tunnel with an enabled, registered engine.
 	for _, t := range want {
-		if !t.Enabled || !enabledEngines[t.Engine] {
+		if !t.Enabled || !enabledEngines[BaseEngineID(t.Engine)] {
 			continue
 		}
 		if t.ID == "" {
