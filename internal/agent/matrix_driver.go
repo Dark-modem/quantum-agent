@@ -197,6 +197,9 @@ func NewAgentEngines() (*engine.Registry, error) {
 	if err := reg.Register(NewXrayDriver()); err != nil {
 		return nil, err
 	}
+	if err := reg.Register(NewWgDriver()); err != nil {
+		return nil, err
+	}
 	if err := RegisterLabEngines(reg); err != nil {
 		return nil, err
 	}
