@@ -22,6 +22,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -89,6 +90,19 @@ type balTargetDiag struct {
 	Health  string `json:"health,omitempty"`
 	Weight  int    `json:"weight,omitempty"`
 	Addr    string `json:"addr,omitempty"`
+	// NftRange is the target's slice of the numgen/jhash modulus, e.g.
+	// "70-99" — the operator-visible answer to "what share did this
+	// tunnel actually get" (phase 9: the mod-60 diagnostic).
+	NftRange string `json:"nft_range,omitempty"`
+	// Total is the rendered modulus (the sum of the SELECTED targets'
+	// weights) for this pass.
+	Total int `json:"total,omitempty"`
+}
+
+// balancerStatusPath is where the balancer persists its last pass for
+// `quantum-agent balancer status` (0600; best-effort — never fatal).
+func balancerStatusPath() string {
+	return filepath.Join(configDir, "balancer-status.json")
 }
 
 // balTickReport is one health+apply pass, for tests and the report.
@@ -349,6 +363,33 @@ func (b *forwardBalancer) tick() balTickReport {
 			runtime.Weights = append(runtime.Weights, w)
 		}
 		rules = append(rules, forwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto, Targets: targets})
+		// Per-target nft range (phase-9 diagnostic): the same deterministic
+		// order + range math the nft renderer uses, surfaced so the
+		// operator sees "tunnel X got 0-29 of mod 60" without parsing nft.
+		sorted := append([]balTarget(nil), targets...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].TunnelID < sorted[j].TunnelID })
+		total := 0
+		for _, t := range sorted {
+			total += t.Weight
+		}
+		lo := 0
+		for _, t := range sorted {
+			hi := lo + t.Weight - 1
+			if hi >= total {
+				hi = total - 1
+			}
+			for i := range rep.Targets {
+				if rep.Targets[i].Forward == fr.ID && rep.Targets[i].Tunnel == t.TunnelID &&
+					rep.Targets[i].Reason == "selected" {
+					rep.Targets[i].NftRange = fmt.Sprintf("%d-%d", lo, hi)
+					rep.Targets[i].Total = total
+				}
+			}
+			lo += t.Weight
+			if lo >= total {
+				break
+			}
+		}
 		forwards = append(forwards, runtime)
 	}
 
@@ -374,6 +415,11 @@ func (b *forwardBalancer) tick() balTickReport {
 			log.Printf("[balancer] targets: %s", out)
 		}
 		b.lastDiagKey = diagKey
+	}
+	// Persist the last pass for `quantum-agent balancer status` (0600,
+	// best-effort — the diag must never break balancing).
+	if out, err := json.MarshalIndent(rep, "", "  "); err == nil {
+		_ = os.WriteFile(balancerStatusPath(), out, 0o600)
 	}
 	return rep
 }
