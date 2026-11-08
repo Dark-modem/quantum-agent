@@ -3,3 +3,6 @@ tests/.tok
 tests/e2e-logs/
 =======
 >>>>>>> phase3/engines
+tests/.eng45-art/
+tests/.eng45-status.d/
+tests/.eng45.test
