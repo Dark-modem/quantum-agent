@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -179,10 +180,20 @@ func frpSetTestEnv(t *testing.T) (fetchCalls *int, shaHex, sigB64 string) {
 	origFetch := frpFetchArtifact
 	frpFetchArtifact = func(ctx context.Context, url string) ([]byte, error) {
 		*fetchCalls++
-		if !strings.Contains(url, "/bp/api/agent/artifact/frp-0.61.1-linux-") {
-			return nil, fmt.Errorf("unexpected artifact url %q", url)
+		// The R5 manifest endpoint (Phase 5): the client asks for its own
+		// arch and gets the pin triple; the bytes ride the /file/ URL.
+		switch {
+		case strings.Contains(url, "/api/agent/engine-artifacts?engine=frp&goarch="):
+			arch := strings.ToLower(runtime.GOARCH)
+			entry := fmt.Sprintf(`{"engine":"frp","version":"0.61.1","goos":"linux","goarch":%q,"artifact":%q,"sha256":%q,"signature":%q}`,
+				arch, strings.ReplaceAll("frp-0.61.1-linux-{arch}.tar.gz", "{arch}", arch), shaHex, sigB64)
+			return []byte(`{"artifacts":[` + entry + `]}`), nil
+		case strings.Contains(url, "/api/agent/engine-artifacts/file/"):
+			return body, nil
+		case strings.Contains(url, "/bp/api/agent/artifact/frp-0.61.1-linux-"):
+			return body, nil
 		}
-		return body, nil
+		return nil, fmt.Errorf("unexpected artifact url %q", url)
 	}
 	// the fake artifact must satisfy whatever pins frpTestParams carries
 	frpTestPins.amd = shaHex
@@ -211,21 +222,25 @@ func TestFRPEnsureBinary(t *testing.T) {
 	if !fileExists(filepath.Join(dir, "frps")) || !fileExists(filepath.Join(dir, "frpc")) {
 		t.Fatal("binaries not installed")
 	}
-	if *fetchCalls != 1 {
-		t.Fatalf("fetch calls = %d, want 1", *fetchCalls)
+	// Phase 5: the manifest flow costs TWO calls on a miss (manifest GET
+	// + file GET); the cached fast path costs none.
+	if *fetchCalls != 2 {
+		t.Fatalf("fetch calls = %d, want 2 (manifest + file)", *fetchCalls)
 	}
-	// cache hit: same pins → no second fetch
+	// cache hit: same pins → no second fetch (the pinned fast path)
 	if _, err := frpEnsureBinary(context.Background(), p); err != nil {
 		t.Fatalf("cache hit: %v", err)
 	}
-	if *fetchCalls != 1 {
+	if *fetchCalls != 2 {
 		t.Fatalf("cache hit refetched (%d calls)", *fetchCalls)
 	}
-	// different pins (different artifact) → verification fails
+	// A stale engine_params pin no longer fails: the manifest is the
+	// source of truth once it resolves, and it points at the verified
+	// cached artifact (fail-closed behavior lives in the tamper tests).
 	p2 := p
 	p2.SHA256Amd = strings.Repeat("ef", 32)
-	if _, err := frpEnsureBinary(context.Background(), p2); err == nil {
-		t.Fatal("wrong-sha artifact accepted")
+	if _, err := frpEnsureBinary(context.Background(), p2); err != nil {
+		t.Fatalf("manifest-resolved cache hit with a stale pin: %v", err)
 	}
 	// fail closed without a pinned key
 	origKey := engineArtifactPubKeyB64
@@ -287,7 +302,9 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if spawned != 1 || fetchCalls != nil && *fetchCalls != 1 {
+	if spawned != 1 || fetchCalls != nil && *fetchCalls != 2 {
+		// Phase 5: a cache miss now costs TWO calls (manifest GET + file
+		// GET) when the manifest resolves; the pinned fast path costs 0.
 		t.Fatalf("spawned=%d fetch=%v", spawned, *fetchCalls)
 	}
 	cfgPath := frpConfigPath("t1")

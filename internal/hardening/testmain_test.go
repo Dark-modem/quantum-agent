@@ -182,7 +182,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 	root := t.TempDir()
 	oldState, oldSsh, oldSys, oldNetopt, oldF2b, oldJdrop, oldKeys, oldProc, oldJournal := StateDir, sshDropInPath, sysctlDropInPath, netoptSysctlPath, fail2banJailPath, journaldDropInPath, authorizedKeyGlobs, sysctlProcRoot, journaldLogDir
 	StateDir = filepath.Join(root, "state")
-	sshDropInPath = filepath.Join(root, "etc/ssh/sshd_config.d/60-quantum-hardening.conf")
+	sshDropInPath = filepath.Join(root, "etc/ssh/sshd_config.d/00-quantum-hardening.conf")
 	sysctlDropInPath = filepath.Join(root, "etc/sysctl.d/99-quantum-hardening.conf")
 	netoptSysctlPath = filepath.Join(root, "etc/sysctl.d/99-quantum-netopt.conf")
 	fail2banJailPath = filepath.Join(root, "etc/fail2ban/jail.d/quantum-hardening.local")

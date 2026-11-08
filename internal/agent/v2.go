@@ -355,13 +355,42 @@ func agentHardeningRuntime() *protocol.HardeningRuntime {
 // agentRunHardeningOp adapts the v2 hardening commands to the module's
 // Dispatch (agentRunTypedOp routes hardening.* here). Structured
 // results ride CommandResult.Data (HARDENING.md §5b).
+//
+// Param-key compatibility (Phase-7 release blocker): the panel's
+// profile/apply endpoint sends the profile JSON under "payload" and the
+// timer under "rollback_timer_s" (protocol.ParamRollbackTimerS), while
+// this agent historically read "profile" and "rollback_timeout_sec".
+// BOTH spellings are accepted — "profile"/"rollback_timeout_sec" first
+// (the documented v2 contract), "payload"/"rollback_timer_s" as the
+// panel's spelling (the real-server acceptance hit this mismatch).
 func agentRunHardeningOp(op string, params map[string]string) (any, error) {
+	req := hardeningRequestFromParams(op, params)
+	res := hardening.Dispatch(context.Background(), req)
+	if res == nil {
+		return nil, fmt.Errorf("hardening: no result")
+	}
+	return res, nil
+}
+
+// hardeningRequestFromParams resolves the command params into the
+// module's Request. Both spellings are accepted — "profile" and
+// "rollback_timeout_sec" first (the documented v2 contract),
+// "payload" and "rollback_timer_s" as the panel's profile/apply endpoint
+// spells them (protocol.ParamRollbackTimerS; the real-server acceptance
+// hit this mismatch). "profile" wins when both are present.
+func hardeningRequestFromParams(op string, params map[string]string) hardening.Request {
 	req := hardening.Request{Op: strings.TrimPrefix(op, "hardening.")}
 	if prof := params["profile"]; prof != "" {
 		req.Profile = prof
+	} else if payload := params["payload"]; payload != "" {
+		req.Profile = payload
 	}
-	if v := params["rollback_timeout_sec"]; v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
+	timer := params["rollback_timeout_sec"]
+	if timer == "" {
+		timer = params["rollback_timer_s"]
+	}
+	if timer != "" {
+		if n, err := strconv.Atoi(timer); err == nil {
 			req.RollbackTimeoutSec = n
 		}
 	}
@@ -371,9 +400,5 @@ func agentRunHardeningOp(op string, params map[string]string) (any, error) {
 	if params["safe_apply"] == "false" {
 		req.SafeApply = boolPtr(false)
 	}
-	res := hardening.Dispatch(context.Background(), req)
-	if res == nil {
-		return nil, fmt.Errorf("hardening: no result")
-	}
-	return res, nil
+	return req
 }

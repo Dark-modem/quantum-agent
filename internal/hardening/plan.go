@@ -7,6 +7,7 @@ package hardening
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -311,6 +312,21 @@ func sshItems(p Profile, s *DetectedState, plan *Plan) {
 	}
 	want := RenderSSHDropIn(spec)
 	have := s.SSH.DropInContent
+	// Earlier-sorting vendor drop-ins that set the same directives LOSE to
+	// ours only when they sort after: sshd takes the FIRST value and Include
+	// processes files lexicographically. Our 00- prefix sorts first (beats
+	// vendor files like 01-arvan-*), but the operator must still SEE any
+	// drop-in that sorts before ours and sets the same keys
+	// (RUNBOOK-FIXES item 10).
+	conflicts := sshdDropInConflicts(sshDropInDir, sshDropInPath, renderSSHDropInKeywords(spec))
+	conflictNote := ""
+	if len(conflicts) > 0 {
+		conflictNote = "; WARNING: conflicting earlier drop-ins set the same keys and will be overridden: " + strings.Join(conflicts, ", ")
+	}
+	appendSSH := func(it PlanItem) {
+		it.Summary += conflictNote
+		plan.Items = append(plan.Items, it)
+	}
 	if spec.KeyOnly != nil && *spec.KeyOnly {
 		if !s.Keys.AnyKeyPresent {
 			it := PlanItem{
@@ -319,7 +335,7 @@ func sshItems(p Profile, s *DetectedState, plan *Plan) {
 				After:   want,
 			}
 			blockItem(&it, "no authorized public key found for any user; refusing to enforce key-only (install a key first — the panel must verify `ssh.keyscan` or the operator must add one)")
-			plan.Items = append(plan.Items, it)
+			appendSSH(it)
 			return
 		}
 		// Root-login removal while root is the only key holder = lockout.
@@ -330,7 +346,7 @@ func sshItems(p Profile, s *DetectedState, plan *Plan) {
 				After:   want,
 			}
 			blockItem(&it, "root is the only user with an authorized key; PermitRootLogin no would remove the last access path. Add a key for an admin user first")
-			plan.Items = append(plan.Items, it)
+			appendSSH(it)
 			return
 		}
 	}
@@ -342,7 +358,64 @@ func sshItems(p Profile, s *DetectedState, plan *Plan) {
 		Summary: "update the owned sshd drop-in " + sshDropInPath,
 		Before:  have, After: want,
 	}
-	plan.Items = append(plan.Items, it)
+	appendSSH(it)
+}
+
+// sshdDropInConflicts lists other drop-ins in dir that sort BEFORE ours
+// (lexicographically) and set any of the given keywords. dirList is a
+// seam (tests point it at the fake host root).
+func sshdDropInConflicts(dir, ourPath string, keywords []string) []string {
+	entries, err := dirList(dir)
+	if err != nil {
+		return nil
+	}
+	ours := filepath.Base(ourPath)
+	var conflicts []string
+	for _, e := range entries {
+		name := e.Name()
+		if name == ours || !strings.HasSuffix(name, ".conf") || strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !(name < ours) {
+			continue // sorts after ours: WE win anyway
+		}
+		data, rerr := readFile(filepath.Join(dir, name))
+		if rerr != nil {
+			continue
+		}
+		for _, kw := range keywords {
+			for _, line := range strings.Split(string(data), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if strings.HasPrefix(strings.ToLower(trimmed), strings.ToLower(kw)) {
+					conflicts = append(conflicts, name+" ("+kw+")")
+					break
+				}
+			}
+		}
+	}
+	return conflicts
+}
+
+// renderSSHDropInKeywords returns the directives RenderSSHDropIn may emit
+// for the spec (the conflict scan matches on these).
+func renderSSHDropInKeywords(spec *SSHSpec) []string {
+	kw := []string{}
+	if spec.Port != 0 {
+		kw = append(kw, "Port")
+	}
+	if spec.KeyOnly != nil && *spec.KeyOnly {
+		kw = append(kw, "PasswordAuthentication", "KbdInteractiveAuthentication", "PermitEmptyPasswords")
+	}
+	if spec.PermitRoot != "" {
+		kw = append(kw, "PermitRootLogin")
+	}
+	if spec.MaxAuthTries != 0 {
+		kw = append(kw, "MaxAuthTries")
+	}
+	return kw
 }
 
 func keysOnlyForRoot(k SSHKeysState) bool {

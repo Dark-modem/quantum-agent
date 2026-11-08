@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -36,12 +37,31 @@ func (r *Registry) Register(d Driver) error {
 	return nil
 }
 
-// Driver returns the driver for id.
+// Driver returns the driver for id. A "base@companion" suffix form
+// (00-ADMIN/ENGINE-COMPANION-DESIGN.md — e.g. "wireguard@udp2raw") maps
+// to the BASE driver: the companion is metadata + kernel plumbing the
+// base driver reads from its own params, never a second Driver.
 func (r *Registry) Driver(id string) (Driver, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	d, ok := r.drivers[id]
-	return d, ok
+	if d, ok := r.drivers[id]; ok {
+		return d, true
+	}
+	if i := strings.Index(id, "@"); i > 0 {
+		if d, ok := r.drivers[id[:i]]; ok {
+			return d, true
+		}
+	}
+	return nil, false
+}
+
+// BaseEngineID strips the companion suffix ("wireguard@udp2raw" →
+// "wireguard"); plain ids pass through.
+func BaseEngineID(id string) string {
+	if i := strings.Index(id, "@"); i > 0 {
+		return id[:i]
+	}
+	return id
 }
 
 // IDs lists registered engine IDs, sorted for stable output.

@@ -12,7 +12,7 @@
 //
 // The module owns these drop-ins and no others:
 //
-//	/etc/ssh/sshd_config.d/60-quantum-hardening.conf   (additive sshd config)
+//	/etc/ssh/sshd_config.d/00-quantum-hardening.conf   (additive sshd config; 00- prefix wins the first-value-wins race against vendor drop-ins like 01-arvan-*)
 //	/etc/sysctl.d/99-quantum-hardening.conf            (does not collide with
 //	                                                    netopt's 99-quantum-netopt.conf)
 //	/etc/fail2ban/jail.d/quantum-hardening.local

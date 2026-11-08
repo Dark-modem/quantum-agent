@@ -384,6 +384,34 @@ func TestFRPIntegration(t *testing.T) {
 	t.Logf("LAB-LOOPBACK: direct %.1f MB/s, via frp %.1f MB/s, ratio %.2f (overhead ~%.0f%%)",
 		direct, via, via/direct, (1-via/direct)*100)
 
+	// Per-direction iperf3 rows (lab-loopback, same-run baseline per the
+	// lab rules): the sink becomes an iperf3 server; the tunnel entry is
+	// remotePort on this host. FORWARD = data client→sink (through the
+	// tunnel), REVERSE (-R) = data sink→client on the same path.
+	stopSink()
+	iperfSrv := exec.Command("sh", "-c",
+		fmt.Sprintf("nohup iperf3 -s -p %d > /dev/null 2>&1 &", sinkPort))
+	if out, err := iperfSrv.CombinedOutput(); err != nil {
+		t.Fatalf("iperf3 server: %v: %s", err, out)
+	}
+	defer exec.Command("pkill", "-f", fmt.Sprintf("iperf3 -s -p %d", sinkPort)).Run()
+	time.Sleep(time.Second)
+	iperf := func(label, args string) {
+		out, err := exec.Command("sh", "-c",
+			fmt.Sprintf("timeout 40 iperf3 -c 127.0.0.1 %s 2>&1 | grep -E 'sender|receiver'", args)).CombinedOutput()
+		if err != nil {
+			t.Logf("lab-loopback FRP %s: %v: %s", label, err, out)
+			return
+		}
+		t.Logf("lab-loopback FRP %s: %s", label, strings.TrimSpace(string(out)))
+	}
+	iperf("UNDERLAY baseline (direct, no tunnel)",
+		fmt.Sprintf("-p %d -t 3", sinkPort))
+	iperf("FORWARD (data→Iran sink through tunnel)",
+		fmt.Sprintf("-p %d -t 3", remotePort))
+	iperf("REVERSE (-R, data from the Iran sink)",
+		fmt.Sprintf("-p %d -R -t 3", remotePort))
+
 	// Counters: honest Known flags.
 	c := dSrv.Counters(srvInst)
 	t.Logf("server counters: wire_known=%v payload_known=%v payload_rx=%d payload_tx=%d",

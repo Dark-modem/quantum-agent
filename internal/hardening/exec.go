@@ -34,7 +34,7 @@ var StateDir = "/var/lib/quantum-agent/hardening"
 
 // Owned file paths (vars so tests redirect them).
 var (
-	sshDropInPath      = "/etc/ssh/sshd_config.d/60-quantum-hardening.conf"
+	sshDropInPath      = "/etc/ssh/sshd_config.d/00-quantum-hardening.conf"
 	sysctlDropInPath   = "/etc/sysctl.d/99-quantum-hardening.conf"
 	netoptSysctlPath   = "/etc/sysctl.d/99-quantum-netopt.conf" // read-only co-existence check
 	fail2banJailPath   = "/etc/fail2ban/jail.d/quantum-hardening.local"

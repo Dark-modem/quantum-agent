@@ -70,21 +70,43 @@ var frpFetchArtifact = func(ctx context.Context, url string) ([]byte, error) {
 	return body, nil
 }
 
-// frpArtifactURL builds the controller artifact URL from the enrollment
-// identity (same base-path rules as the WS URL builder).
-func frpArtifactURL(ident agentIdentity, name string) string {
+// frpArtifactBaseURL returns the controller's API base (server URL plus
+// the enrollment base path) — shared by the pinned-artifact URL and the
+// R5 manifest URLs.
+func frpArtifactBaseURL(ident agentIdentity) string {
 	base := strings.TrimRight(strings.TrimSpace(ident.Server), "/")
 	if bp := strings.Trim(ident.BasePath, "/"); bp != "" {
 		if !strings.HasSuffix(strings.ToLower(base), "/"+strings.ToLower(bp)) {
 			base += "/" + bp
 		}
 	}
-	return base + "/api/agent/artifact/" + url.PathEscape(name)
+	return base
 }
 
-// frpEnsureBinary makes the pinned frp binaries available and returns the
-// cache directory. Idempotent: a verified cache for the same sha256 is
-// reused without any network traffic.
+// frpArtifactURL builds the controller artifact URL from the enrollment
+// identity (same base-path rules as the WS URL builder).
+func frpArtifactURL(ident agentIdentity, name string) string {
+	return frpArtifactBaseURL(ident) + "/api/agent/artifact/" + url.PathEscape(name)
+}
+
+// frpCacheHit reports whether dir holds a verified extraction of the
+// artifact with the given sha256 (the 0600 marker written after verify).
+func frpCacheHit(dir, sha256Hex string) bool {
+	marker := filepath.Join(dir, "artifact.sha256")
+	data, err := os.ReadFile(marker)
+	if err != nil || !strings.EqualFold(strings.TrimSpace(string(data)), sha256Hex) {
+		return false
+	}
+	return fileExists(filepath.Join(dir, "frps")) && fileExists(filepath.Join(dir, "frpc"))
+}
+
+// frpEnsureBinary makes the frp binaries available and returns the cache
+// directory. The pin comes from the panel's R5 engine-artifact manifest
+// (engine name only in desired state) with the pinned engine_params
+// triple (name+sha256+signature) as the fallback; EITHER way the body is
+// verified sha256+ed25519 against the build-pinned key before extraction
+// — the panel is never trusted for integrity. Idempotent: a verified
+// cache for the same sha256 is reused without downloading.
 func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 	// Defense in depth: a build without a pinned key refuses the engine
 	// entirely, even on a cache hit — only verified downloads may ever
@@ -93,16 +115,10 @@ func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("frp: no engine artifact signing key pinned in this build (fail closed)")
 	}
-	name, sha256Hex, sigB64, err := p.frpArtifactPin()
-	if err != nil {
-		return "", err
-	}
-	dir := frpBinDir(p.Version)
-	marker := filepath.Join(dir, "artifact.sha256")
-	if data, err := os.ReadFile(marker); err == nil &&
-		strings.EqualFold(strings.TrimSpace(string(data)), sha256Hex) &&
-		fileExists(filepath.Join(dir, "frps")) && fileExists(filepath.Join(dir, "frpc")) {
-		return dir, nil // cache hit
+	// Fast path: the desired state pinned a triple and the cache already
+	// matches it — no network traffic at all.
+	if _, pinnedSHA, _, pinErr := p.frpArtifactPin(); pinErr == nil && frpCacheHit(frpBinDir(p.Version), pinnedSHA) {
+		return frpBinDir(p.Version), nil
 	}
 
 	ident, ok := frpLoadIdentity()
@@ -110,7 +126,26 @@ func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 		return "", fmt.Errorf("frp: no controller identity — cannot fetch engine artifact (fail closed)")
 	}
 
-	body, err := frpFetchArtifact(ctx, frpArtifactURL(ident, name))
+	// Resolve the pin: the R5 manifest for this host's arch first, the
+	// pinned engine_params triple as the fallback (an operator may ship
+	// pins without uploading to the store, or the manifest may be
+	// unreachable — both fall back, both verify before anything runs).
+	name, sha256Hex, sigB64, viaManifest, err := engineArtifactPin(ctx, ident, "frp",
+		func() (string, string, string, error) { return p.frpArtifactPin() })
+	if err != nil {
+		return "", err
+	}
+	downloadURL := frpArtifactURL(ident, name)
+	if viaManifest {
+		downloadURL = engineManifestFileURL(ident, name)
+	}
+
+	dir := frpBinDir(p.Version)
+	if frpCacheHit(dir, sha256Hex) {
+		return dir, nil // the manifest pointed at an artifact already cached
+	}
+
+	body, err := frpFetchArtifact(ctx, downloadURL)
 	if err != nil {
 		return "", err
 	}
@@ -124,7 +159,7 @@ func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 	if err := frpExtract(body, dir); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(marker, []byte(sha256Hex), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "artifact.sha256"), []byte(sha256Hex), 0o600); err != nil {
 		return "", fmt.Errorf("frp: cache marker: %w", err)
 	}
 	return dir, nil

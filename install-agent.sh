@@ -259,10 +259,49 @@ install_binary() {
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Step 2: enrollment (token never echoed)
 # ---------------------------------------------------------------------------
+# normalize_server_url validates and normalizes the panel URL the operator
+# gives: the panel serves EVERYTHING under a random base path
+# (/<base>/api/agent/enroll), so a bare https://IP:7443 404s at enroll
+# (RUNBOOK-FIXES item 7). Accepted forms, in order of preference:
+#   https://IP:7443/<base>          (full URL incl. base path — RUNBOOK-FA 2)
+#   https://IP:7443                 (no base path: discovered from the
+#                                    initial-admin-password file, when present)
+# The token never appears in any output.
+normalize_server_url() {
+    local url="${SERVER%%/}"
+    if [[ "$url" == *"/api/agent/enroll" ]]; then
+        url="${url%/api/agent/enroll}"   # tolerate a full endpoint paste
+    fi
+    # Discovery: the initial-admin-password file (RUNBOOK-FA 2.4) embeds the
+    # full panel URL including the base path — use it when present.
+    if [[ "$url" != */*/* && -f "/etc/quantum-panel/initial-admin-password" ]]; then
+        local discovered
+        discovered="$(trun 5 grep -oE 'https://[^[:space:]]+' /etc/quantum-panel/initial-admin-password 2>/dev/null | head -1 || true)"
+        if [[ -n "$discovered" ]]; then
+            info "panel base path discovered from the initial-password file"
+            url="${discovered%%/}"
+        fi
+    fi
+    # Validate BEFORE enrolling (item 7: the enroll must not 404 silently).
+    local code
+    code="$(trun 15 curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        "$url/api/agent/enroll" -X POST 2>/dev/null || echo 000)"
+    case "$code" in
+        400|401|405) ;;   # the endpoint EXISTS (bad/missing body or method) — good
+        200)              ;;
+        *) die "panel enroll endpoint unreachable at $url/api/agent/enroll (HTTP $code).
+Provide the FULL panel URL including the random base path: --server https://IP:7443/<base>
+(the base path was printed with the initial admin password at panel install)." ;;
+    esac
+    SERVER="$url"
+}
+
 enroll() {
     [[ -n "$TOKEN" ]] || { warn "no enrollment token given (--token/--token-file); skipping enrollment — the agent will stay unprovisioned"; return 0; }
+    normalize_server_url
     local already
     already=0
     [[ -s "${AGENT_DIR}/agent.json" ]] && already=1
@@ -278,11 +317,18 @@ enroll() {
     rc=$?
     set -e
     if [[ $rc -ne 0 ]]; then
-        # Never print $out: it may carry request details.
-        die "enrollment failed (exit $rc); check --server reachability and token validity"
+        # Surface the EXACT panel error (RUNBOOK-FIXES item 9: a bare
+        # "enrollment failed" leaves the operator guessing). The token is
+        # never echoed: its occurrences are redacted before display.
+        local msg
+        msg="$(printf '%s\n' "$out" | sed -E "s/$TOKEN/[REDACTED]/g" | tail -5)"
+        die "enrollment failed (exit $rc):
+$msg
+check --server reachability and token validity"
     fi
     info "enrolled with ${SERVER}"
 }
+
 
 # ---------------------------------------------------------------------------
 # Step 3: hardened systemd unit

@@ -73,7 +73,7 @@ need_systemd() { have systemctl || die "systemd is required"; }
 # ---------------------------------------------------------------------------
 PORT="7443" BASE_PATH="" USERNAME="admin"
 PASSWORD="" PASSWORD_FILE="" GENERATE=0
-VERSION="latest" BINARY="" CHECKSUM=""
+VERSION="latest" BINARY="" CHECKSUM="" REPLACED_BINARY=0
 NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0 TLS_PORT="7443" SERVER_NAME=""
 
 usage() { sed -n '2,44p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; }
@@ -168,6 +168,7 @@ install_binary() {
     fi
     [[ -x "$BIN" ]] && cp -a "$BIN" "${BIN}.bak"
     install -o root -g root -m 0755 "$src" "${BIN}.new" && mv -f "${BIN}.new" "$BIN"
+    REPLACED_BINARY=1
     info "installed $BIN (sha256 ${new:0:12}…)"
 }
 
@@ -249,11 +250,35 @@ tls_selfsigned_step() {
     mkdir -p "$td"; chmod 700 "$td"
     local cn="quantum-panel"
     [[ -n "$SERVER_NAME" ]] && cn="$SERVER_NAME"
+    # IP SANs are mandatory (Go ≥1.15 ignores the CN): agents enrolling by
+    # IP or from this very host must be able to verify the certificate
+    # (RUNBOOK-FIXES item 8 — fresh HTTPS enroll failed with CN-only certs).
+    local hostip; hostip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [[ -n "$hostip" ]] || hostip="127.0.0.1"
+    local hostn; hostn="$(hostname 2>/dev/null || echo localhost)"
+    # -addext (openssl req) — note -extfile is an option of `openssl x509`,
+    # NOT `req`; passing it to req fails the whole cert step silently
+    # (found in the ubuntu:24.04 container test, OpenSSL 3.0.13).
+    local san="IP:${hostip},DNS:${hostn}"
+    [[ "$hostip" != "127.0.0.1" ]] && san="${san},IP:127.0.0.1"
     openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
         -keyout "${td}/server.key" -out "${td}/server.crt" \
-        -subj "/CN=${cn}" >/dev/null 2>&1
+        -subj "/CN=${cn}" -addext "subjectAltName=${san}" >/dev/null 2>&1
     chmod 600 "${td}/server.key"; chmod 644 "${td}/server.crt"
-    info "self-signed TLS certificate generated (${td}) — panel serves HTTPS on :${TLS_PORT}"
+    # The hardened unit runs the panel as $PANEL_USER: the key must be
+    # readable by the SERVICE, not root (RUNBOOK-FIXES item 2 — RC2 shipped
+    # root:root and the HTTPS listener never started).
+    if id "$PANEL_USER" >/dev/null 2>&1; then
+        chown -R "$PANEL_USER:$PANEL_USER" "$td"
+    fi
+    # Same-host agents verify this cert against the host trust store (item 8).
+    if have update-ca-certificates; then
+        cp "${td}/server.crt" /usr/local/share/ca-certificates/quantum-panel-selfsigned.crt
+        update-ca-certificates >/dev/null 2>&1
+        info "self-signed TLS certificate generated (${td}) + installed into the host trust store (SANs: IP ${hostip}, DNS ${hostn})"
+    else
+        info "self-signed TLS certificate generated (${td}) — SANs: IP ${hostip}, DNS ${hostn} (install into the host trust store manually: update-ca-certificates)"
+    fi
 }
 
 
@@ -340,6 +365,21 @@ firewall_step() {
 # ---------------------------------------------------------------------------
 start_service() {
     [[ $NO_START -eq 1 ]] && { info "--no-start: not enabling (systemctl enable --now quantum-panel)"; return 0; }
+    # Ownership: panel.json is written by the credential step as root; the
+    # hardened unit runs the panel as $PANEL_USER — it must be able to read
+    # its own credentials (RUNBOOK-FIXES item 3; RC2 silently ran with
+    # in-memory random passwords).
+    if id "$PANEL_USER" >/dev/null 2>&1; then
+        chown "$PANEL_USER:$PANEL_USER" "${PANEL_DIR}/panel.json" 2>/dev/null || true
+        chown -R "$PANEL_USER:$PANEL_USER" "${PANEL_DIR}/tls" 2>/dev/null || true
+    fi
+    # An already-running service is NOT restarted by enable --now: when the
+    # binary changed this run, restart explicitly (RUNBOOK-FIXES item 4 —
+    # RC2 left the OLD process alive after installing a new binary).
+    if [[ $REPLACED_BINARY -eq 1 ]] && trun 15 systemctl is-active --quiet quantum-panel.service; then
+        info "binary changed this run — restarting the already-active service"
+        trun 30 systemctl restart quantum-panel.service
+    fi
     trun 30 systemctl enable --now quantum-panel.service >/dev/null
     sleep 2
     if ! trun 15 systemctl is-active --quiet quantum-panel.service; then

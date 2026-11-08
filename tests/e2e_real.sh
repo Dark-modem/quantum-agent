@@ -47,7 +47,20 @@ check(){ if [ "$1" = "0" ]; then ok "$2"; else bad "$2"; fi; }
 
 cleanup() {
   say "cleanup..."
+  # /tmp dies with the WSL VM between invocations — keep the evidence
+  # somewhere persistent (the repo tree) for the next debugging session.
+  if [ -d "$LAB" ]; then
+    LOGDIR="${E2E_LOGS:-$REPO_ROOT/tests/e2e-logs}"
+    mkdir -p "$LOGDIR"
+    cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LOGDIR"/ 2>/dev/null
+  fi
   [ -n "${PANEL_PID:-}" ] && kill "$PANEL_PID" 2>/dev/null
+  # The panel's SIGTERM graceful shutdown can hang while agent sessions
+  # are open — a leak means the NEXT run's panel shares this config dir
+  # and store, and the two fight over panel.json (observed as RSTs).
+  sleep 1
+  [ -n "${PANEL_PID:-}" ] && kill -KILL "$PANEL_PID" 2>/dev/null
+  sudo pkill -x quantum-panel 2>/dev/null
   for p in $AGENT_PIDS; do sudo ip netns pids "${p}" >/dev/null 2>&1; done
   sudo pkill -f "quantum-agent run" 2>/dev/null
   for ns in "${NS_ALL[@]}"; do
@@ -58,6 +71,8 @@ cleanup() {
   sudo nft delete table ip quantum-fwd 2>/dev/null
   sudo iptables -D INPUT -s 10.200.0.0/24 -j ACCEPT 2>/dev/null
   sudo iptables -D INPUT -i $BR -j ACCEPT 2>/dev/null
+  sudo iptables -D FORWARD -i $BR -o $BR -j ACCEPT 2>/dev/null
+  sudo iptables -D FORWARD -s 10.200.0.0/24 -d 10.200.0.0/24 -j ACCEPT 2>/dev/null
   say "cleanup done"
 }
 trap cleanup EXIT
@@ -70,6 +85,10 @@ if [ -n "${E2E_GH_TOKEN:-}" ]; then
   git config --global url."https://x-access-token:${E2E_GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 fi
 rm -rf $LAB; mkdir -p $LAB
+# Pre-start sweep: a panel leaked by an aborted earlier run would share
+# this fresh config dir and fight the new panel (observed as RSTs).
+sudo pkill -x quantum-panel 2>/dev/null
+sleep 1
 cd "$REPO_ROOT/../quantum-panel" || exit 1
 GOFLAGS="-trimpath -buildvcs=false" go build -o $LAB/quantum-panel ./cmd/quantum-panel || { echo "panel build failed"; exit 1; }
 cd "$REPO_ROOT" || exit 1
@@ -92,21 +111,45 @@ for ns in "${NS_ALL[@]}"; do
   sudo ip netns exec "$ns" ip addr add "$ipaddr/24" dev "p-$ns"
   sudo ip netns exec "$ns" ip link set "p-$ns" up
   sudo ip netns exec "$ns" ip link set lo up
+  # The balancer's DNAT forwards connections ACROSS this namespace
+  # (arrive on p-$ns, leave toward the foreign sink) — without IP
+  # forwarding every DNATed connection is silently dropped.
+  sudo ip netns exec "$ns" sysctl -qw net.ipv4.ip_forward=1
+  # MASQUERADE the forwarded traffic: the lab's "tunnel" is an L2 bridge,
+  # so the sink's reply would otherwise be bridged STRAIGHT to the client
+  # (the host answers ARP for 10.200.0.10), bypassing the balancer's
+  # conntrack — the client then sees an un-translated SYN-ACK and RSTs.
+  # A real deployment has no hairpin (the tunnel is an L3 interface and
+  # egress traffic carries the mesh IP) — MASQUERADE replicates that
+  # source semantics here.
+  sudo ip netns exec "$ns" iptables -t nat -A POSTROUTING -d 10.200.0.0/24 -j MASQUERADE 2>/dev/null
   i=$((i+1))
 done
 REACH=0
 for ipaddr in "${IP_ALL[@]}"; do ping -c1 -W1 "$ipaddr" >/dev/null 2>&1 && REACH=$((REACH+1)); done
 [ "$REACH" = "${#IP_ALL[@]}" ] && ok "all 6 namespaces reachable (${REACH}/6)" || bad "namespaces reachable ($REACH/6)"
 
-# The host firewall (ufw, INPUT policy DROP) would block netns→panel TCP:
-# explicitly allow the lab bridge subnet for the duration of the run.
+# The host firewall (ufw, INPUT policy DROP) would block netns→panel TCP;
+# with br_netfilter active (bridge-nf-call-iptables=1, FORWARD DROP) the
+# SAME host chains also filter BRIDGED netns→netns traffic — the probes
+# and the DNATed forward connections both die there. Scope: this bridge
+# only, for the duration of the run.
 sudo iptables -I INPUT 1 -s 10.200.0.0/24 -j ACCEPT 2>/dev/null
 sudo iptables -I INPUT 1 -i $BR -j ACCEPT 2>/dev/null
+sudo iptables -I FORWARD 1 -i $BR -o $BR -j ACCEPT 2>/dev/null
+sudo iptables -I FORWARD 1 -s 10.200.0.0/24 -d 10.200.0.0/24 -j ACCEPT 2>/dev/null
 
 # 2. panel ------------------------------------------------------------------
 say "starting the real panel..."
 export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS
 mkdir -p $LAB/panel
+# Pin the port BEFORE first start: the panel's preferred port (7777) is
+# held by a boot-time process on this machine and the panel's auto-switch
+# watcher rebinds the listener mid-run (observed as connection-refused on
+# the scripted calls and the enroll POSTs). A pre-set port keeps the
+# listener stable for the whole run.
+PANEL_PORT=7779
+printf '{"port": %d}\n' "$PANEL_PORT" > $LAB/panel/panel.json
 $LAB/quantum-panel > $LAB/panel.log 2>&1 &
 PANEL_PID=$!
 # First start generates the config: random base path + first free port,
@@ -122,16 +165,39 @@ if base and not base.startswith('/'):
     base = '/' + base
 print('PANEL_BASE=' + base)
 " 2>/dev/null)"
+# The panel OWNS its port: when its preferred port is busy it rebinds and
+# saves panel.json — observed mid-run while a boot-time process holds the
+# default port. The harness follows, never assumes.
+refresh_panel_addr() {
+  local P B
+  eval "$(python3 -c "
+import json
+cfg = json.load(open('$LAB/panel/panel.json'))
+print('P=' + str(cfg.get('port', 7777)))
+base = str(cfg.get('base_path', ''))
+if base and not base.startswith('/'):
+    base = '/' + base
+print('B=' + base)
+" 2>/dev/null)"
+  if [ -n "$P" ] && [ "$P" != "$PANEL_PORT" ]; then
+    say "panel moved to port $P (was $PANEL_PORT) — following"
+    PANEL_PORT=$P
+  fi
+  [ -n "$B" ] && PANEL_BASE=$B
+  PANEL_URL="http://127.0.0.1:$PANEL_PORT$PANEL_BASE"
+}
 PANEL_URL="http://127.0.0.1:$PANEL_PORT$PANEL_BASE"
 say "panel at $PANEL_URL"
+refresh_panel_addr   # the panel may have moved after startup
 LIVE=""
 for i in $(seq 1 30); do
   curl -s -o /dev/null "$PANEL_URL/api/login" && LIVE=1 && break
   sleep 0.5
 done
 [ "$LIVE" = "1" ] && ok "panel listening at $PANEL_URL" || { bad "panel never listened"; echo "--- panel.log ---"; tail -30 "$LAB/panel.log" 2>/dev/null; exit 1; }
-# Re-assert the ACCEPT rule AFTER the panel starts: the panel's own
-# startup may add firewall rules that shadow our earlier ACCEPT.
+# Re-assert the ACCEPT rules AFTER the panel starts: the panel's own
+# startup may add firewall rules that shadow our earlier ACCEPT
+# (absorbed from the FRP session's harness fix).
 sudo iptables -I INPUT 1 -s 10.200.0.0/24 -j ACCEPT 2>/dev/null
 sudo iptables -I INPUT 1 -i $BR -j ACCEPT 2>/dev/null
 curl -s -c $LAB/admin.cookies -X POST "$PANEL_URL/api/login" \
@@ -143,22 +209,31 @@ CSRF=$(python3 -c "import json;print(json.load(open('$LAB/login.json')).get('csr
 api() { # api METHOD PATH [body] — prints the response body, logs the code
   local m=$1 p=$2 b=${3:-}
   local out code
+  # The CSRF header is required on EVERY mutating call — bodyless POSTs
+  # (e.g. agents/{id}/push) were silently rejected without it.
   if [ -n "$b" ]; then
     out=$(curl -s -b $LAB/admin.cookies -X "$m" "$PANEL_URL$p" \
       -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' -d "$b" \
       -w $'\n%{http_code}')
   else
-    out=$(curl -s -b $LAB/admin.cookies -X "$m" "$PANEL_URL$p" -w $'\n%{http_code}')
+    out=$(curl -s -b $LAB/admin.cookies -X "$m" "$PANEL_URL$p" \
+      -H "X-CSRF-Token: $CSRF" \
+      -w $'\n%{http_code}')
   fi
   code=${out##*$'\n'}
   echo "$m $p http=$code" >> $LAB/api.log
   echo "${out%$'\n'*}"
 }
-jq_str() { # jq_str JSON_STRING python_expr
-  echo "$1" | python3 -c "import json,sys;d=json.load(sys.stdin);print($2)" 2>/dev/null || echo ""
-}
-jq_get() { # jq_get FILE python_expr
-  python3 -c "import json;d=json.load(open('$1'));print($2)" 2>/dev/null || echo ""
+# jq_get FILE EXPR parses FILE; jq_get EXPR (one arg) parses stdin — both
+# call conventions exist in this script, and under `set -u` a missing $2
+# used to abort the whole expression (every pipe-form call returned "").
+jq_get() {
+  if [ "$#" -ge 2 ]; then
+    python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(eval(sys.argv[2]))" "$1" "$2" 2>/dev/null || echo ""
+  else
+    JS="$(cat)"
+    python3 -c "import json,sys;d=json.loads(sys.argv[1]);print(eval(sys.argv[2]))" "$JS" "$1" 2>/dev/null || echo ""
+  fi
 }
 
 # 3. mesh configuration ------------------------------------------------------
@@ -166,9 +241,10 @@ say "configuring the mesh (2 iran DCs, 1 foreign DC, 6 servers)..."
 api POST /api/mesh/datacenters '{"name":"Drak","kind":"iran","price_coefficient":1.0}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Chekavak","kind":"iran","price_coefficient":1.5}' >/dev/null
 api POST /api/mesh/datacenters '{"name":"Hetzner Germany","kind":"foreign","price_coefficient":1.0}' >/dev/null
-api GET /api/mesh/datacenters > $LAB/dc.json
-DC_DRAK=$(jq_get $LAB/dc.json "[x['id'] for x in d['datacenters'] if x['name']=='Drak'][0]")
-DC_HZ=$(jq_get $LAB/dc.json "[x['id'] for x in d['datacenters'] if x['name']=='Hetzner Germany'][0]")
+DC_RAW=$(api GET /api/mesh/datacenters)
+echo "[e2e] DC_RAW=${DC_RAW:0:200}"
+DC_DRAK=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']=='Drak'][0]")
+DC_HZ=$(echo "$DC_RAW" | jq_get "[d['id'] for d in d['datacenters'] if d['name']=='Hetzner Germany'][0]")
 [ -n "$DC_DRAK" ] && [ -n "$DC_HZ" ] && ok "datacenters created ($DC_DRAK/$DC_HZ)" || bad "datacenters ($DC_DRAK/$DC_HZ)"
 
 declare -A SRV_ID
@@ -205,24 +281,81 @@ TOPO1=$(jq_get $LAB/gen1.json "d['topology_id']")
 N1=$(jq_get $LAB/gen1.json "len(d['tunnels'])")
 [ "$N1" = "8" ] && ok "drak-hz generated (2x2x2=8 tunnels)" || bad "drak-hz generated ($N1 tunnels) raw=$GEN1 && tail -12 $LAB/api.log 2>/dev/null"
 
+# The panel's default failover policy is SwitchBackS=300 (a 300-second
+# sticky-away before a recovered target is re-admitted). The balancer
+# honors it correctly — but these sections test the MECHANICS (failure
+# detection, exclusion, re-admission), so the lab topologies opt out of
+# the sticky window; the sticky-away semantics are covered hermetically
+# by TestBalancerSwitchBackStickyAway.
+TOPO1_ID=$(jq_get $LAB/gen1.json "d['topology_id']")
+api PATCH "/api/mesh/topologies/$TOPO1_ID" '{"failover":{"switch_back_s":0}}' > /dev/null
+refresh_panel_addr   # follow the panel port before every HTTP phase
 # Patch every fake tunnel's engine_params with its remote server's lab IP.
-python3 - "$PANEL_PORT" "$LAB/admin.cookies" "$CSRF" "$SINK_PORT" <<'PYEOF'
-import json, sys, urllib.request
+# A short settle after the config burst: the panel rejects a connection
+# outright (RST) for a moment right after the generate storm.
+sleep 2
+# The panel serves everything under its randomized base path — without it
+# every call here 404s (the whole forward-traffic chain hangs off this).
+python3 - "$PANEL_PORT" "$PANEL_BASE" "$LAB/admin.cookies" "$CSRF" "$SINK_PORT" <<'PYEOF'
+import json, sys, time, traceback, urllib.request, urllib.error
 
-port, cookies, csrf, sink = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+port, base, jar, csrf, sink = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
 
-def call(method, path, body=None):
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method)
-    req.add_header("Cookie", cookies)
-    req.add_header("X-CSRF-Token", csrf)
-    data = None
+# admin.cookies is a curl Netscape jar (curl -c): raw contents are NOT a
+# Cookie header. Parse the jar the way curl -b does. HttpOnly cookies are
+# stored as "#HttpOnly_..." lines — they are data, not comments.
+cookie = ""
+for line in open(jar):
+    if line.startswith("#HttpOnly_"):
+        line = line[len("#HttpOnly_"):]
+    elif line.startswith("#") or not line.strip():
+        continue
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) >= 7:
+        cookie += f"{parts[5]}={parts[6]}; "
+
+def call(method, path, body=None, retries=6):
+    req_body = None
     if body is not None:
-        data = json.dumps(body).encode()
-        req.add_header("Content-Type", "application/json")
-    return json.load(urllib.request.urlopen(req, data))
+        req_body = json.dumps(body).encode()
+    last = None
+    for attempt in range(retries):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{base}{path}", method=method)
+        req.add_header("Cookie", cookie.rstrip("; "))
+        req.add_header("X-CSRF-Token", csrf)
+        if req_body is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            return json.load(urllib.request.urlopen(req, req_body))
+        except urllib.error.HTTPError as e:
+            print(f"api {method} {path} -> HTTP {e.code}: {e.read()[:300]!r}", file=sys.stderr)
+            raise
+        except Exception as e:
+            # Transient infra noise (one-off connection reset during the
+            # panel's startup churn): retry, never mask a real failure.
+            last = e
+            import subprocess
+            probe = subprocess.run(["sh", "-c",
+                "(timeout 2 tcpdump -i lo -nn -c 6 'tcp port " + str(port) + "' 2>/dev/null &"
+                " sleep 0.3; curl -s -o /dev/null -w 'curl-code=%{http_code}\\n' -X PATCH"
+                f" --max-time 1 http://127.0.0.1:{port}{base}{path} 2>&1 | tail -1) ;"
+                " wait"],
+                capture_output=True, text=True)
+            print(f"[refused-diag] attempt {attempt}: {e!r}\n wire: {probe.stdout!r}", file=sys.stderr)
+            time.sleep(1.0 * (attempt + 1))
+    print(f"api {method} {path} failed after {retries} attempts: {last!r}", file=sys.stderr)
+    traceback.print_exc()
+    raise last
 
-servers = {s["name"]: s["address"] for s in call("GET", "/api/mesh/servers")}
+servers_raw = call("GET", "/api/mesh/servers")["servers"]
+servers = {s["name"]: s["address"] for s in servers_raw}
+servers_by_id = {s["id"]: s for s in servers_raw}
+# Phase 5: each fake tunnel gets its OWN sink port — N tunnels converge
+# on one foreign host and the lab engine binds 0.0.0.0:<lab_port> on the
+# far end; a shared port let only the first bind (the Phase-4 100/0
+# artifact). The balancer's per-target-port nft map needs exactly this.
 patched = 0
+sink_ports = {}
 for tname in ("drak-hz", "chekavak-hz"):
     topos = call("GET", "/api/mesh/topologies")["topologies"]
     topo = [t for t in topos if t["name"] == tname][0]
@@ -230,15 +363,24 @@ for tname in ("drak-hz", "chekavak-hz"):
     for t in full.get("tunnels", []):
         if t["engine"] != "fake":
             continue
-        rip = servers.get(t["remote_server"], "")
+        rs = servers_by_id.get(t["remote_server_id"])  # tunnels carry ids, not names
+        rip = servers.get(rs["name"], "") if rs else ""
         if not rip:
             continue
+        # A DISTINCT local name — `port` here would shadow the PANEL port
+        # variable the call() closure uses (the Phase-5 "connection
+        # refused" hunt: every PATCH after the first GET was hitting the
+        # sink port on the host netns, where nothing listens).
+        sport = sink + patched
+        sink_ports[t["tunnel_key"]] = sport
         call("PATCH", f"/api/mesh/tunnels/{t['id']}",
-             {"engine_params": json.dumps({"lab_addr": rip, "lab_port": sink})})
+             {"engine_params": {"lab_addr": rip, "lab_port": sport}})
         patched += 1
-print(f"patched {patched} fake tunnels")
+with open("/tmp/quantum-e2e/sink_ports.json", "w") as fh:
+    json.dump(sink_ports, fh)
+print(f"patched {patched} fake tunnels (distinct sink ports)")
 PYEOF
-check $? "fake tunnel engine_params patched (lab_addr = remote lab IP)"
+check $? "fake tunnel engine_params patched (distinct per-tunnel sink ports)"
 
 # 4. enroll + link 6 real agents --------------------------------------------
 say "enrolling 6 real agents..."
@@ -265,7 +407,7 @@ for i in "${!NS_ALL[@]}"; do
 done
 api GET /api/mesh/agents > $LAB/agents.json
 AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-N_AGENTS=$(jq_str "$AGENTS" "len(d)")
+N_AGENTS=$(echo "$AGENTS" | jq_get "len(d)")
 [ "$N_AGENTS" = "6" ] && ok "6 agents enrolled + linked" || bad "agents enrolled ($N_AGENTS/6)"
 
 # 5. run the real agents ------------------------------------------------------
@@ -291,14 +433,14 @@ agentTestWait() { # desc seconds command...
 wait_v2() {
   api GET /api/mesh/agents > $LAB/agents.json
   AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-  [ "$(jq_str "$AGENTS" "sum(1 for a in d if a.get('proto_version',0)>=2)")" = "6" ]
+  [ "$(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")" = "6" ]
 }
 if agentTestWait "v2 negotiation" 20 wait_v2; then
   ok "v2 negotiated on all 6 agents"
 else
   api GET /api/mesh/agents > $LAB/agents.json
   AGENTS=$(jq_get $LAB/agents.json "json.dumps(d['agents'])")
-  bad "v2 negotiated ($(jq_str "$AGENTS" "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
+  bad "v2 negotiated ($(echo "$AGENTS" | jq_get "sum(1 for a in d if a.get('proto_version',0)>=2)")/6)"
   for ns in "${NS_ALL[@]}"; do
     nm=${ns#q-}
     echo "[e2e] run-$nm: $(tail -3 "$LAB/run-$nm.log" 2>/dev/null)"
@@ -307,109 +449,325 @@ fi
 
 # 6. push DesiredV2 to every agent -------------------------------------------
 say "pushing DesiredV2 to every agent..."
-for aid in $(jq_str "$AGENTS" "[a['id'] for a in d]"); do
+for aid in $(echo "$AGENTS" | jq_get "'\n'.join(a['id'] for a in d)"); do
   api POST /api/mesh/agents/$aid/push > "$LAB/push-$aid.json" 2>/dev/null
 done
 sleep 3
-# fake sinks listening on the foreign agents (both foreign servers host
-# 2 fake tunnels each? tunnels per foreign ns: drak-hz has 2 fake tunnels
-# with remote = that server (one per iran server) + chekavak-hz 2 → the
-# sink port is the SAME (8443) per server: one listener per foreign ns.
+# fake sinks listening on the foreign agents: each fake tunnel owns a
+# DISTINCT sink port (SINK_PORT + tunnel index), and each foreign ns
+# hosts one sink per iran server (2 topologies × 2 iran servers = 4).
 SINKS=0
 for ns in "${NS_FOREIGN[@]}"; do
-  sudo ip netns exec "$ns" ss -tln 2>/dev/null | grep -q ":$SINK_PORT " && SINKS=$((SINKS+1))
+  cnt=$(sudo ip netns exec "$ns" ss -tln 2>/dev/null | awk '{print $4}' \
+        | grep -oE '[0-9]+$' | awk -v lo="$SINK_PORT" '$1>=lo && $1<lo+20' | wc -l)
+  [ "$cnt" -ge 2 ] && SINKS=$((SINKS+1))
 done
-[ "$SINKS" = "2" ] && ok "fake sinks listening on both foreign agents" || bad "fake sinks ($SINKS/2)"
+[ "$SINKS" = "2" ] && ok "fake sinks listening on both foreign agents (per-tunnel ports)" || bad "fake sinks ($SINKS/2)"
 
-AG_DRAK1=$(jq_str "$AGENTS" "[a['id'] for a in d if a['name']=='ir-drak-1'][0]")
+AG_DRAK1=$(echo "$AGENTS" | jq_get "[a['id'] for a in d if a['name']=='ir-drak-1'][0]")
+refresh_panel_addr
 
 # 7. forward rule + measured weighted split ----------------------------------
 say "forward rule + measured weighted split..."
+# Cross-netns reachability precheck (the agent's probe path, no DNAT):
+# bisects "firewall/routing broken" from "DNAT-specific".
+P1_PORT=$(jq_get $LAB/sink_ports.json "d['tun-drak-hz-ir-drak-1-hz-fra-1-b']")
+P1_PORT=${P1_PORT:-$SINK_PORT}
+P2_PORT=$(jq_get $LAB/sink_ports.json "d['tun-drak-hz-ir-drak-1-hz-fra-2-b']")
+P2_PORT=${P2_PORT:-$SINK_PORT}
+if sudo ip netns exec q-ir-drak-1 bash -c "printf 'precheck\n' | timeout 3 nc -q1 ${IP_FOREIGN[0]} $P1_PORT" 2>/dev/null; then
+  ok "cross-netns TCP to the hz-fra-1 sink works (direct, no DNAT)"
+else
+  bad "cross-netns TCP to the hz-fra-1 sink BLOCKED (direct, no DNAT) — probes and forwards cannot work"
+fi
 api POST /api/mesh/forwards "{\"topology_id\":$TOPO1,\"local_server_id\":${SRV_ID[ir-drak-1]},\"listen_port\":$FWD_LISTEN,\"proto\":\"tcp\",\"enabled\":true}" >/dev/null
+# Phase 5: actually SET the weights (the old harness only claimed 70/30).
+api POST /api/mesh/topologies/$TOPO1/weights "{\"local_server_id\":${SRV_ID[ir-drak-1]},\"remote_server_id\":${SRV_ID[hz-fra-1]},\"weight\":70}" >/dev/null
+api POST /api/mesh/topologies/$TOPO1/weights "{\"local_server_id\":${SRV_ID[ir-drak-1]},\"remote_server_id\":${SRV_ID[hz-fra-2]},\"weight\":30}" >/dev/null
 api POST /api/mesh/agents/$AG_DRAK1/push >/dev/null
 sleep 3
-# sinks on both foreign servers (the forward balances across the whole
-# topology pool: ir-drak-1's fake tunnels reach hz-fra-1 AND hz-fra-2).
-for ns in "${NS_FOREIGN[@]}"; do
-  sudo ip netns exec "$ns" sh -c "nohup nc -l -p $SINK_PORT > /tmp/quantum-e2e/sink-$ns 2>/dev/null &"
-done
-sleep 1
-N_CONN=20
-for i in $(seq 1 $N_CONN); do
-  echo "conn-$i" | timeout 2 nc -q1 ${IP_IRAN[0]} $FWD_LISTEN >/dev/null 2>&1 || true
-  sleep 0.1
-done
-sleep 1
-count_sink() { sudo ip netns exec "$1" sh -c "grep -c 'conn-' /tmp/quantum-e2e/sink-$1 2>/dev/null" || echo 0; }
-C1=$(count_sink q-hz-fra-1); C2=$(count_sink q-hz-fra-2)
-TOTAL=$((C1+C2))
-[ "$TOTAL" -ge $((N_CONN/2)) ] && ok "forwarded traffic flows ($TOTAL/$N_CONN delivered)" || bad "forwarded traffic ($TOTAL/$N_CONN)"
-if [ "$TOTAL" -gt 0 ]; then P1=$((C1*100/TOTAL)); P2=$((C2*100/TOTAL)); else P1=0; P2=0; fi
-say "measured split: hz-fra-1=$C1 (${P1}%) hz-fra-2=$C2 (${P2}%) — desired weights 70/30 (both tunnels are 'fake' with equal capability)"
-[ "$TOTAL" -gt 0 ] && ok "weighted split measured (${P1}%/${P2}%)" || bad "weighted split"
+# The agent's rendered nft map must carry both targets with 70/30 ranges
+# (verified directly against the KERNEL ruleset, not the panel API).
+IP_HZ1=${IP_FOREIGN[0]}; IP_HZ2=${IP_FOREIGN[1]}
+sleep 2
+nft_map() { sudo ip netns exec q-ir-drak-1 nft list table ip quantum-fwd 2>/dev/null; }
+NFT_MAP=$(nft_map)
+if echo "$NFT_MAP" | grep -q "$IP_HZ1" && echo "$NFT_MAP" | grep -q "$IP_HZ2"; then
+  ok "nft map carries both foreign targets (kernel ruleset)"
+else
+  bad "nft map missing a target: $(echo "$NFT_MAP" | grep dnat | head -2)"
+fi
+N_CONN=10000
+# Fixed-size payloads (65 bytes each): the byte-based per-tunnel split
+# equals the connection split exactly.
+# ONE threaded python process on the host — an xargs+nc fork storm cost
+# 30+ minutes on WSL (20k forks) and the usage reads landed mid-storm.
+send_conns() { # send_conns COUNT — parallel NEW connections to the forward listen port
+  python3 - "$1" "$FWD_LISTEN" <<'PYEOF'
+import socket, sys, concurrent.futures
+count, port = int(sys.argv[1]), int(sys.argv[2])
+def one(i):
+    try:
+        s = socket.create_connection(("10.200.0.11", port), timeout=3)
+        s.sendall(b"%064d\n" % i)
+        s.close()
+        return 1
+    except Exception:
+        return 0
+ok = 0
+with concurrent.futures.ThreadPoolExecutor(64) as ex:
+    ok = sum(ex.map(one, range(count)))
+print(f"connect_ok={ok}/{count}", file=sys.stderr)
+PYEOF
+}
+# Delivered traffic + weighted split: the lab engines count received bytes
+# themselves (the payload counters behind the usage API), per tunnel —
+# each ir-drak-1 fake tunnel targets one foreign server, so the byte
+# delta between the two = the measured split.
+# The counters reach the store only on the NEXT heartbeat (30 s cadence,
+# 5 s sample throttle) — the harness polls, never assumes.
+wait_usage() { # wait_usage BEFORE_SNAPSHOT — poll until the totals grow past the snapshot
+  local before="$1" deadline=$(( $(date +%s) + 50 )) sum
+  while [ $(date +%s) -lt $deadline ]; do
+    sum=$(fake_tunnel_usage | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)
+    [ -n "$sum" ] && [ "$sum" -gt "$before" ] && return 0
+    sleep 3
+  done
+  return 1
+}
+fake_tunnel_usage() { # → "tunnel_key:payload_rx ..." for ir-drak-1's fake tunnels
+python3 - "$PANEL_PORT" "$PANEL_BASE" "$LAB/admin.cookies" "$CSRF" <<'PYEOF'
+import json, sys, urllib.request
+port, base, jar, csrf = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+cookie = ""
+for line in open(jar):
+    if line.startswith("#HttpOnly_"):
+        line = line[len("#HttpOnly_"):]
+    elif line.startswith("#") or not line.strip():
+        continue
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) >= 7:
+        cookie += f"{parts[5]}={parts[6]}; "
+def call(path):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{base}{path}")
+    req.add_header("Cookie", cookie.rstrip("; "))
+    req.add_header("X-CSRF-Token", csrf)
+    return json.load(urllib.request.urlopen(req))
+topo = [t for t in call("/api/mesh/topologies")["topologies"] if t["name"] == "drak-hz"][0]
+full = call(f"/api/mesh/topologies/{topo['id']}")
+out = []
+for t in full.get("tunnels", []):
+    if t["engine"] == "fake" and "ir-drak-1" in t["tunnel_key"]:
+        u = call(f"/api/mesh/usage?tunnel_id={t['id']}")["usage"]
+        out.append(f"{t['tunnel_key']}:{u['payload_rx']}")
+print(" ".join(out))
+PYEOF
+}
+comm_delta() { # comm_delta AFTER BEFORE KEY — one tunnel's payload byte delta
+  local a b
+  a=$(echo "$1" | tr ' ' '\n' | grep "$3" | cut -d: -f2 | tr -cd 0-9)
+  b=$(echo "$2" | tr ' ' '\n' | grep "$3" | cut -d: -f2 | tr -cd 0-9)
+  echo $(( ${a:-0} - ${b:-0} ))
+}
+SPLIT_BEFORE=$(fake_tunnel_usage)
+send_conns $N_CONN
+wait_usage "$(echo "$SPLIT_BEFORE" | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)" || true
+SPLIT_AFTER=$(fake_tunnel_usage)
+# Per-tunnel delta (hz-fra-1's tunnel vs hz-fra-2's tunnel).
+B1=$(echo "$SPLIT_BEFORE" | tr ' ' '\n' | grep 'hz-fra-1' | cut -d: -f2 | tr -cd 0-9); B1=${B1:-0}
+A1=$(echo "$SPLIT_AFTER"  | tr ' ' '\n' | grep 'hz-fra-1' | cut -d: -f2 | tr -cd 0-9); A1=${A1:-0}
+B2=$(echo "$SPLIT_BEFORE" | tr ' ' '\n' | grep 'hz-fra-2' | cut -d: -f2 | tr -cd 0-9); B2=${B2:-0}
+A2=$(echo "$SPLIT_AFTER"  | tr ' ' '\n' | grep 'hz-fra-2' | cut -d: -f2 | tr -cd 0-9); A2=${A2:-0}
+C1=$((A1-B1)); C2=$((A2-B2)); TOTAL=$((C1+C2))
+[ "$TOTAL" -ge $((N_CONN*60/100)) ] && ok "forwarded traffic flows ($TOTAL/$((N_CONN*65)) payload bytes delivered)" || bad "forwarded traffic ($TOTAL bytes)"
+# ±2 percentage points against the configured 70/30 (the documented
+# acceptance tolerance for 10k NEW connections).
+P1=$((C1*100/(TOTAL>0?TOTAL:1))); P2=$((C2*100/(TOTAL>0?TOTAL:1)))
+say "measured split: hz-fra-1=$C1 bytes (${P1}%) hz-fra-2=$C2 bytes (${P2}%) — desired 70/30"
+if [ "$TOTAL" -gt 0 ] && [ "$P1" -ge 68 ] && [ "$P1" -le 72 ]; then
+  ok "weighted split within ±2pp of 70/30 (${P1}%/${P2}%)"
+else
+  bad "weighted split outside ±2pp of 70/30 (${P1}%/${P2}%)"
+fi
 
-# 8. tunnel failover (kill ONE tunnel's sink) --------------------------------
-say "tunnel failover (primary sink killed)..."
-T0=$(date +%s.%N)
-# kill the sink that owns the primary share: kill hz-fra-1's listener
-sudo ip netns exec q-hz-fra-1 pkill -f "nc -l -p $SINK_PORT" 2>/dev/null || true
-MOVED=0
-DEADLINE=$(( $(date +%s) + 15 ))
-LAST=$TOTAL
-while [ $(date +%s) -lt $DEADLINE ]; do
-  C2=$(count_sink q-hz-fra-2)
-  if [ "$C2" -gt "$P2" ] 2>/dev/null || [ "$C2" -gt 0 ]; then
-    MOVED=1; break
+# 8. tunnel failover — REAL failure injection --------------------------------
+# The lab engine's sink IS the tunnel's far end, and the agent's near-end
+# health probe dials it. Dropping the path between the iran agent and
+# that sink port (scoped iptables rules INSIDE the iran test namespace)
+# kills both the probe and the forwarded traffic — a faithful tunnel
+# death, unlike the old kill-nc no-op.
+say "tunnel failover (path to hz-fra-1's sink blocked)..."
+P1_PORT=$(jq_get $LAB/sink_ports.json "d['tun-drak-hz-ir-drak-1-hz-fra-1-b']")
+P1_PORT=${P1_PORT:-$SINK_PORT}
+block_target() { # block_target NETNS IP [PORT] — scoped: that ns, that dst only
+  local ns=$1 ip=$2 port=${3:-}
+  if [ -n "$port" ]; then
+    sudo ip netns exec "$ns" iptables -I OUTPUT 1 -d "$ip" -p tcp --dport "$port" -j DROP 2>/dev/null
+    sudo ip netns exec "$ns" iptables -I FORWARD 1 -d "$ip" -p tcp --dport "$port" -j DROP 2>/dev/null
+  else
+    sudo ip netns exec "$ns" iptables -I OUTPUT 1 -d "$ip" -j DROP 2>/dev/null
+    sudo ip netns exec "$ns" iptables -I FORWARD 1 -d "$ip" -j DROP 2>/dev/null
   fi
-  echo "post-kill-$C2" | timeout 2 nc -q1 ${IP_IRAN[0]} $FWD_LISTEN >/dev/null 2>&1 || true
-  sleep 0.5
+}
+unblock_target() {
+  local ns=$1 ip=$2 port=${3:-}
+  if [ -n "$port" ]; then
+    sudo ip netns exec "$ns" iptables -D OUTPUT -d "$ip" -p tcp --dport "$port" -j DROP 2>/dev/null
+    sudo ip netns exec "$ns" iptables -D FORWARD -d "$ip" -p tcp --dport "$port" -j DROP 2>/dev/null
+  else
+    sudo ip netns exec "$ns" iptables -D OUTPUT -d "$ip" -j DROP 2>/dev/null
+    sudo ip netns exec "$ns" iptables -D FORWARD -d "$ip" -j DROP 2>/dev/null
+  fi
+}
+# Cleanup guard: every injected rule is removed on exit whatever happens.
+cleanup_injection() {
+  unblock_target q-ir-drak-1 "$IP_HZ1"
+  unblock_target q-ir-drak-1 "$IP_HZ2"
+}
+trap cleanup_injection EXIT
+
+T0=$(date +%s.%N)
+# Precondition: the dnat map must be live BEFORE the injection — "the
+# target vanished" means nothing if it was never rendered.
+if ! nft_map | grep -q "dnat"; then bad "precondition: no dnat rendered before the failover injection"; fi
+# The injection MUST provably install: a silently-failing block would
+# make "the target did not vanish" meaningless (Phase-5 report UNVERIFIED
+# item: the port-scoped rules were swallowed by 2>/dev/null).
+block_target q-ir-drak-1 "$IP_HZ1" "$P1_PORT"
+if sudo ip netns exec q-ir-drak-1 iptables -C OUTPUT -d "$IP_HZ1" -p tcp --dport "$P1_PORT" -j DROP 2>/dev/null \
+   && sudo ip netns exec q-ir-drak-1 iptables -C FORWARD -d "$IP_HZ1" -p tcp --dport "$P1_PORT" -j DROP 2>/dev/null; then
+  ok "port-scoped injection rules verified present (OUTPUT+FORWARD, $IP_HZ1:$P1_PORT)"
+else
+  bad "port-scoped injection rules NOT installed"
+fi
+# Detection = the target disappearing from the KERNEL ruleset (the agent
+# re-renders on the health flip) while the chain itself still exists.
+DETECTED=0
+DEADLINE=$(( $(date +%s) + 45 ))
+while [ $(date +%s) -lt $DEADLINE ]; do
+  if nft_map | grep -q "dnat" && ! nft_map | grep -q "$IP_HZ1"; then DETECTED=1; break; fi
+  sleep 0.3
 done
 T1=$(date +%s.%N)
 DT=$(python3 -c "print(f'{$T1-$T0:.1f}')")
-check $MOVED "tunnel failover: new connections moved to hz-fra-2 in ${DT}s"
+if [ "$DETECTED" = "1" ]; then ok "tunnel failover: hz-fra-1 excluded from the nft map in ${DT}s (detection)"; else bad "tunnel failover: hz-fra-1 not excluded within 45s"; fi
 FAILOVER_TIME=$DT
+# New traffic must now flow to the survivor only. SHORT-BURST STATISTICAL
+# NOTE (closes the Phase-5 report's short-burst UNVERIFIED item): with
+# n=200 connections the binomial standard error at p=0.7 is
+# sqrt(0.7*0.3/200) ≈ 3.2pp — a ±2pp band is statistically meaningless at
+# this burst size, so this check asserts DELIVERY only (bytes reached the
+# survivor, none the blocked target). Proportional assertions with the
+# ±2pp band are made exclusively on the 10,000-connection bursts, where
+# σ ≈ 0.45pp.
+SB1=$(fake_tunnel_usage)
+send_conns 200
+wait_usage "$(echo "$SB1" | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)" || true
+SA1=$(fake_tunnel_usage)
+D2=$(comm_delta "$SA1" "$SB1" 'hz-fra-2')
+D1=$(comm_delta "$SA1" "$SB1" 'hz-fra-1')
+[ "${D2:-0}" -gt 0 ] && [ "${D1:-0}" -eq 0 ] && ok "post-failover traffic 100% to hz-fra-2 (${D2} bytes; hz-fra-1 got ${D1})" || bad "post-failover split: hz-fra-1=${D1:-0} hz-fra-2=${D2:-0}"
 
 # 9. whole foreign server down + failback ------------------------------------
 say "whole-server failover + failback..."
-# Bring hz-fra-1's sink back first (so the rotation has both again), then
-# kill BOTH sinks of hz-fra-2 -> traffic consolidates on hz-fra-1; then
-# restore hz-fra-2 -> failback.
-sudo ip netns exec q-hz-fra-1 sh -c "nohup nc -l -p $SINK_PORT > /tmp/quantum-e2e/sink-q-hz-fra-1 2>/dev/null &"
-sleep 2
-sudo ip netns exec q-hz-fra-2 pkill -f "nc -l -p $SINK_PORT" 2>/dev/null || true
-sleep 2
-T0=$(date +%s.%N)
-sudo ip netns exec q-hz-fra-2 sh -c "nohup nc -l -p $SINK_PORT > /tmp/quantum-e2e/sink-q-hz-fra-2 2>/dev/null &"
-BACK=0
-DEADLINE=$(( $(date +%s) + 15 ))
+# Recover the single-tunnel block first, then take the WHOLE server path
+# down (every sink port on hz-fra-1).
+unblock_target q-ir-drak-1 "$IP_HZ1" "$P1_PORT"
+DEADLINE=$(( $(date +%s) + 45 ))
+BACK1=0
 while [ $(date +%s) -lt $DEADLINE ]; do
-  C=$(count_sink q-hz-fra-2)
-  if [ "$C" -gt "$C2" ] 2>/dev/null; then BACK=1; break; fi
-  echo "failback-probe" | timeout 2 nc -q1 ${IP_IRAN[0]} $FWD_LISTEN >/dev/null 2>&1 || true
-  sleep 0.5
+  if nft_map | grep -q "$IP_HZ1"; then BACK1=1; break; fi
+  sleep 0.3
+done
+T0=$(date +%s.%N)
+if [ "$BACK1" = "1" ]; then ok "recovered tunnel re-admitted to the nft map (failback)"; else bad "recovered tunnel not re-admitted within 20s"; fi
+block_target q-ir-drak-1 "$IP_HZ1"   # the whole server: every port
+DETECTED2=0
+DEADLINE=$(( $(date +%s) + 45 ))
+while [ $(date +%s) -lt $DEADLINE ]; do
+  if nft_map | grep -q "dnat" && ! nft_map | grep -q "$IP_HZ1"; then DETECTED2=1; break; fi
+  sleep 0.3
 done
 T1=$(date +%s.%N)
 DT2=$(python3 -c "print(f'{$T1-$T0:.1f}')")
-check $BACK "failback to hz-fra-2 in ${DT2}s"
+if [ "$DETECTED2" = "1" ]; then ok "whole foreign server excluded from the nft map in ${DT2}s"; else bad "whole server not excluded within 45s"; fi
+WHOLE_SERVER_TIME=$DT2
+# Recovery of the server: traffic returns to the 70/30 split.
+T0=$(date +%s.%N)
+unblock_target q-ir-drak-1 "$IP_HZ1"
+DEADLINE=$(( $(date +%s) + 45 ))
+BACK2=0
+while [ $(date +%s) -lt $DEADLINE ]; do
+  if nft_map | grep -q "$IP_HZ1"; then BACK2=1; break; fi
+  sleep 0.3
+done
+T1=$(date +%s.%N)
+DT3=$(python3 -c "print(f'{$T1-$T0:.1f}')")
+if [ "$BACK2" = "1" ]; then ok "whole-server recovery re-admitted to the nft map in ${DT3}s"; else bad "whole-server recovery not re-admitted within 20s"; fi
+RECOVERY_TIME=$DT3
+SB2=$(fake_tunnel_usage)
+send_conns 10000
+wait_usage "$(echo "$SB2" | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)" || true
+SA2=$(fake_tunnel_usage)
+R1=$(comm_delta "$SA2" "$SB2" 'hz-fra-1'); R2=$(comm_delta "$SA2" "$SB2" 'hz-fra-2')
+RT=$(( ${R1:-0} + ${R2:-0} ))
+RP1=$(( ${R1:-0} * 100 / (RT>0 ? RT : 1) ))
+if [ "$RT" -gt 0 ] && [ "$RP1" -ge 68 ] && [ "$RP1" -le 72 ]; then
+  ok "failback split back within ±2pp of 70/30 (${RP1}%/$((100-RP1))% of $RT bytes)"
+else
+  bad "failback split outside tolerance (hz-fra-1=${R1:-0} hz-fra-2=${R2:-0} of $RT)"
+fi
+
+# 9b. all destinations down: the fail-fast pass-through chain ----------------
+say "all destinations down..."
+block_target q-ir-drak-1 "$IP_HZ1"
+block_target q-ir-drak-1 "$IP_HZ2"
+DEADLINE=$(( $(date +%s) + 45 ))
+ALLDOWN=0
+while [ $(date +%s) -lt $DEADLINE ]; do
+  if ! nft_map | grep -q "dnat"; then ALLDOWN=1; break; fi
+  sleep 0.3
+done
+if [ "$ALLDOWN" = "1" ]; then ok "all targets down: no dnat rendered (fail-fast pass-through)"; else bad "all-down still renders dnat"; fi
+FAILS=0
+for i in 1 2 3 4 5; do
+  printf "%064d\n" "$i" | timeout 2 nc -q1 -w1 ${IP_IRAN[0]} $FWD_LISTEN >/dev/null 2>&1 || FAILS=$((FAILS+1))
+done
+[ "$FAILS" -ge 3 ] && ok "all-down: new connections fail fast ($FAILS/5 refused/timeout)" || bad "all-down behavior ($FAILS/5 failed)"
+unblock_target q-ir-drak-1 "$IP_HZ1"
+unblock_target q-ir-drak-1 "$IP_HZ2"
+DEADLINE=$(( $(date +%s) + 45 ))
+RECOVERED=0
+while [ $(date +%s) -lt $DEADLINE ]; do
+  if nft_map | grep -q "dnat"; then RECOVERED=1; break; fi
+  sleep 0.3
+done
+if [ "$RECOVERED" = "1" ]; then ok "all targets recovered: dnat re-rendered"; else bad "all-down recovery missing dnat"; fi
 
 # 10. panel death: traffic + failover keep working ---------------------------
 say "panel death..."
+# Snapshot per-agent revisions while the panel is still alive — the storm
+# criterion compares these against the post-restart state.
+refresh_panel_addr
+api GET /api/mesh/agents > $LAB/agents-before.json
 kill "$PANEL_PID" 2>/dev/null; PANEL_PID=""
 wait "$PANEL_PID" 2>/dev/null
 sleep 1
-# failover WITHOUT the panel: kill hz-fra-1's sink -> new connections move
-BEFORE_B1=$(count_sink q-hz-fra-1)
-sudo ip netns exec q-hz-fra-1 pkill -f "nc -l -p $SINK_PORT" 2>/dev/null || true
-DEADLINE=$(( $(date +%s) + 15 ))
+# failover WITHOUT the panel: block hz-fra-1's path -> new connections move
+T0=$(date +%s.%N)
+block_target q-ir-drak-1 "$IP_HZ1"
+DEADLINE=$(( $(date +%s) + 45 ))
 MOVED2=0
 while [ $(date +%s) -lt $DEADLINE ]; do
-  B2=$(count_sink q-hz-fra-2)
-  if [ "$B2" -gt 0 ]; then MOVED2=1; break; fi
-  echo "panel-dead-probe" | timeout 2 nc -q1 ${IP_IRAN[0]} $FWD_LISTEN >/dev/null 2>&1 || true
-  sleep 0.5
+  if nft_map | grep -q "dnat" && ! nft_map | grep -q "$IP_HZ1"; then MOVED2=1; break; fi
+  sleep 0.3
 done
-check $MOVED2 "traffic + failover keep working with the panel dead (moved after ${B2:-0} sink bytes)"
+T1=$(date +%s.%N)
+DT4=$(python3 -c "print(f'{$T1-$T0:.1f}')")
+unblock_target q-ir-drak-1 "$IP_HZ1"
+if [ "$MOVED2" = "1" ]; then ok "traffic + failover keep working with the panel dead (${DT4}s to re-render)"; else bad "panel-dead failover did not re-render"; fi
 DEAD_PANEL_FAILOVER=$MOVED2
+PANEL_DEATH_FAILOVER_TIME=$DT4
 
 # 11. panel restart: re-sync without a revision storm -------------------------
 say "panel restart..."
@@ -417,19 +775,26 @@ export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS
 $LAB/quantum-panel >> $LAB/panel.log 2>&1 &
 PANEL_PID=$!
 LIVE=""
-for i in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$PANEL_PORT/api/login" && LIVE=1 && break || sleep 0.5; done
+for i in $(seq 1 30); do curl -s -o /dev/null "http://127.0.0.1:$PANEL_PORT$PANEL_BASE/api/login" && LIVE=1 && break || sleep 0.5; done
 [ "$LIVE" = "1" ] && ok "panel restarted" || bad "panel restart"
-curl -s -c $LAB/admin.cookies -X POST "http://127.0.0.1:$PANEL_PORT/api/login" \
+curl -s -c $LAB/admin.cookies -X POST "http://127.0.0.1:$PANEL_PORT$PANEL_BASE/api/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"admin\",\"password\":\"$PANEL_PASS\"}" > $LAB/login2.json
 CSRF=$(python3 -c "import json;print(json.load(open('$LAB/login2.json')).get('csrf_token',''))")
-# agents reconnect; give them time, then count distinct applied revisions
+# agents reconnect; give them time, then compare revision stability
 sleep 8
 api GET /api/mesh/agents > $LAB/agents-revs.json
-REVS=$(jq_get $LAB/agents-revs.json "len({a.get('applied_revision','') for a in d['agents'] if a.get('applied_revision')})")
-[ "$REVS" -le 2 ] && ok "panel restart: no revision storm ($REVS distinct applied revisions)" || bad "revision storm ($REVS)"
+REVS=$(python3 -c "
+import json
+before = {a['id']: a.get('applied_revision','') for a in json.load(open('$LAB/agents-before.json'))['agents']}
+after  = {a['id']: a.get('applied_revision','') for a in json.load(open('$LAB/agents-revs.json'))['agents']}
+changed = sum(1 for k in after if before.get(k) != after[k] and after[k])
+print(changed)" 2>/dev/null)
+REVS=${REVS:-ERR}
+[ "$REVS" = "0" ] && ok "panel restart: no revision storm (0 revisions changed on reconnect)" || bad "revision storm ($REVS revisions changed)"
 
 # 12. wire/payload counters in the usage API ----------------------------------
+refresh_panel_addr
 say "usage counters..."
 # The usage API needs a scope param and answers {scope, usage:{wire_rx,…}}.
 # Query per topology: the store's traffic_samples carry the agent's
@@ -444,15 +809,32 @@ print('YES' if (u.get('wire_rx', 0) > 0 or u.get('payload_rx', 0) > 0) else 'NO'
 [ "$USAGE_OK" = "YES" ] && ok "usage API carries real byte counters (wire==payload for fake tunnels)" || bad "usage API counters ($TOPO1_USAGE)"
 
 # 13. weight change enforced on the agent -------------------------------------
-say "weight change..."
-api POST /api/mesh/topologies/$TOPO1/weights "{\"local_server_id\":${SRV_ID[ir-drak-1]},\"remote_server_id\":${SRV_ID[hz-fra-2]},\"weight\":100}" >/dev/null
+say "weight change 70/30 -> 30/70..."
+refresh_panel_addr
+api POST /api/mesh/topologies/$TOPO1/weights "{\"local_server_id\":${SRV_ID[ir-drak-1]},\"remote_server_id\":${SRV_ID[hz-fra-1]},\"weight\":30}" >/dev/null
+api POST /api/mesh/topologies/$TOPO1/weights "{\"local_server_id\":${SRV_ID[ir-drak-1]},\"remote_server_id\":${SRV_ID[hz-fra-2]},\"weight\":70}" >/dev/null
 api POST /api/mesh/agents/$AG_DRAK1/push >/dev/null
-sleep 4
-C_BEFORE=$(count_sink q-hz-fra-2)
-echo "weight-probe" | timeout 2 nc -q1 ${IP_IRAN[0]} $FWD_LISTEN >/dev/null 2>&1 || true
-sleep 2
-C_AFTER=$(count_sink q-hz-fra-2)
-[ "$C_AFTER" -gt "$C_BEFORE" ] && ok "weight change enforced on the agent (traffic moved to hz-fra-2)" || bad "weight change not enforced"
+# The new revision must re-render the KERNEL ruleset (30/70 ranges).
+DEADLINE=$(( $(date +%s) + 45 ))
+FLIPPED=0
+while [ $(date +%s) -lt $DEADLINE ]; do
+  # hz-fra-1's range must now be the MINOR share (0-29 for 30%).
+  if nft_map | grep -q "0-29 : $IP_HZ1" && nft_map | grep -q "30-99 : $IP_HZ2"; then FLIPPED=1; break; fi
+  sleep 0.3
+done
+if [ "$FLIPPED" = "1" ]; then ok "weight change re-rendered the nft map (30/70 ranges)"; else bad "weight change did not re-render the nft map"; fi
+WB=$(fake_tunnel_usage)
+send_conns 10000
+wait_usage "$(echo "$WB" | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)" || true
+WA=$(fake_tunnel_usage)
+W1=$(comm_delta "$WA" "$WB" 'hz-fra-1'); W2=$(comm_delta "$WA" "$WB" 'hz-fra-2')
+WT=$(( ${W1:-0} + ${W2:-0} ))
+WP1=$(( ${W1:-0} * 100 / (WT>0 ? WT : 1) ))
+if [ "$WT" -gt 0 ] && [ "$WP1" -ge 28 ] && [ "$WP1" -le 32 ]; then
+  ok "distribution followed the weight change (${WP1}%/$((100-WP1))% of $WT bytes — want 30/70)"
+else
+  bad "distribution did not follow the weight change (hz-fra-1=${W1:-0} hz-fra-2=${W2:-0} of $WT — want ~30/70)"
+fi
 
 # verdict ----------------------------------------------------------------------
 echo

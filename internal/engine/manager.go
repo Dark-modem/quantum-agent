@@ -100,6 +100,19 @@ func (m *Manager) RunningCount() int {
 	return len(m.running)
 }
 
+// Instance returns a copy of one running instance (with its engine
+// params). The balancer needs the params the Status view deliberately
+// omits — drivers implement ForwardAddresser against the full instance.
+func (m *Manager) Instance(id string) (Instance, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	slot, ok := m.running[id]
+	if !ok {
+		return Instance{}, false
+	}
+	return slot.inst, true
+}
+
 // Reconcile converges to (engines, tunnels). It is safe to call
 // repeatedly with the same desired state (idempotent).
 func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels []TunnelSpec) ReconcileResult {
@@ -121,7 +134,7 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 	// disabled/unregistered; uninstall engines that became idle.
 	for id, slot := range m.running {
 		t, ok := want[id]
-		mustStop := !ok || !t.Enabled || !enabledEngines[t.Engine]
+		mustStop := !ok || !t.Enabled || !enabledEngines[BaseEngineID(t.Engine)]
 		if !mustStop {
 			continue
 		}
@@ -136,7 +149,7 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 
 	// 2. Ensure every enabled tunnel with an enabled, registered engine.
 	for _, t := range want {
-		if !t.Enabled || !enabledEngines[t.Engine] {
+		if !t.Enabled || !enabledEngines[BaseEngineID(t.Engine)] {
 			continue
 		}
 		if t.ID == "" {
