@@ -136,7 +136,7 @@ func chiselClientArgs(p chiselParams) []string {
 	if p.Auth != "" {
 		args = append(args, "--auth", p.Auth)
 	}
-	args = append(args, fmt.Sprintf("http://%s:%d", p.RemoteAddr, p.ServerPort),
+	args = append(args, fmt.Sprintf("http://%s", net.JoinHostPort(p.RemoteAddr, fmt.Sprint(p.ServerPort))),
 		fmt.Sprintf("R:0.0.0.0:%d:%s:%d", p.RemotePort, p.LocalAddr, p.LocalPort))
 	return args
 }

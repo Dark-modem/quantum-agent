@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 	"github.com/Dark-modem/quantum-agent/internal/hardening"
@@ -285,6 +286,13 @@ func agentBuildStateReportV2() *agentStateReportV2 {
 	// Per-tunnel runtime with both byte views; per-engine overhead
 	// samples derived from real counter pairs only.
 	engines := map[string]*protocol.EngineOverheadSample{}
+	// Loss is only known for probed matrix instances: instance -> health.
+	matrixLoss := map[string]float64{}
+	for _, h := range agentHealthSnapshot() {
+		if h.Samples > 0 {
+			matrixLoss[h.Instance] = h.LossPct
+		}
+	}
 	for _, st := range mgr.Status() {
 		tr := protocol.TunnelRuntime{
 			TunnelID: st.TunnelID, Engine: st.Engine, Up: st.Health.OK,
@@ -294,6 +302,27 @@ func agentBuildStateReportV2() *agentStateReportV2 {
 			CountersKnown: st.Counters.WireKnown, // legacy field: wire-known
 			WireKnown:     st.Counters.WireKnown,
 			PayloadKnown:  st.Counters.PayloadKnown,
+		}
+		// Phase-11 per-tunnel extras: last error, uptime, measured loss.
+		if !st.Health.OK && st.Health.Detail != "" {
+			tr.LastError = truncateReportDetail(st.Health.Detail)
+		}
+		if st.Health.OK && !st.Health.Since.IsZero() {
+			if up := int64(time.Since(st.Health.Since).Seconds()); up > 0 {
+				tr.UptimeS = up
+			}
+		}
+		if st.Engine == "matrix" {
+			if inst, ok := mgr.Instance(st.TunnelID); ok {
+				var mp struct {
+					Instance string `json:"instance"`
+				}
+				if json.Unmarshal(inst.Params, &mp) == nil && mp.Instance != "" {
+					if loss, known := matrixLoss[mp.Instance]; known {
+						tr.LossPct = loss
+					}
+				}
+			}
 		}
 		// Per-direction overhead from real counter pairs only (Phase-4);
 		// each engine's sample accumulates both directions independently.
@@ -328,6 +357,10 @@ func agentBuildStateReportV2() *agentStateReportV2 {
 	}
 	sort.Slice(out.Engines, func(i, j int) bool { return out.Engines[i].Engine < out.Engines[j].Engine })
 	out.Forwards = bal.ForwardRuntimeSnapshot()
+	// Phase-11 UI data: per-tunnel process metrics (no process tunnels →
+	// nil + zero /proc reads) and per-engine installation state.
+	out.Proc = agentSampleTunnelProc(mgr)
+	out.EngineStatus = agentEngineStatusReportV2(mgr)
 	out.Hardening = agentHardeningRuntime()
 	return out
 }

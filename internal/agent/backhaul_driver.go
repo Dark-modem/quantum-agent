@@ -20,13 +20,10 @@ package agent
 // them as opaque strings and only guards TOML safety.
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -206,11 +203,11 @@ func backhaulConfigPath(tunnelID string) string {
 }
 
 func backhaulBinDir(version string) string {
-	return filepath.Join(backhaulEngineDir(), "bin", version)
+	return filepath.Join(engineEngineDir(backhaulID), "bin", version)
 }
 
 func backhaulEngineDir() string {
-	return filepath.Join(configDir, "engines", backhaulID)
+	return engineEngineDir(backhaulID)
 }
 
 // backhaulRenderConfig renders the end's TOML. Server: [server] with the
@@ -303,7 +300,7 @@ func backhaulEnsureBinary(ctx context.Context, p backhaulParams) (string, error)
 	if err := backhaulExtract(body, dir); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "artifact.sha256"), []byte(sha256Hex), 0o600); err != nil {
+	if err := engineWriteCacheMarker(dir, sha256Hex); err != nil {
 		return "", fmt.Errorf("backhaul: cache marker: %w", err)
 	}
 	return dir, nil
@@ -312,58 +309,16 @@ func backhaulEnsureBinary(ctx context.Context, p backhaulParams) (string, error)
 // frpCacheHit checks frps/frpc; backhaul needs its own marker check for
 // the single `backhaul` binary.
 func frpCacheHitBackhaul(dir, sha256Hex string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "artifact.sha256"))
-	if err != nil || !strings.EqualFold(strings.TrimSpace(string(data)), sha256Hex) {
-		return false
-	}
-	return fileExists(filepath.Join(dir, "backhaul"))
+	return engineCacheHit(dir, sha256Hex, []string{"backhaul"})
 }
 
-// backhaulExtract unpacks the release tar.gz: only the regular `backhaul`
-// binary is installed (0755); directory entries (the release wraps
-// binaries in a version directory) are skipped, anything else refused.
+// backhaulExtract unpacks the release tar.gz: only the regular
+// `backhaul` binary installs (0755); directory entries skipped, anything
+// else refused. Delegates to the shared engineExtractTarball (same
+// semantics; errors keep the backhaul prefix).
 func backhaulExtract(body []byte, dir string) error {
-	gz, err := gzip.NewReader(strings.NewReader(string(body)))
-	if err != nil {
-		return fmt.Errorf("backhaul: artifact is not gzip: %w", err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	found := false
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("backhaul: artifact tar: %w", err)
-		}
-		if hdr.Typeflag == tar.TypeDir {
-			continue // the release wraps the binary in a version directory
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			return fmt.Errorf("backhaul: artifact contains non-regular entry %q", hdr.Name)
-		}
-		if hdr.Size > 256<<20 {
-			return fmt.Errorf("backhaul: artifact entry %q too large", hdr.Name)
-		}
-		if filepath.Base(hdr.Name) != "backhaul" {
-			continue // docs, LICENSE, completions, …
-		}
-		if found {
-			return fmt.Errorf("backhaul: artifact has duplicate %q", hdr.Name)
-		}
-		data, err := io.ReadAll(io.LimitReader(tr, 256<<20))
-		if err != nil {
-			return fmt.Errorf("backhaul: artifact read %q: %w", hdr.Name, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "backhaul"), data, 0o755); err != nil {
-			return fmt.Errorf("backhaul: install: %w", err)
-		}
-		found = true
-	}
-	if !found {
-		return fmt.Errorf("backhaul: artifact missing the backhaul binary")
+	if err := engineExtractTarball(body, dir, map[string]bool{"backhaul": true}); err != nil {
+		return fmt.Errorf("backhaul: %w", err)
 	}
 	return nil
 }
@@ -458,25 +413,7 @@ func backhaulPortOf(addr string) int {
 // supervise keeps the instance's process alive until Stop: an unexpected
 // exit restarts with a capped backoff (mirrors the FRP supervisor).
 func (d *BackhaulDriver) supervise(st *backhaulInstState) {
-	backoff := 2 * time.Second
-	for {
-		select {
-		case <-st.stop:
-			return
-		case <-st.current().Done():
-			select {
-			case <-st.stop:
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < 15*time.Second {
-				backoff *= 2
-			}
-			if proc, err := frpSpawn(st.binPath, st.cfg); err == nil {
-				st.setProc(proc)
-			}
-		}
-	}
+	engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn)
 }
 
 // Stop implements engine.Driver.

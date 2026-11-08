@@ -3,7 +3,7 @@ module github.com/Dark-modem/quantum-agent
 go 1.23
 
 require (
-	github.com/Dark-modem/quantum-protocol v0.0.0-20261105171823-7b751ed2541a
+	github.com/Dark-modem/quantum-protocol v0.0.0-20261108180330-525abff41877
 	github.com/gorilla/websocket v1.5.3
 	golang.org/x/crypto v0.31.0
 )

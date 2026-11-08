@@ -682,6 +682,11 @@ func matrixRemove(in matrixInstance, st matrixState) error {
 			return e
 		}
 	}
+	// A killed tinc (crash, partial cleanup) can leave the qmx interface
+	// behind even without a unit — best-effort del so a retry starts clean.
+	if _, e := matrixExec("ip", "link", "show", in.iface()); e == nil {
+		_, _ = matrixExec("ip", "link", "del", in.iface())
+	}
 	if e := matrixDNATClear(in); e != nil {
 		return e
 	}
@@ -704,6 +709,16 @@ func matrixSetup(in matrixInstance, st matrixState, mainHost string) error {
 	// Adopt a legacy hashem-matrix* unit from a pre-rebrand install; the new
 	// unit is written below.
 	legacyUnitMigration(in.unit())
+	// Phase-10 (real-server defect): a FAILED provisioning leaves the
+	// ownership file behind — matrixSetup saves it BEFORE creating
+	// anything. That state makes every leftover resource (dir, unit,
+	// QMX_* chains, stale interface) OURS; roll it back best-effort so a
+	// retry is clean instead of dying on "firewall chain QMX_IN already
+	// exists; refusing to adopt it" until the tunnel is deleted and
+	// recreated.
+	if old := loadMatrixInstance(in); old.Enabled && old.Network == in.network() {
+		_ = matrixRemove(in, old)
+	}
 	if e := matrixCheckResources(in, st); e != nil {
 		return e
 	}

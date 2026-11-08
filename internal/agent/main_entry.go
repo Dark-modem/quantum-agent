@@ -22,6 +22,13 @@ func Main(args []string) int {
 		// Firewall & port engine CLI (Session 1): plan is dry-run,
 		// apply/teardown are --yes-gated; all output is JSON.
 		return firewallCLI(args[0], args[1:])
+	case "balancer":
+		// Phase-9 diagnostic: the last balancer pass per target (tunnel,
+		// resolved weight, health, exclusion reason, nft range).
+		return cliBalancer(args[1:])
+	case "diag":
+		// Phase-10 support bundle (redacted) for the operator.
+		return cliDiag(args[1:])
 	case "--version", "-v", "version":
 		fmt.Println(panelVersion)
 		return 0

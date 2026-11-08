@@ -89,7 +89,17 @@ var (
 	_ engine.Driver           = (*labFakeDriver)(nil)
 	_ engine.ForwardAddresser = (*labFakeDriver)(nil)
 	_ engine.Describer        = (*labFakeDriver)(nil)
+	_ engine.ProcessInfoer    = (*labFakeDriver)(nil)
 )
+
+// ProcessPIDs implements engine.ProcessInfoer: the lab engine runs IN
+// the agent process (the sink listener is a goroutine), so the honest
+// process tree is the agent's own pid — the /proc sampler then reports
+// the agent's REAL CPU/RSS for these tunnels (and the e2e lab proves
+// the numbers travel agent → panel → API).
+func (l *labFakeDriver) ProcessPIDs(inst engine.Instance) []int {
+	return []int{os.Getpid()}
+}
 
 func (l *labFakeDriver) ID() string { return "fake" }
 

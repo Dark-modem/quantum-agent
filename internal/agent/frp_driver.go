@@ -328,12 +328,12 @@ func frpConfigPath(tunnelID string) string {
 
 // frpBinDir is the per-version binary cache (exists only while installed).
 func frpBinDir(version string) string {
-	return filepath.Join(configDir, "engines", "frp", version)
+	return filepath.Join(engineEngineDir(frpID), version)
 }
 
 // frpEngineDir is the whole-engine state dir (removed by Uninstall).
 func frpEngineDir() string {
-	return filepath.Join(configDir, "engines", "frp")
+	return engineEngineDir(frpID)
 }
 
 // frpRenderConfig renders the frps/frpc TOML for one instance. The token
@@ -470,25 +470,8 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 // stop channel closes (Stop always closes it before killing the
 // process, so a killed process is never resurrected).
 func (d *FRPDriver) supervise(tunnelID string, st *frpInstState) {
-	backoff := 2 * time.Second
-	for {
-		select {
-		case <-st.stop:
-			return
-		case <-st.current().Done():
-			select {
-			case <-st.stop:
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < 15*time.Second {
-				backoff *= 2
-			}
-			if proc, err := frpSpawn(st.binPath, st.cfg); err == nil {
-				st.setProc(proc)
-			}
-		}
-	}
+	_ = tunnelID
+	engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn)
 }
 
 // Stop implements engine.Driver: terminate the process, drop the config

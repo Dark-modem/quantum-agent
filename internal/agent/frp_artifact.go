@@ -16,15 +16,12 @@ package agent
 // 00-ADMIN/PROTOCOL-REQUESTS.md R5; until then the pins ride engine_params.
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -92,12 +89,7 @@ func frpArtifactURL(ident agentIdentity, name string) string {
 // frpCacheHit reports whether dir holds a verified extraction of the
 // artifact with the given sha256 (the 0600 marker written after verify).
 func frpCacheHit(dir, sha256Hex string) bool {
-	marker := filepath.Join(dir, "artifact.sha256")
-	data, err := os.ReadFile(marker)
-	if err != nil || !strings.EqualFold(strings.TrimSpace(string(data)), sha256Hex) {
-		return false
-	}
-	return fileExists(filepath.Join(dir, "frps")) && fileExists(filepath.Join(dir, "frpc"))
+	return engineCacheHit(dir, sha256Hex, []string{"frps", "frpc"})
 }
 
 // frpEnsureBinary makes the frp binaries available and returns the cache
@@ -159,7 +151,7 @@ func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 	if err := frpExtract(body, dir); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "artifact.sha256"), []byte(sha256Hex), 0o600); err != nil {
+	if err := engineWriteCacheMarker(dir, sha256Hex); err != nil {
 		return "", fmt.Errorf("frp: cache marker: %w", err)
 	}
 	return dir, nil
@@ -168,50 +160,11 @@ func frpEnsureBinary(ctx context.Context, p frpParams) (string, error) {
 // frpExtract unpacks a frp release tar.gz: only regular files whose base
 // name is frps/frpc are installed (0755); links and anything else are
 // refused — the artifact is pinned by hash, but extraction stays strict.
+// Delegates to the shared engineExtractTarball (same semantics; errors
+// keep the frp prefix).
 func frpExtract(body []byte, dir string) error {
-	gz, err := gzip.NewReader(strings.NewReader(string(body)))
-	if err != nil {
-		return fmt.Errorf("frp: artifact is not gzip: %w", err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	found := map[string]bool{}
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("frp: artifact tar: %w", err)
-		}
-		if hdr.Typeflag == tar.TypeDir {
-			continue // the release wraps binaries in a version directory
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			return fmt.Errorf("frp: artifact contains non-regular entry %q", hdr.Name)
-		}
-		if hdr.Size > 256<<20 {
-			return fmt.Errorf("frp: artifact entry %q too large", hdr.Name)
-		}
-		base := filepath.Base(hdr.Name)
-		if base != "frps" && base != "frpc" {
-			continue // docs, LICENSE, …
-		}
-		if found[base] {
-			return fmt.Errorf("frp: artifact has duplicate %q", base)
-		}
-		data, err := io.ReadAll(io.LimitReader(tr, 256<<20))
-		if err != nil {
-			return fmt.Errorf("frp: artifact read %q: %w", hdr.Name, err)
-		}
-		out := filepath.Join(dir, base)
-		if err := os.WriteFile(out, data, 0o755); err != nil {
-			return fmt.Errorf("frp: install %q: %w", base, err)
-		}
-		found[base] = true
-	}
-	if !found["frps"] || !found["frpc"] {
-		return fmt.Errorf("frp: artifact missing frps/frpc binaries")
+	if err := engineExtractTarball(body, dir, map[string]bool{"frps": true, "frpc": true}); err != nil {
+		return fmt.Errorf("frp: %w", err)
 	}
 	return nil
 }
