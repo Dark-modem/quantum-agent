@@ -148,7 +148,7 @@ func wstClientArgs(p wstParams) []string {
 	if p.RemoteUdpPort > 0 {
 		args = append(args, "-R", fmt.Sprintf("udp://0.0.0.0:%d:%s:%d", p.RemoteUdpPort, p.LocalAddr, p.LocalUdpPort))
 	}
-	args = append(args, fmt.Sprintf("ws://%s:%d", p.RemoteAddr, p.WsPort))
+	args = append(args, fmt.Sprintf("ws://%s", net.JoinHostPort(p.RemoteAddr, fmt.Sprint(p.WsPort))))
 	return args
 }
 
