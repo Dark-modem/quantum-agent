@@ -114,6 +114,7 @@ type balTickReport struct {
 	DetectedUp   []string
 	Errors       []string
 	Targets      []balTargetDiag
+	Tunnels      []map[string]any
 }
 
 type forwardBalancer struct {
