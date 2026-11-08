@@ -1,0 +1,5 @@
+2026/11/07 23:32:54 [CMD-ERROR] command "iptables" failed (exit -1): test runner: no host commands
+wstunnel: wire accounting unavailable: test runner: no host commands
+2026/11/07 23:33:10 [CMD-ERROR] command "iptables" failed (exit -1): test runner: no host commands
+2026/11/07 23:33:10 [CMD-ERROR] command "iptables" failed (exit -1): test runner: no host commands
+PASS

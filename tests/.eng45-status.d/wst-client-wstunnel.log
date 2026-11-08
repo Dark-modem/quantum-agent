@@ -1,0 +1,72 @@
+[2m2026-11-07T23:32:57.347210Z[0m [32m INFO[0m [2mwstunnel[0m[2m:[0m Starting wstunnel client v10.1.9
+[2m2026-11-07T23:32:57.348398Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:32:57.348407Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:32:57.810826Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-a984-7e51-8456-a1f8941933ff" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 127.0.0.1:18904    
+[2m2026-11-07T23:32:57.831279Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:32:57.833578Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-a984-7e51-8456-a1f8941933ff" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local <= remote tunnel
+[2m2026-11-07T23:32:57.837198Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-a984-7e51-8456-a1f8941933ff" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local => remote tunnel
+[2m2026-11-07T23:33:00.850275Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-ab67-7192-8efd-ad324b037e3b" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 127.0.0.1:18904    
+[2m2026-11-07T23:33:00.851920Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:00.856783Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-b733-7861-943f-2eaa6ffc29fb" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 127.0.0.1:18904    
+[2m2026-11-07T23:33:00.857657Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:04.897240Z[0m [33m WARN[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-b733-7861-943f-2eaa6ffc29fb" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m error while reading incoming bytes from local tx tunnel: Connection reset by peer (os error 104)
+[2m2026-11-07T23:33:04.897321Z[0m [31mERROR[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-b733-7861-943f-2eaa6ffc29fb" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m error while reading from tunnel rx Broken pipe (os error 32)
+[2m2026-11-07T23:33:04.897957Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-ab67-7192-8efd-ad324b037e3b" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local <= remote tunnel
+[2m2026-11-07T23:33:04.898576Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-b733-7861-943f-2eaa6ffc29fb" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local => remote tunnel
+[2m2026-11-07T23:33:04.899911Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-b733-7861-943f-2eaa6ffc29fb" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local <= remote tunnel
+[2m2026-11-07T23:33:04.900750Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-ab67-7192-8efd-ad324b037e3b" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local => remote tunnel
+[2m2026-11-07T23:33:07.912638Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-b739-7fd2-a59e-6627014fdc1d" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 127.0.0.1:18904    
+[2m2026-11-07T23:33:07.914260Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:07.917468Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-d2ca-7db3-b9cc-02515be1e68e" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 127.0.0.1:18904    
+[2m2026-11-07T23:33:07.918257Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:10.970873Z[0m [33m WARN[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-d2ca-7db3-b9cc-02515be1e68e" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m error while reading incoming bytes from local tx tunnel: Connection reset by peer (os error 104)
+[2m2026-11-07T23:33:10.972271Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-d2ca-7db3-b9cc-02515be1e68e" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local => remote tunnel
+[2m2026-11-07T23:33:10.974791Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-d2ca-7db3-b9cc-02515be1e68e" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local <= remote tunnel
+[2m2026-11-07T23:33:10.978871Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-b739-7fd2-a59e-6627014fdc1d" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local <= remote tunnel
+[2m2026-11-07T23:33:10.982120Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-b739-7fd2-a59e-6627014fdc1d" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local => remote tunnel
+[2m2026-11-07T23:33:10.984110Z[0m [31mERROR[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-d2ce-7ef2-af6f-4458ab90bd6d" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::client::client[0m[2m:[0m Retrying in 1sec, cannot connect to remote server: failed to do websocket handshake with the server ws://10.200.0.1:18901
+
+Caused by:
+    connection closed before message completed
+[2m2026-11-07T23:33:10.985384Z[0m [31mERROR[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-a984-7e51-8456-a20eca7ee3bd" [3mremote[0m[2m=[0m"0.0.0.0:18903"[1m}[0m[2m:[0m [2mwstunnel::tunnel::client::client[0m[2m:[0m Retrying in 1sec, cannot connect to remote server: failed to do websocket handshake with the server ws://10.200.0.1:18901
+
+Caused by:
+    connection closed before message completed
+[2m2026-11-07T23:33:11.987326Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:11.987432Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:14.353736Z[0m [32m INFO[0m [2mwstunnel[0m[2m:[0m Starting wstunnel client v10.1.9
+[2m2026-11-07T23:33:14.354503Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:14.354503Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:14.755949Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:14.756237Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:15.560303Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:15.562043Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:17.162774Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:17.163534Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:20.365047Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:20.365126Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:28.722377Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:28.722453Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:41.529617Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:33:41.529687Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:34:09.195628Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:34:09.196696Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:35:04.449785Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:35:04.451421Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:36:52.870454Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:36:52.871890Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:38:34.680412Z[0m [31mERROR[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-ebf2-7d53-8ce2-66175cebf68d" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::client::client[0m[2m:[0m Retrying in 1sec, cannot connect to remote server: failed to get a connection to the server from the pool: TimedOut
+[2m2026-11-07T23:38:34.680619Z[0m [31mERROR[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b85b-ebf2-7d53-8ce2-662e3f3868e2" [3mremote[0m[2m=[0m"0.0.0.0:18903"[1m}[0m[2m:[0m [2mwstunnel::tunnel::client::client[0m[2m:[0m Retrying in 1sec, cannot connect to remote server: failed to get a connection to the server from the pool: TimedOut
+[2m2026-11-07T23:39:33.095809Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:39:33.097701Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:49:50.685928Z[0m [32m INFO[0m [2mwstunnel[0m[2m:[0m Starting wstunnel client v10.1.9
+[2m2026-11-07T23:49:50.686698Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:49:50.686805Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:49:52.169529Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b86b-1fde-71e1-8ee3-c55e5343d94e" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 127.0.0.1:18904    
+[2m2026-11-07T23:49:52.171991Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:49:52.175972Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b86b-25ab-7163-81b9-e05f2355cfa0" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 127.0.0.1:18904    
+[2m2026-11-07T23:49:52.176551Z[0m [32m INFO[0m [2mwstunnel::protocols::tcp::server[0m[2m:[0m Opening TCP connection to 10.200.0.1:18901    
+[2m2026-11-07T23:49:55.223770Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b86b-1fde-71e1-8ee3-c55e5343d94e" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local <= remote tunnel
+[2m2026-11-07T23:49:55.224349Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b86b-1fde-71e1-8ee3-c55e5343d94e" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local => remote tunnel
+[2m2026-11-07T23:49:55.225146Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b86b-25ab-7163-81b9-e05f2355cfa0" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local => remote tunnel
+[2m2026-11-07T23:49:55.226184Z[0m [32m INFO[0m [1mtunnel[0m[1m{[0m[3mid[0m[2m=[0m"01a1b86b-25ab-7163-81b9-e05f2355cfa0" [3mremote[0m[2m=[0m"0.0.0.0:18902"[1m}[0m[2m:[0m [2mwstunnel::tunnel::transport::io[0m[2m:[0m Closing local <= remote tunnel

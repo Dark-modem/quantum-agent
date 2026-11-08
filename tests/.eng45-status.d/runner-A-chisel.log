@@ -1,0 +1,5 @@
+2026/11/07 23:41:21 [CMD-ERROR] command "iptables" failed (exit -1): test runner: no host commands
+chisel: wire accounting unavailable: test runner: no host commands
+2026/11/07 23:41:42 [CMD-ERROR] command "iptables" failed (exit -1): test runner: no host commands
+2026/11/07 23:41:42 [CMD-ERROR] command "iptables" failed (exit -1): test runner: no host commands
+PASS
