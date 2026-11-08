@@ -6,3 +6,4 @@ tests/e2e-logs/
 tests/.eng45-art/
 tests/.eng45-status.d/
 tests/.eng45.test
+wt-phase*/

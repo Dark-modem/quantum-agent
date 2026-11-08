@@ -20,6 +20,7 @@ type FakeEngine struct {
 	reloadErr    map[string]error // tunnel -> error (ErrRestartRequired triggers manager restart)
 	stopErr      map[string]error // tunnel -> error
 	uninstallErr error
+	ensureErr    error // EnsureBinary failure (Phase 11 status tests)
 
 	ensureCalls    int
 	startCalls     map[string]int
@@ -169,7 +170,28 @@ func (f *FakeEngine) EnsureBinary(ctx context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ensureCalls++
+	if f.ensureErr != nil {
+		return "", f.ensureErr
+	}
 	return f.binaryPath, nil
+}
+
+// SetEnsureError scripts the EnsureBinary result (nil restores success).
+func (f *FakeEngine) SetEnsureError(err error) {
+	f.mu.Lock()
+	f.ensureErr = err
+	f.mu.Unlock()
+}
+
+// SetStartError scripts one tunnel's Start result (nil restores success).
+func (f *FakeEngine) SetStartError(tunnelID string, err error) {
+	f.mu.Lock()
+	if err == nil {
+		delete(f.startErr, tunnelID)
+	} else {
+		f.startErr[tunnelID] = err
+	}
+	f.mu.Unlock()
 }
 
 // Start implements Driver.

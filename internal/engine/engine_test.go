@@ -81,20 +81,32 @@ func TestManagerStartsEnabledAndStopsRemoved(t *testing.T) {
 		t.Fatalf("second reconcile did work: %+v", res)
 	}
 
-	// Tunnel removed -> stopped; engine idle -> uninstalled.
+	// Tunnel removed -> stopped. Phase 11: the engine is still
+	// DESIRED-ENABLED, so it STAYS installed (install on first enable;
+	// the binary is ready for the next tunnel).
 	res = m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, nil)
 	if len(res.Stopped) != 1 || res.Stopped[0] != "t1" {
 		t.Fatalf("stopped = %v", res.Stopped)
 	}
-	if len(res.Uninstalled) != 1 || res.Uninstalled[0] != "fake" {
-		t.Fatalf("uninstalled = %v — idle engines must be uninstalled", res.Uninstalled)
+	_, uninstall, _, _, _ := fake.Calls()
+	if uninstall != 0 {
+		t.Fatalf("uninstall=%d — a desired-enabled engine must stay installed when idle", uninstall)
 	}
-	ensure, uninstall, _, _, _ := fake.Calls()
-	if ensure != 1 || uninstall != 1 {
-		t.Fatalf("ensure=%d uninstall=%d (install on first enable, uninstall on last disable)", ensure, uninstall)
+	if !m.EngineInstalled("fake") {
+		t.Fatal("desired-enabled idle engine must report installed")
 	}
 	if m.RunningCount() != 0 {
 		t.Fatalf("running count = %d", m.RunningCount())
+	}
+
+	// Disabling the engine (or dropping it from desired) uninstalls the
+	// now-idle engine.
+	res = m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: false}}, nil)
+	if len(res.Uninstalled) != 1 || res.Uninstalled[0] != "fake" {
+		t.Fatalf("uninstalled = %v — a disabled idle engine must uninstall", res.Uninstalled)
+	}
+	if m.EngineInstalled("fake") {
+		t.Fatal("disabled engine must not report installed")
 	}
 }
 
