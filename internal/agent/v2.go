@@ -221,11 +221,29 @@ func agentApplyDesiredV2Fenced(d *protocol.DesiredV2, fence bool) agentAck {
 			Enabled:      t.Enabled,
 		})
 	}
+	// 2a. PREFLIGHT (phase14 ports): driver Validate + port availability
+	// for every enabled tunnel, and the listen port for every enabled
+	// forward — BEFORE anything starts (Manager.Reconcile never calls
+	// Validate, and a bind conflict would otherwise fail inside the
+	// driver's Start). Refused NEW tunnels are withheld from Reconcile,
+	// refused running tunnels keep their current params, refused forwards
+	// are withheld from the balancer; the failures ride the ack like the
+	// reconcile errors below while the rest of the desired state applies.
+	specs, forwards, pfErrs := agentPreflightV2(mgr, engs, specs, d.Forwards)
+	for i, e := range pfErrs {
+		log.Printf("[agent] v2 preflight error: %s", e)
+		if ack.Detail == nil {
+			ack.Detail = map[string]string{}
+		}
+		ack.Detail[fmt.Sprintf("preflight_error_%d", i)] = e
+	}
 	if res := mgr.Reconcile(context.Background(), engs, specs); len(res.Errors) > 0 {
 		// Partial failures do not fail the whole ack: the applied part
 		// stands and the errors ride the next heartbeat's Errors.
 		log.Printf("[agent] v2 reconcile reported %d error(s): %v", len(res.Errors), res.Errors)
-		ack.Detail = map[string]string{}
+		if ack.Detail == nil {
+			ack.Detail = map[string]string{}
+		}
 		for i, e := range res.Errors {
 			log.Printf("[agent] v2 reconcile error: %s", e)
 			ack.Detail[fmt.Sprintf("reconcile_error_%d", i)] = e
@@ -233,7 +251,11 @@ func agentApplyDesiredV2Fenced(d *protocol.DesiredV2, fence bool) agentAck {
 	}
 
 	// 3. Forwards + balancing: enforce locally (works without the panel).
-	bal.Reconcile(d)
+	// The preflighted forward list (refused listen ports dropped) is what
+	// gets enforced; everything else is the untouched desired document.
+	balDoc := *d
+	balDoc.Forwards = forwards
+	bal.Reconcile(&balDoc)
 
 	// 4. Record the applied revision (boot replay + fencing depend on
 	// it; agentRecordAck does the same for the online path).

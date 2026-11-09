@@ -206,6 +206,89 @@ func TestPanelShapeMixedEnginesAndUnhealthy(t *testing.T) {
 	}
 }
 
+// TestMixedGroupPortlessTargets pins RUNBOOK ITEM 36: a port-less target
+// (a matrix-shaped ForwardAddresser returns port 0) inside a group with
+// PORTED targets must never render `<addr> . 0` — nft accepts it and the
+// kernel no-ops the element. The matrix target falls back to the rule's
+// TargetPort when one is set; with TargetPort 0 it is EXCLUDED from the
+// ported map (its weight leaves the modulus with it). A group with NO
+// usable port at all (pure matrix + TargetPort 0) keeps the address-only
+// map, which is correct for it.
+func TestMixedGroupPortlessTargets(t *testing.T) {
+	// 1. Mixed group with a rule TargetPort: the port-less target renders
+	//    the RULE's port (`. 443`), the ported one its own (`. 5201`).
+	mixed := renderForwardNFT([]forwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp", TargetPort: 443,
+		Targets: []balTarget{
+			{TunnelID: "frp-1", IP: "10.189.0.3", Port: 5201, Weight: 7},
+			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 3},
+		}}})
+	for _, want := range []string{
+		"numgen inc mod 10",
+		"0-6 : 10.189.0.3 . 5201",
+		"7-9 : 10.189.0.2 . 443",
+	} {
+		if !strings.Contains(mixed, want) {
+			t.Fatalf("mixed TargetPort render missing %q:\n%s", want, mixed)
+		}
+	}
+	if strings.Contains(mixed, ". 0 ") || strings.Contains(mixed, ". 0,") {
+		t.Fatalf("port-less target rendered as `. 0`:\n%s", mixed)
+	}
+	if ran, err := nftCheck(t, mixed); ran && err != nil {
+		t.Fatalf("nft -c rejected: %v", err)
+	}
+
+	// 2. Mixed group with TargetPort 0: the port-less target is SKIPPED
+	//    (a port-less target cannot join a ported map); the ported one
+	//    keeps the whole modulus (7, not 10).
+	mixed0 := renderForwardNFT([]forwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp",
+		Targets: []balTarget{
+			{TunnelID: "frp-1", IP: "10.189.0.3", Port: 5201, Weight: 7},
+			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 3},
+		}}})
+	if !strings.Contains(mixed0, "numgen inc mod 7") || !strings.Contains(mixed0, "0-6 : 10.189.0.3 . 5201") {
+		t.Fatalf("mixed TargetPort-0 render wrong:\n%s", mixed0)
+	}
+	if strings.Contains(mixed0, "10.189.0.2") {
+		t.Fatalf("port-less target must be excluded from a ported map:\n%s", mixed0)
+	}
+	if ran, err := nftCheck(t, mixed0); ran && err != nil {
+		t.Fatalf("nft -c rejected: %v", err)
+	}
+
+	// 3. Pure port-less group (both targets port 0, TargetPort 0):
+	//    address-only map, no port suffix — the matrix shape.
+	allmx := renderForwardNFT([]forwardRender{{ID: "fwd-mx", ListenPort: 8443, Proto: "tcp",
+		Targets: []balTarget{
+			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 5},
+			{TunnelID: "mx-2", IP: "10.189.0.3", Port: 0, Weight: 5},
+		}}})
+	if !strings.Contains(allmx, "numgen inc mod 10 map { 0-4 : 10.189.0.2, 5-9 : 10.189.0.3 }") {
+		t.Fatalf("pure matrix group must render the address-only map:\n%s", allmx)
+	}
+	if strings.Contains(allmx, " . ") || strings.Contains(allmx, "} : ") {
+		t.Fatalf("pure matrix group must carry no port form:\n%s", allmx)
+	}
+	if ran, err := nftCheck(t, allmx); ran && err != nil {
+		t.Fatalf("nft -c rejected: %v", err)
+	}
+
+	// 4. Mixed group whose port-less target's fallback equals the ported
+	//    target's port AND the rule TargetPort: uniform effective port →
+	//    the address-only map with the single suffix.
+	uniform := renderForwardNFT([]forwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp", TargetPort: 443,
+		Targets: []balTarget{
+			{TunnelID: "frp-1", IP: "10.189.0.3", Port: 443, Weight: 7},
+			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 3},
+		}}})
+	if !strings.Contains(uniform, "map { 0-6 : 10.189.0.3, 7-9 : 10.189.0.2 } : 443") {
+		t.Fatalf("uniform-fallback render wrong:\n%s", uniform)
+	}
+	if ran, err := nftCheck(t, uniform); ran && err != nil {
+		t.Fatalf("nft -c rejected: %v", err)
+	}
+}
+
 // TestPairLevelDegenerateMod60: the DOCUMENTED degenerate flow behind the
 // observed `mod 60 {0-29, 30-59}` — a pair-level write (the wizard's
 // pair slider) reaches the agent as ONE same-scope rule per tunnel, so

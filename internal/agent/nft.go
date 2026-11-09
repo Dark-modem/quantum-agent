@@ -14,6 +14,8 @@ package agent
 
 import (
 	"fmt"
+	"log"
+	"net"
 	"sort"
 	"strings"
 )
@@ -79,23 +81,6 @@ func renderForwardChain(proto string, r forwardRender) string {
 		b.WriteString(" }\n")
 		return b.String()
 	}
-	total := 0
-	for _, t := range r.Targets {
-		total += t.Weight
-	}
-	if total <= 0 {
-		total = len(r.Targets)
-	}
-	// Deterministic element order (weights keep their assigned ranges).
-	sorted := append([]balTarget(nil), r.Targets...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].TunnelID < sorted[j].TunnelID })
-
-	sel := fmt.Sprintf("numgen inc mod %d", total)
-	if proto == "udp" {
-		// Flow-sticky: hash the source address so one UDP flow keeps its
-		// tunnel for its whole lifetime.
-		sel = fmt.Sprintf("jhash ip saddr mod %d", total)
-	}
 	// Per-target ports: lab sinks get one port per tunnel, so targets to
 	// the same foreign host differ by port. The concatenated form
 	// `<addr> . <port>` (verified with nft -c against nftables 1.0.9)
@@ -104,17 +89,57 @@ func renderForwardChain(proto string, r forwardRender) string {
 	// different (correct) port — a single remaining target was DNATed to
 	// a port nothing listened on. The target's own port ALWAYS wins;
 	// TargetPort is only the fallback when a driver gave none.
+	kept, dropped := forwardUsableTargets(r)
+	for _, t := range dropped {
+		// RUNBOOK ITEM 36: a port-less target inside a per-target-port
+		// map rendered `<addr> . 0` — nft accepted it and the kernel
+		// silently no-oped the element, so the tunnel never received its
+		// share. A port-less target cannot join a ported map; its weight
+		// leaves the modulus with it (surfaced in the balancer diag as
+		// reason "portless-target").
+		log.Printf("[nft] forward %s: target %s excluded from the %s rotation: no usable port for a per-target-port map (target port 0, rule target_port %d)", r.ID, t.TunnelID, proto, r.TargetPort)
+	}
+	if len(kept) == 0 {
+		// Every target was port-less in what must be a ported map: render
+		// the fail-fast pass-through (defensive; forwardUsableTargets
+		// keeps at least one target whenever Targets is non-empty).
+		fmt.Fprintf(&b, "  %s dport %d counter return\n", proto, r.ListenPort)
+		b.WriteString(" }\n")
+		return b.String()
+	}
+	total := 0
+	for _, t := range kept {
+		total += t.Weight
+	}
+	if total <= 0 {
+		total = len(kept)
+	}
+	// Deterministic element order (weights keep their assigned ranges).
+	sort.Slice(kept, func(i, j int) bool { return kept[i].TunnelID < kept[j].TunnelID })
+
+	sel := fmt.Sprintf("numgen inc mod %d", total)
+	if proto == "udp" {
+		// Flow-sticky: hash the source address so one UDP flow keeps its
+		// tunnel for its whole lifetime.
+		sel = fmt.Sprintf("jhash ip saddr mod %d", total)
+	}
+	// The map must be per-target-port when the effective ports differ
+	// across targets, or when the uniform effective port differs from the
+	// rule's TargetPort (the single-port suffix would lie).
+	uniformPort := forwardTargetPort(kept[0], r.TargetPort)
 	perTargetPort := false
-	for _, t := range sorted {
-		if t.Port != sorted[0].Port {
+	for _, t := range kept[1:] {
+		if forwardTargetPort(t, r.TargetPort) != uniformPort {
 			perTargetPort = true
 			break
 		}
 	}
-	uniformPort := sorted[0].Port
+	if !perTargetPort && uniformPort > 0 && uniformPort != r.TargetPort {
+		perTargetPort = true
+	}
 	var elems []string
 	lo := 0
-	for _, t := range sorted {
+	for _, t := range kept {
 		w := t.Weight
 		if w <= 0 {
 			w = 1
@@ -123,8 +148,8 @@ func renderForwardChain(proto string, r forwardRender) string {
 		if hi >= total {
 			hi = total - 1
 		}
-		if perTargetPort || (uniformPort > 0 && uniformPort != r.TargetPort) {
-			elems = append(elems, fmt.Sprintf("%d-%d : %s . %d", lo, hi, t.IP, t.Port))
+		if perTargetPort {
+			elems = append(elems, fmt.Sprintf("%d-%d : %s . %d", lo, hi, t.IP, forwardTargetPort(t, r.TargetPort)))
 		} else {
 			// Elements are addresses only; the (fixed) target port rides
 			// as a suffix after the map — the form validated against
@@ -137,9 +162,111 @@ func renderForwardChain(proto string, r forwardRender) string {
 		}
 	}
 	fmt.Fprintf(&b, "  %s dport %d dnat to %s map { %s }", proto, r.ListenPort, sel, strings.Join(elems, ", "))
-	if !perTargetPort && !(uniformPort > 0 && uniformPort != r.TargetPort) && r.TargetPort > 0 {
+	if !perTargetPort && r.TargetPort > 0 {
 		fmt.Fprintf(&b, " : %d", r.TargetPort)
 	}
 	b.WriteString("\n }\n")
 	return b.String()
+}
+
+// forwardTargetPort resolves a target's effective port: the target's own
+// port ALWAYS wins; the rule's TargetPort is only the fallback when a
+// driver gave none (phase-5 rule).
+func forwardTargetPort(t balTarget, targetPort int) int {
+	if t.Port > 0 {
+		return t.Port
+	}
+	return targetPort
+}
+
+// forwardUsableTargets splits a render's targets into the ones that can
+// join the rendered rotation and the port-less ones a per-target-port
+// map would strand (`addr . 0`, RUNBOOK ITEM 36). A group with NO usable
+// port at all (every target port 0 AND rule TargetPort 0 — a pure
+// matrix-shaped group) keeps ALL its targets: it renders the
+// address-only map, which is correct for it. The balancer applies the
+// same split before reporting, so the diag ranges match the rendered map.
+func forwardUsableTargets(r forwardRender) (kept, dropped []balTarget) {
+	anyPort := r.TargetPort > 0
+	for _, t := range r.Targets {
+		if t.Port > 0 {
+			anyPort = true
+			break
+		}
+	}
+	if !anyPort {
+		return append([]balTarget(nil), r.Targets...), nil
+	}
+	for _, t := range r.Targets {
+		if forwardTargetPort(t, r.TargetPort) > 0 {
+			kept = append(kept, t)
+		} else {
+			dropped = append(dropped, t)
+		}
+	}
+	return kept, dropped
+}
+
+// scriptHasLoopbackDNAT reports whether the rendered script DNATs any
+// traffic to a loopback address (127.0.0.0/8). Those rules need
+// net.ipv4.conf.all.route_localnet=1 (RUNBOOK ITEM 35) or the kernel
+// drops the martian packets — see routelocalnet.go.
+func scriptHasLoopbackDNAT(script string) bool {
+	for _, line := range strings.Split(script, "\n") {
+		i := strings.Index(line, " dnat to ")
+		if i < 0 {
+			continue
+		}
+		rest := line[i+len(" dnat to "):]
+		if j := strings.Index(rest, " map {"); j >= 0 {
+			rest = rest[j+len(" map {"):]
+			if k := strings.Index(rest, "}"); k >= 0 {
+				rest = rest[:k]
+			}
+			for _, el := range strings.Split(rest, ",") {
+				if isLoopbackAddr(dnatElementAddr(el)) {
+					return true
+				}
+			}
+			continue
+		}
+		// Non-map form: `dnat to <addr>` / `dnat to <addr>:<port>`.
+		fields := strings.Fields(rest)
+		if len(fields) > 0 && isLoopbackAddr(fields[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+// dnatElementAddr extracts the address from one map element
+// ("0-69 : 10.189.0.2 . 443" or "0-99 : 127.0.0.1" → the address).
+func dnatElementAddr(el string) string {
+	el = strings.TrimSpace(el)
+	i := strings.Index(el, ": ")
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(el[i+2:])
+	if d := strings.Index(rest, " . "); d >= 0 {
+		rest = rest[:d]
+	}
+	return strings.TrimSpace(rest)
+}
+
+func isLoopbackAddr(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		return ip.IsLoopback()
+	}
+	// Tolerate host:port shapes in non-map dnat targets.
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.IsLoopback()
+		}
+	}
+	return false
 }

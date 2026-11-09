@@ -53,7 +53,7 @@ func TestDiagBundleRedacted(t *testing.T) {
 		Forward: "fwd-1", Tunnel: "t-1", Reason: "selected", Health: "up",
 		Weight: 30, Addr: "10.189.0.2:5201", NftRange: "0-29", Total: 60,
 	}}
-	bundle := diagCollect(nil, balancer)
+	bundle := diagCollect(nil, balancer, false)
 	data, err := json.MarshalIndent(bundle, "", "  ")
 	if err != nil {
 		t.Fatal(err)

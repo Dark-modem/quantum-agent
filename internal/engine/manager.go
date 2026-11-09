@@ -290,6 +290,38 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 	return res
 }
 
+// ValidateAll runs each enabled spec's driver Validate — the apply-path
+// preflight (Manager.Reconcile never calls Validate itself: desired state
+// must be validated BEFORE anything starts or reloads). The result is
+// aligned with specs: index i carries the error for specs[i]; nil for
+// disabled specs, for specs naming an unknown engine (Reconcile owns
+// that error) and for specs that validate cleanly.
+func (m *Manager) ValidateAll(specs []TunnelSpec) []error {
+	out := make([]error, len(specs))
+	for i, t := range specs {
+		if !t.Enabled {
+			continue
+		}
+		drv, ok := m.reg.Driver(t.Engine)
+		if !ok {
+			continue
+		}
+		if err := drv.Validate(t.Params); err != nil {
+			out[i] = err
+		}
+	}
+	return out
+}
+
+// EngineRegistered reports whether the engine id resolves to a driver in
+// the Manager's registry (base@companion ids map to the base driver).
+// The apply-path preflight uses it to skip tunnels the Manager itself
+// would refuse as unknown-engine.
+func (m *Manager) EngineRegistered(id string) bool {
+	_, ok := m.reg.Driver(id)
+	return ok
+}
+
 // maybeUninstall uninstalls the engine when no instance of it runs
 // anymore — unless the engine is DESIRED-ENABLED (Phase 11: install on
 // enable keeps the binary ready). Caller holds m.mu.

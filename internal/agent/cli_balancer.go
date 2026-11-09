@@ -43,6 +43,9 @@ func cliBalancer(args []string) int {
 			orDash(t.Health), t.Reason, orDash(t.Addr))
 	}
 	w.Flush()
+	// Route-localnet state (RUNBOOK ITEM 35): true while the enforced
+	// ruleset DNATs to loopback and the agent holds a captured value.
+	fmt.Printf("\nroute_localnet: %v\n", rep.RouteLocalnet)
 	if len(rep.Errors) > 0 {
 		fmt.Println("\nerrors from the last pass:")
 		for _, e := range rep.Errors {

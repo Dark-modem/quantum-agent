@@ -555,6 +555,59 @@ func TestStateReportV2DirectionalCounters(t *testing.T) {
 	}
 }
 
+// TestBalancerPortlessTargetMirror pins the RUNBOOK ITEM 36 mirror: the
+// balancer reports the rotation AS RENDERED — a port-less target that the
+// nft renderer excludes from a ported map leaves the runtime targets and
+// the nft ranges too, and the diag carries the "portless-target" reason.
+func TestBalancerPortlessTargetMirror(t *testing.T) {
+	h := newBalHarness(t)
+	d := testForwardDesired(t)
+	d.Tunnels = []protocol.TunnelSpec{
+		{ID: "t1", TopologyID: "topo-drak-hetzner", LocalServer: "ir-drak-1", RemoteServer: "hz-fra-1", Engine: "fake", Enabled: true},
+		{ID: "t2", TopologyID: "topo-drak-hetzner", LocalServer: "ir-drak-1", RemoteServer: "hz-fra-2", Engine: "fake", Enabled: true},
+	}
+	// TargetPort 0 + a port-less forward address on t1 (the matrix shape)
+	// next to a ported one on t2: the ported map cannot carry t1.
+	d.Forwards = []protocol.ForwardRule{{ID: "fw-web", ListenPort: 8443, Proto: "tcp", TargetGroup: "grp-pool", TargetPort: 0}}
+	engs, tuns := toEngineSpecs(d.Engines, d.Tunnels)
+	if res := h.mgr.Reconcile(testCtx(), engs, tuns); len(res.Errors) != 0 {
+		t.Fatalf("manager reconcile: %v", res.Errors)
+	}
+	h.fake.SetForwardAddress("t1", "10.189.0.2", 0)
+	h.fake.SetForwardAddress("t2", "10.189.0.3", 5201)
+
+	// tick() enforces the BALANCER's stored desired state, so seed it
+	// directly (Reconcile would also start the loop goroutine; the direct
+	// tick keeps the assertions synchronous).
+	h.bal.mu.Lock()
+	h.bal.desired = d
+	h.bal.mu.Unlock()
+	rep := h.bal.tick()
+	script := h.lastScript()
+	if !strings.Contains(script, "numgen inc mod 30 map { 0-29 : 10.189.0.3 . 5201 }") {
+		t.Fatalf("port-less target must be excluded from the ported map:\n%s", script)
+	}
+	if strings.Contains(script, "10.189.0.2") {
+		t.Fatalf("port-less target rendered into the ported map:\n%s", script)
+	}
+	foundPortless := false
+	for _, tg := range rep.Targets {
+		if tg.Tunnel == "t1" && tg.Reason == "portless-target" {
+			foundPortless = true
+		}
+		if tg.Tunnel == "t2" && tg.Reason == "selected" && tg.NftRange != "0-29" {
+			t.Fatalf("kept target's nft range must cover the whole modulus: %+v", tg)
+		}
+	}
+	if !foundPortless {
+		t.Fatalf("diag lacks the portless-target entry: %+v", rep.Targets)
+	}
+	snap := h.bal.ForwardRuntimeSnapshot()
+	if len(snap) != 1 || len(snap[0].Targets) != 1 || snap[0].Targets[0] != "t2" {
+		t.Fatalf("runtime snapshot must list only the rendered target: %+v", snap)
+	}
+}
+
 func findTunnelRuntime(t *testing.T, rep *protocol.StateReportV2, id string) *protocol.TunnelRuntime {
 	t.Helper()
 	for i := range rep.Tunnels {

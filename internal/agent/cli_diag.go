@@ -109,7 +109,7 @@ func diagInterfaces() string {
 
 // diagCollect builds the bundle's top-level map. The tunnels/balancer
 // views come from the caller (the persisted balancer snapshot).
-func diagCollect(tunnels []map[string]any, balancer []balTargetDiag) map[string]any {
+func diagCollect(tunnels []map[string]any, balancer []balTargetDiag, routeLocalnet bool) map[string]any {
 	return map[string]any{
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 		"agent": map[string]any{
@@ -123,9 +123,13 @@ func diagCollect(tunnels []map[string]any, balancer []balTargetDiag) map[string]
 		"nft":            diagCmdOut("nft", "-a", "list", "table", "ip", "quantum-fwd"),
 		"iptables":       diagCmdOut("iptables-save", "-c"),
 		"time_sync":      diagCmdOut("timedatectl", "show", "--property=NTPSynchronized"),
-		"config_files":   diagConfigFiles(),
-		"tunnels":        tunnels,
-		"balancer":       balancer,
+		// "net": dynamic network knobs the agent owns (phase14). The
+		// balancer flips route_localnet while any enforced forward DNATs
+		// to a loopback target (RUNBOOK ITEM 35).
+		"net":          map[string]any{"route_localnet": routeLocalnet},
+		"config_files": diagConfigFiles(),
+		"tunnels":      tunnels,
+		"balancer":     balancer,
 	}
 }
 
@@ -149,17 +153,19 @@ func cliDiag(args []string) int {
 	}
 	// The balancer view comes from the persisted snapshot (the running
 	// agent wrote it); a cold agent produces what it can. The snapshot
-	// also carries the tunnel summaries.
+	// also carries the tunnel summaries and the route_localnet state.
 	balancer := []balTargetDiag{}
 	var tunnels []map[string]any
+	routeLocalnet := false
 	if b, err := os.ReadFile(balancerStatusPath()); err == nil {
 		var rep balTickReport
 		if json.Unmarshal(b, &rep) == nil {
 			balancer = rep.Targets
 			tunnels = rep.Tunnels
+			routeLocalnet = rep.RouteLocalnet
 		}
 	}
-	bundle := diagCollect(tunnels, balancer)
+	bundle := diagCollect(tunnels, balancer, routeLocalnet)
 	data, err := json.MarshalIndent(bundle, "", "  ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "diag: render:", err)
