@@ -564,7 +564,7 @@ func TestEngines45RegisteredInCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"wstunnel", "chisel", "frp", "backhaul", "xray", "wireguard", "matrix"} {
+	for _, id := range []string{"wstunnel", "chisel", "frp", "backhaul", "xray", "wireguard", "matrix", "ctunnel"} {
 		if _, ok := reg.Driver(id); !ok {
 			t.Fatalf("engine %q missing from the registry", id)
 		}
