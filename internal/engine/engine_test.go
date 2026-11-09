@@ -339,3 +339,41 @@ func TestFakeEngineValidateScripting(t *testing.T) {
 		t.Fatalf("unrelated params must validate: %v", err)
 	}
 }
+
+// TestManagerValidateAll pins the apply-path preflight hook: ValidateAll
+// runs each ENABLED spec's driver Validate, aligned with the spec list;
+// disabled specs and unknown engines are nil (Reconcile owns that error).
+func TestManagerValidateAll(t *testing.T) {
+	reg := NewRegistry()
+	fake := NewFakeEngine("fake")
+	if err := reg.Register(fake); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(reg)
+	specs := []TunnelSpec{
+		{ID: "t-ok", Engine: "fake", Params: mustJSON(t, map[string]string{"k": "v"}), Enabled: true},
+		{ID: "t-bad", Engine: "fake", Params: mustJSON(t, map[string]string{"x": "BAD-thing"}), Enabled: true},
+		{ID: "t-off", Engine: "fake", Params: mustJSON(t, map[string]string{"x": "BAD-thing"}), Enabled: false},
+		{ID: "t-ghost", Engine: "ghost", Params: mustJSON(t, map[string]string{"x": "BAD-thing"}), Enabled: true},
+	}
+	fake.FailValidate("BAD-thing", errors.New("invalid params"))
+	got := m.ValidateAll(specs)
+	if len(got) != len(specs) {
+		t.Fatalf("ValidateAll returned %d results for %d specs", len(got), len(specs))
+	}
+	if got[0] != nil {
+		t.Fatalf("valid spec: %v", got[0])
+	}
+	if got[1] == nil || got[1].Error() != "invalid params" {
+		t.Fatalf("invalid spec: %v", got[1])
+	}
+	if got[2] != nil {
+		t.Fatalf("disabled spec must be skipped: %v", got[2])
+	}
+	if got[3] != nil {
+		t.Fatalf("unknown engine must be left to Reconcile: %v", got[3])
+	}
+	if !m.EngineRegistered("fake") || m.EngineRegistered("ghost") {
+		t.Fatal("EngineRegistered disagrees with the registry")
+	}
+}

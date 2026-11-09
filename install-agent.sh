@@ -101,6 +101,7 @@ SERVER="" TOKEN="" TOKEN_FILE="" NAME="" ROLE=""
 VERSION="latest" BINARY="" CHECKSUM=""
 SSH_PORT="" ENABLE_FIREWALL=0 WITH_FAIL2BAN=0 NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0 ASSUME_YES=0
 OPEN_RULES=()
+UNINSTALL=0 PURGE=0 UPGRADE=0
 
 usage() { sed -n '2,40p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; }
 
@@ -122,6 +123,9 @@ while [[ $# -gt 0 ]]; do
         --check)         CHECK_ONLY=1; shift;;
         --verify-only)   VERIFY_ONLY=1; shift;;
         --yes)           ASSUME_YES=1; shift;;
+        --uninstall)     UNINSTALL=1; shift;;
+        --purge)         PURGE=1; UNINSTALL=1; shift;;
+        --upgrade)       UPGRADE=1; shift;;
         -h|--help)       usage; exit 0;;
         *) die "unknown argument: $1 (see --help)";;
     esac
@@ -653,21 +657,137 @@ verify_binary_only() {
 }
 
 # ---------------------------------------------------------------------------
+# phase 14 prerequisites: idempotent, reversible where the product owns the
+# key. NOT set here: net.ipv4.route_localnet (the AGENT owns it at runtime
+# via the netopt engine — an installer-set value would fight it).
+# ---------------------------------------------------------------------------
+prereq_step() {
+    info "prerequisites (idempotent, product-owned keys only)"
+    # ip_forward: forwarding engines (frp DNAT/SNAT, wireguard) need it.
+    local fwd
+    fwd="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)"
+    if [[ "$fwd" != "1" ]]; then
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null
+        printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/30-quantum-forward.conf
+        info "ip_forward enabled (30-quantum-forward.conf — uninstall removes it)"
+    fi
+    # tincd: optional engine binary — presence CHECK only (never installed
+    # silently: the operator chooses the engine set).
+    if ! command -v tincd >/dev/null 2>&1; then
+        warn "tincd not found — the tinc engine cannot run until it is installed (apt-get install tinc)"
+    fi
+    # nft: the firewall engine and the port engine prefer nftables.
+    if ! command -v nft >/dev/null 2>&1; then
+        warn "nft not found — install nftables (apt-get install nftables) for the firewall engine"
+    fi
+    # time sync: chrony or systemd-timesyncd must be active.
+    if systemctl is-active --quiet chrony 2>/dev/null || systemctl is-active --quiet chronyd 2>/dev/null; then
+        info "time sync: chrony active"
+    elif systemctl is-active --quiet systemd-timesyncd 2>/dev/null; then
+        info "time sync: systemd-timesyncd active"
+    else
+        warn "no active time sync (chrony or systemd-timesyncd) — TLS and tokens need a sane clock"
+    fi
+}
+
+agent_doctor_step() {
+    # quantum-agent doctor is session 1's preflight — call it when the
+    # installed binary has it (report, never fatal here).
+    if "$BIN" doctor check >/dev/null 2>&1; then
+        info "quantum-agent doctor check: OK"
+    else
+        local out
+        out="$("$BIN" doctor check 2>&1 | tail -3)"
+        warn "quantum-agent doctor check flagged findings: ${out:-no output}"
+    fi
+}
+
+# --uninstall: remove ONLY what this installer created. Never touches other
+# software (a Pasarguard node, Docker, ufw rules not created by Quantum).
+agent_uninstall() {
+    need_root
+    info "uninstalling quantum-agent (purge=$PURGE)"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now gre-agent.service 2>/dev/null || true
+    fi
+    rm -f "$UNIT" "${UNIT}.bak" 2>/dev/null && info "removed $UNIT"
+    # Quantum-owned sysctl drop-ins (99- hardening + 30- forward, both
+    # written by this installer). Third-party sysctl files stay untouched.
+    for f in /etc/sysctl.d/99-quantum-hardening.conf /etc/sysctl.d/30-quantum-forward.conf; do
+        if [[ -f "$f" ]]; then
+            rm -f "$f" && info "removed $f"
+            sysctl --system >/dev/null 2>&1 || true
+        fi
+    done
+    # Quantum-owned iptables account chains (the frp byte counters)
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -N FRPDRV_ACCT_IN 2>/dev/null && iptables -X FRPDRV_ACCT_IN 2>/dev/null || true
+        iptables -N FRPDRV_ACCT_OUT 2>/dev/null && iptables -X FRPDRV_ACCT_OUT 2>/dev/null || true
+    fi
+    rm -f /etc/systemd/journald.conf.d/quantum-persistent.conf 2>/dev/null && info "removed the journald drop-in"
+    if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload 2>/dev/null || true; fi
+    for f in "$BIN" "${BIN}.bak" "${BIN}.new"; do
+        [[ -f "$f" ]] && { rm -f "$f" && info "removed $f"; }
+    done
+    # the fail2ban jail installed by --with-fail2ban
+    if [[ -f /etc/fail2ban/jail.d/quantum-ssh.local ]]; then
+        rm -f /etc/fail2ban/jail.d/quantum-ssh.local && info "removed the quantum fail2ban jail"
+        systemctl reload fail2ban 2>/dev/null || true
+    fi
+    if [[ $PURGE -eq 1 ]]; then
+        for d in "$AGENT_DIR" /var/lib/quantum-agent; do
+            [[ -d "$d" ]] && { rm -rf "$d" && info "purged $d"; }
+        done
+        info "config/state PURGED — certificates, identities and counters are gone"
+    else
+        info "config/state KEPT in $AGENT_DIR (use --purge to remove)"
+    fi
+    info "uninstall complete — other software was not touched"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 if [[ $VERIFY_ONLY -eq 1 ]]; then verify_binary_only; exit 0; fi   # no root/systemd needed
+if [[ $UNINSTALL -eq 1 ]]; then agent_uninstall; exit 0; fi
 need_root
 if [[ $CHECK_ONLY -eq 1 ]]; then
     need_systemd
     check_install
 fi
 
+if [[ $UPGRADE -eq 1 ]]; then
+    info "upgrading quantum-agent (arch $(arch_tag), version ${VERSION}) — config, identities and the unit are KEPT"
+    [[ -f "$BIN" ]] || die "--upgrade: no existing install at $BIN (run the plain installer first)"
+    install_binary
+    # hash-verify the INSTALLED binary against the fetched source checksum
+    if [[ -n "$CHECKSUM" ]]; then
+        li="$(sha256sum "$BIN" 2>/dev/null | awk '{print $1}')"
+        [[ "$li" == "$CHECKSUM" ]] || die "installed-binary hash mismatch (RUNBOOK-FIXES 31): $li != $CHECKSUM"
+        info "installed-binary hash verified against the announced checksum"
+    fi
+    prereq_step
+    agent_doctor_step
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart gre-agent.service 2>/dev/null || true
+        sleep 2
+        if ! systemctl is-active --quiet gre-agent.service; then
+            warn "service failed to start — rolling back the binary"
+            [[ -f "${BIN}.bak" ]] && { cp -a "${BIN}.bak" "$BIN"; info "rolled back to the previous binary"; }
+            systemctl restart gre-agent.service 2>/dev/null || true
+            die "upgrade rolled back: the service still fails to start after rollback"
+        fi
+        info "upgrade complete: service restarted and active"
+    fi
+    exit 0
+fi
 info "installing quantum-agent (arch $(arch_tag), version ${VERSION})"
 install_binary
 # Binary + checksum verified (fetch_binary dies on mismatch BEFORE this
 # point): only NOW do we require systemd for the unit/service work.
 need_systemd
 install_binary
+prereq_step
 mkdir -p "$AGENT_DIR"
 enroll
 write_unit
@@ -678,6 +798,7 @@ sysctl_step
 journald_step
 fail2ban_step
 profile_step
+agent_doctor_step
 verify
 info "done. The panel can now push hardening/netopt desired state; safe-apply +
       its 120 s rollback timer protect every subsequent change."

@@ -209,6 +209,12 @@ func NewAgentEngines() (*engine.Registry, error) {
 	if err := reg.Register(NewGostDriver()); err != nil {
 		return nil, err
 	}
+	// rathole was implemented (rathole_driver.go) but never registered —
+	// the shipped binaries silently had one driver fewer than the ten the
+	// release claimed (PHASE8-ACCEPTANCE). Register it.
+	if err := reg.Register(NewRatholeDriver()); err != nil {
+		return nil, err
+	}
 	if err := RegisterLabEngines(reg); err != nil {
 		return nil, err
 	}

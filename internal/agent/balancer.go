@@ -115,6 +115,10 @@ type balTickReport struct {
 	Errors       []string
 	Targets      []balTargetDiag
 	Tunnels      []map[string]any
+	// RouteLocalnet mirrors the balancer-owned dynamic knob (RUNBOOK
+	// ITEM 35): true while the enforced ruleset DNATs to loopback and
+	// the agent holds a captured net.ipv4.conf.all.route_localnet value.
+	RouteLocalnet bool `json:"route_localnet,omitempty"`
 }
 
 type forwardBalancer struct {
@@ -130,6 +134,14 @@ type forwardBalancer struct {
 	stop         chan struct{}
 	running      bool
 	nowFn        func() time.Time
+	// Balancer-owned route_localnet state (RUNBOOK ITEM 35, see
+	// routelocalnet.go): rlActive while the enforced ruleset DNATs to
+	// loopback; rlSaved is the CAPTURED previous value (never a guess)
+	// restored when no loopback target remains. Guarded by mu.
+	rlActive     bool
+	rlSaved      string
+	rlIface      string
+	rlSavedIface string
 }
 
 func newForwardBalancer(mgr *engine.Manager, reg *engine.Registry) *forwardBalancer {
@@ -168,8 +180,12 @@ func (b *forwardBalancer) Stop() {
 	}
 	close(b.stop)
 	b.running = false
+	// Ruleset cleanup under the same lock that guards the route_localnet
+	// state: with no forward rules left, a captured knob value is no
+	// longer ours to hold (applyScriptRL restores it).
+	err := b.applyScriptRL(renderForwardNFT(nil))
 	b.mu.Unlock()
-	if err := nftApplyScript(renderForwardNFT(nil)); err != nil {
+	if err != nil {
 		log.Printf("[balancer] ruleset cleanup failed: %v", err)
 	}
 }
@@ -360,8 +376,25 @@ func (b *forwardBalancer) tick() balTickReport {
 			}
 			diag(fr.ID, tid, "selected", h, &fa, w)
 			targets = append(targets, balTarget{TunnelID: tid, IP: fa.host, Port: fa.port, Weight: w})
-			runtime.Targets = append(runtime.Targets, tid)
-			runtime.Weights = append(runtime.Weights, w)
+		}
+		// RUNBOOK ITEM 36 mirror: the nft renderer drops port-less targets
+		// that cannot join a per-target-port map (`addr . 0` — the kernel
+		// no-ops the element). The runtime view and the nft ranges below
+		// must describe the rotation AS RENDERED, so the same split
+		// applies before reporting; a dropped target's "selected" diag
+		// entry becomes "portless-target".
+		keptTargets, portless := forwardUsableTargets(forwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto, Targets: targets})
+		for _, t := range portless {
+			for i := range rep.Targets {
+				if rep.Targets[i].Forward == fr.ID && rep.Targets[i].Tunnel == t.TunnelID && rep.Targets[i].Reason == "selected" {
+					rep.Targets[i].Reason = "portless-target"
+				}
+			}
+		}
+		targets = keptTargets
+		for _, t := range targets {
+			runtime.Targets = append(runtime.Targets, t.TunnelID)
+			runtime.Weights = append(runtime.Weights, t.Weight)
 		}
 		rules = append(rules, forwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto, Targets: targets})
 		// Per-target nft range (phase-9 diagnostic): the same deterministic
@@ -396,7 +429,11 @@ func (b *forwardBalancer) tick() balTickReport {
 
 	script := renderForwardNFT(rules)
 	if script != b.lastRule {
-		if err := nftApplyScript(script); err != nil {
+		listenPorts := make([]int, 0, len(rules))
+		for _, r := range rules {
+			listenPorts = append(listenPorts, r.ListenPort)
+		}
+		if err := b.applyScriptRL(script, listenPorts...); err != nil {
 			rep.Errors = append(rep.Errors, "nft apply: "+err.Error())
 			log.Printf("[balancer] nft apply failed: %v", err)
 		} else {
@@ -405,6 +442,7 @@ func (b *forwardBalancer) tick() balTickReport {
 		}
 	}
 	b.lastForwards = forwards
+	rep.RouteLocalnet = b.rlActive
 	// Structured diagnostics, logged when the evaluation changes
 	// (reconcile, health flip, weight change) — never every tick.
 	diagKey := ""
