@@ -131,7 +131,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n "$SERVER" || $CHECK_ONLY -eq 1 || $VERIFY_ONLY -eq 1 ]] || die "--server is required (or use --check / --verify-only)"
+[[ -n "$SERVER" || $CHECK_ONLY -eq 1 || $VERIFY_ONLY -eq 1 || $UNINSTALL -eq 1 || $UPGRADE -eq 1 ]] || die "--server is required (or use --check / --verify-only / --uninstall / --upgrade)"
 if [[ -n "$BINARY" && -z "$CHECKSUM" && -f "${BINARY}.sha256" ]]; then
     CHECKSUM="$(trun 10 awk '{print $1}' "${BINARY}.sha256" 2>/dev/null || true)"
 fi
