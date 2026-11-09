@@ -30,7 +30,13 @@ func Main(args []string) int {
 		// Phase-10 support bundle (redacted) for the operator.
 		return cliDiag(args[1:])
 	case "--version", "-v", "version":
-		fmt.Println(panelVersion)
+		// version prints the flat string; version --json prints the full
+		// provenance stamp (phase 14 release integrity).
+		if len(args) > 1 && args[1] == "--json" {
+			fmt.Println(versionJSONString())
+		} else {
+			fmt.Println(panelVersion)
+		}
 		return 0
 	default:
 		return agentCmd(args)
