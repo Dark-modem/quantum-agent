@@ -464,7 +464,7 @@ if [[ $VERIFY_ONLY -eq 1 ]]; then verify_binary_only; exit 0; fi   # no root/sys
 
 # --uninstall: remove ONLY what this installer created. Never touches other
 # software (a Pasarguard node on the same host, Docker, unrelated ufw rules).
-// phase 14 prereqs for the panel host: time sync check
+# phase 14 prereqs for the panel host: time sync check
 panel_prereq_step() {
     if systemctl is-active --quiet chrony 2>/dev/null || systemctl is-active --quiet chronyd 2>/dev/null; then
         info "time sync: chrony active"
