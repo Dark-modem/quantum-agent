@@ -74,7 +74,7 @@ need_systemd() { have systemctl || die "systemd is required"; }
 PORT="7443" BASE_PATH="" USERNAME="admin"
 PASSWORD="" PASSWORD_FILE="" GENERATE=0
 VERSION="latest" BINARY="" CHECKSUM="" REPLACED_BINARY=0
-NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0 TLS_PORT="7443" SERVER_NAME=""
+UNINSTALL=0 PURGE=0 UPGRADE=0 NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0 TLS_PORT="7443" SERVER_NAME=""
 
 usage() { sed -n '2,44p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; }
 
@@ -94,6 +94,9 @@ while [[ $# -gt 0 ]]; do
         --no-start)       NO_START=1; shift;;
         --check)          CHECK_ONLY=1; shift;;
         --verify-only)    VERIFY_ONLY=1; shift;;
+        --uninstall)      UNINSTALL=1; shift;;
+        --purge)          PURGE=1; UNINSTALL=1; shift;;
+        --upgrade)        UPGRADE=1; shift;;
         --yes)            shift;;
         -h|--help)        usage; exit 0;;
         *) die "unknown argument: $1 (see --help)";;
@@ -458,6 +461,75 @@ verify_binary_only() {
 # main
 # ---------------------------------------------------------------------------
 if [[ $VERIFY_ONLY -eq 1 ]]; then verify_binary_only; exit 0; fi   # no root/systemd needed
+
+# --uninstall: remove ONLY what this installer created. Never touches other
+# software (a Pasarguard node on the same host, Docker, unrelated ufw rules).
+// phase 14 prereqs for the panel host: time sync check
+panel_prereq_step() {
+    if systemctl is-active --quiet chrony 2>/dev/null || systemctl is-active --quiet chronyd 2>/dev/null; then
+        info "time sync: chrony active"
+    elif systemctl is-active --quiet systemd-timesyncd 2>/dev/null; then
+        info "time sync: systemd-timesyncd active"
+    else
+        warn "no active time sync — TLS and tokens need a sane clock"
+    fi
+}
+
+panel_uninstall() {
+    info "uninstalling quantum-panel (purge=$PURGE)"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now quantum-panel.service 2>/dev/null || true
+    fi
+    for f in "$UNIT" "$BIN" "${BIN}.bak"; do
+        [[ -f "$f" ]] && { rm -f "$f" && info "removed $f"; }
+    done
+    # the firewall rules Quantum created: the panel unit-tagged nft set
+    if command -v nft >/dev/null 2>&1; then
+        nft list tables 2>/dev/null | grep -q "quantum-panel" && { nft delete table "quantum-panel" 2>/dev/null && info "removed the quantum-panel nft table"; } || true
+    fi
+    if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload 2>/dev/null || true; fi
+    if [[ $PURGE -eq 1 ]]; then
+        for d in "$PANEL_DIR" /var/lib/quantum-panel; do
+            [[ -d "$d" ]] && { rm -rf "$d" && info "purged $d"; }
+        done
+        id "$PANEL_USER" >/dev/null 2>&1 && { userdel "$PANEL_USER" 2>/dev/null && info "removed the $PANEL_USER user"; } || true
+        info "data PURGED — panel.json, credentials, certificates, database are gone"
+    else
+        info "data KEPT in $PANEL_DIR (use --purge to remove)"
+    fi
+    info "uninstall complete — other software was not touched"
+}
+
+# --upgrade: keep panel.json/data, replace the binary, rollback if the
+# service fails to start within 8 seconds.
+panel_upgrade() {
+    [[ -x "$BIN" ]] || die "--upgrade: no existing install at $BIN (run the plain installer first)"
+    fetch_binary
+    info "upgrading quantum-panel — panel.json, credentials and data are KEPT"
+    local src
+    src="$(fetch_binary)"
+    cp -a "$BIN" "${BIN}.bak"
+    install -m 0755 "$src" "${BIN}.new" && mv -f "${BIN}.new" "$BIN"
+    # RUNBOOK-FIXES 31: hash-verify the INSTALLED binary against the source
+    local li liw
+    li="$(sha256sum "$BIN" 2>/dev/null | awk '{print $1}')"
+    liw="$(sha256sum "$src" 2>/dev/null | awk '{print $1}')"
+    [[ "$li" == "$liw" ]] || die "installed-binary hash mismatch (RUNBOOK-FIXES 31): $li != $liw"
+    info "installed-binary hash verified"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart quantum-panel.service 2>/dev/null || true
+        local waited=0
+        while ! systemctl is-active --quiet quantum-panel.service 2>/dev/null; do
+            waited=$((waited+1)); sleep 1
+            [[ $waited -ge 8 ]] && { warn "service failed to start within 8s — rolling back"; cp -a /usr/local/bin/quantum-panel.bak /usr/local/bin/quantum-panel; systemctl restart quantum-panel.service 2>/dev/null || true; die "upgrade rolled back"; }
+        done
+        info "upgrade complete: service restarted and active"
+    fi
+    exit 0
+}
+
+if [[ $UNINSTALL -eq 1 ]]; then panel_uninstall; exit 0; fi
+if [[ $UPGRADE -eq 1 ]]; then need_root; panel_upgrade; fi
 need_root
 if [[ $CHECK_ONLY -eq 1 ]]; then
     need_systemd
@@ -468,6 +540,7 @@ install_binary
 # Binary + checksum verified (fetch_binary dies on mismatch BEFORE this
 # point): only NOW do we require systemd for the unit/service work.
 need_systemd
+panel_prereq_step
 create_user
 tls_selfsigned_step
 credential_step
