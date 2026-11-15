@@ -319,6 +319,14 @@ func mustJSONRaw(v any) json.RawMessage {
 	return b
 }
 
+// agentReportClock is the report-builder's clock seam (tests inject a
+// fixed clock — no sleeps). R7 (PROTOCOL-REQUESTS.md): every v2 state
+// report carries the AGENT's own wall clock, read ONCE per report, as
+// late as possible in the build — the value is "when this report was
+// assembled", never a boot time and never a fabricated 0 (the panel
+// treats 0 as legacy and skips the clock_drift rule).
+var agentReportClock = time.Now
+
 // agentBuildStateReportV2 builds the v2 heartbeat state: everything the
 // v1 report carries plus per-tunnel runtime (wire AND payload bytes),
 // per-engine overhead samples and the balancer's enforced forwards.
@@ -335,6 +343,7 @@ func agentBuildStateReportV2() *agentStateReportV2 {
 	mgr, bal, err := agentV2RuntimeRef()
 	if err != nil {
 		out.Errors = append(out.Errors, "v2 runtime: "+err.Error())
+		out.ReportedAt = agentReportClock().Unix()
 		return out
 	}
 	// Per-tunnel runtime with both byte views; per-engine overhead
@@ -416,6 +425,7 @@ func agentBuildStateReportV2() *agentStateReportV2 {
 	out.Proc = agentSampleTunnelProc(mgr)
 	out.EngineStatus = agentEngineStatusReportV2(mgr)
 	out.Hardening = agentHardeningRuntime()
+	out.ReportedAt = agentReportClock().Unix()
 	return out
 }
 
