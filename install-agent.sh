@@ -320,7 +320,7 @@ enroll() {
     display_name="${NAME:-$(hostname 2>/dev/null || printf agent)}"
     [[ -n "$ROLE" ]] && display_name="${display_name} (${ROLE})"
     set +e
-    out="$(trun 90 "$BIN" agent enroll --server "$SERVER" --token "$TOKEN" --name "$display_name" 2>&1)"
+    out="$(trun 90 "$BIN" enroll --server "$SERVER" --token "$TOKEN" --name "$display_name" 2>&1)"
     rc=$?
     set -e
     if [[ $rc -ne 0 ]]; then
