@@ -65,6 +65,47 @@ func TestWgCompanionValidate(t *testing.T) {
 	if err := nilc.validate(); err != nil {
 		t.Fatalf("nil companion rejected: %v", err)
 	}
+	// AGENT-20: udp2raw is amd64-only upstream — the arm64 pins are
+	// OPTIONAL (both or neither); an amd64-only pin set validates.
+	amd64Only := wgCompanionTest()
+	amd64Only.SHA256Arm, amd64Only.SigArm = "", ""
+	if err := amd64Only.validate(); err != nil {
+		t.Fatalf("amd64-only pins rejected: %v", err)
+	}
+	halfArm := wgCompanionTest()
+	halfArm.SigArm = ""
+	if err := halfArm.validate(); err == nil {
+		t.Fatal("arm64 sha without signature accepted (pins must be a pair or absent)")
+	}
+	shortArm := wgCompanionTest()
+	shortArm.SHA256Arm = "short"
+	if err := shortArm.validate(); err == nil {
+		t.Fatal("malformed arm64 pin accepted")
+	}
+}
+
+// TestWgCompanionArchPin: the ensure-time fail-closed resolution — amd64
+// always resolves; arm64 resolves ONLY with pins (udp2raw is amd64-only
+// upstream) and the error names the situation clearly, BEFORE any fetch.
+func TestWgCompanionArchPin(t *testing.T) {
+	c := wgCompanionTest()
+	name, sha, sig, err := wgCompanionArchPin("amd64", c)
+	if err != nil || !strings.Contains(name, "amd64") || sha != c.SHA256Amd || sig != c.SigAmd {
+		t.Fatalf("amd64 pin: %v %q", err, name)
+	}
+	name, sha, sig, err = wgCompanionArchPin("arm64", c)
+	if err != nil || !strings.Contains(name, "arm64") || sha != c.SHA256Arm {
+		t.Fatalf("arm64 pin (pinned): %v %q", err, name)
+	}
+	noArm := wgCompanionTest()
+	noArm.SHA256Arm, noArm.SigArm = "", ""
+	_, _, _, err = wgCompanionArchPin("arm64", noArm)
+	if err == nil || !strings.Contains(err.Error(), "amd64-only") {
+		t.Fatalf("arm64 without pins must fail closed with the amd64-only message, got: %v", err)
+	}
+	if _, _, _, err := wgCompanionArchPin("riscv64", c); err == nil {
+		t.Fatal("unsupported arch accepted")
+	}
 }
 
 func TestWgPeerEndpointCompanion(t *testing.T) {

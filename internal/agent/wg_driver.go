@@ -281,9 +281,13 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 	// headers inside the WG UDP packet. With the plain 1420 the inner TCP
 	// segments exceed the path and bulk data blackholes (handshakes and
 	// pings — small packets — still pass, which is exactly the symptom
-	// the integration test caught). Default the wrapped MTU to 1300.
+	// the integration test caught). Default the wrapped MTU to 1350 —
+	// AGENT-20's live netns integration carried bulk TCP (iperf3 both
+	// directions, lab-loopback) AND a 1300-byte-payload ping at 1350 on a
+	// 1500 underlay; 1420 blackholes (WG+fake-TCP+outer headers no longer
+	// fit one 1500 packet).
 	if mtu == 1420 && p.Companion != nil && p.Companion.Kind == companionUDP2Raw {
-		mtu = 1300
+		mtu = 1350
 	}
 
 	// Create the interface. Kernel module first; wireguard-go fallback
