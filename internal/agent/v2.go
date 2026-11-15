@@ -200,6 +200,14 @@ func agentApplyDesiredV2Fenced(d *protocol.DesiredV2, fence bool) agentAck {
 	}
 
 	// 2. Tunnels + engines: reconcile through the engine Manager.
+	// selfName (R6, phase 17): the panel stamps DesiredV2.Self with the
+	// receiving agent's mesh server name — the authoritative self for
+	// engines that resolve their side by name (FRP frps/frpc). Empty
+	// (pre-R6 panel) keeps the drivers' legacy resolution untouched.
+	selfName := ""
+	if d.Self != nil {
+		selfName = strings.TrimSpace(d.Self.Name)
+	}
 	specs := make([]engine.TunnelSpec, 0, len(d.Tunnels))
 	engs := make([]engine.EngineSpec, 0, len(d.Engines))
 	for _, e := range d.Engines {
@@ -219,7 +227,31 @@ func agentApplyDesiredV2Fenced(d *protocol.DesiredV2, fence bool) agentAck {
 			Engine:       t.Engine,
 			Params:       t.EngineParams,
 			Enabled:      t.Enabled,
+			SelfName:     selfName,
 		})
+	}
+	// Defensive alignment check (R6): with Self stamped, every delivered
+	// tunnel names its two ends; if NONE of them is Self.Name the panel
+	// linked this agent to a different server than the doc's tunnels
+	// reference. Non-fatal (a doc may legitimately carry engines/forwards
+	// without tunnels) — it rides the ack detail so the UI can surface it.
+	if selfName != "" && len(specs) > 0 {
+		aligned := false
+		for _, t := range specs {
+			if t.LocalServer == selfName || t.RemoteServer == selfName {
+				aligned = true
+				break
+			}
+		}
+		if !aligned {
+			if ack.Detail == nil {
+				ack.Detail = map[string]string{}
+			}
+			ack.Detail["self_alignment_warning"] = fmt.Sprintf(
+				"self %q matches no tunnel end in revision %s", selfName, d.Revision)
+			log.Printf("[agent] v2 self alignment: self %q matches no tunnel end (revision %s)",
+				selfName, d.Revision)
+		}
 	}
 	// 2a. PREFLIGHT (phase14 ports): driver Validate + port availability
 	// for every enabled tunnel, and the listen port for every enabled

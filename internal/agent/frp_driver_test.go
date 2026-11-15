@@ -538,7 +538,7 @@ func TestFRPRoleResolutionBothEnds(t *testing.T) {
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Name: "germany"}, true
 	}
-	if role, err := frpResolveRole(p); err != nil || role != "server" {
+	if role, err := frpResolveRole(p, ""); err != nil || role != "server" {
 		t.Fatalf("germany end: role=%q err=%v, want server", role, err)
 	}
 
@@ -546,7 +546,7 @@ func TestFRPRoleResolutionBothEnds(t *testing.T) {
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Name: "iran"}, true
 	}
-	if role, err := frpResolveRole(p); err != nil || role != "client" {
+	if role, err := frpResolveRole(p, ""); err != nil || role != "client" {
 		t.Fatalf("iran end: role=%q err=%v, want client", role, err)
 	}
 
@@ -555,13 +555,13 @@ func TestFRPRoleResolutionBothEnds(t *testing.T) {
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Name: "third-node"}, true
 	}
-	if role, err := frpResolveRole(p); err != nil || role != "client" {
+	if role, err := frpResolveRole(p, ""); err != nil || role != "client" {
 		t.Fatalf("third-node end: role=%q err=%v, want client", role, err)
 	}
 
 	// no identity: fail closed
 	frpLoadIdentity = func() (agentIdentity, bool) { return agentIdentity{}, false }
-	if _, err := frpResolveRole(p); err == nil {
+	if _, err := frpResolveRole(p, ""); err == nil {
 		t.Fatal("missing identity accepted")
 	}
 }
@@ -594,4 +594,38 @@ func TestFRPForwardAddress(t *testing.T) {
 		t.Fatal("ForwardAddress ok after Stop")
 	}
 	_ = fetchCalls
+}
+
+// TestFRPRoleResolutionSelfName (R6, phase 17): the panel-stamped
+// Self.Name is authoritative — it resolves the role even when the
+// enrollment name differs from the mesh server name, and an empty
+// SelfName (pre-R6 panel) keeps the enrollment-name behavior.
+func TestFRPRoleResolutionSelfName(t *testing.T) {
+	p := frpTestParams() // ServerSide: "germany"
+	origIdent := frpLoadIdentity
+	t.Cleanup(func() { frpLoadIdentity = origIdent })
+
+	// R6: the enrollment name ("legacy-node") does NOT match the mesh
+	// server name, yet the panel-stamped Self.Name resolves the frps end.
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Name: "legacy-node"}, true
+	}
+	if role, err := frpResolveRole(p, "germany"); err != nil || role != "server" {
+		t.Fatalf("self germany: role=%q err=%v, want server", role, err)
+	}
+	if role, err := frpResolveRole(p, "iran-server"); err != nil || role != "client" {
+		t.Fatalf("self iran-server: role=%q err=%v, want client", role, err)
+	}
+	// blank Self.Name falls back to the enrollment identity (pre-R6)
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Name: "germany"}, true
+	}
+	if role, err := frpResolveRole(p, "  "); err != nil || role != "server" {
+		t.Fatalf("blank self fallback: role=%q err=%v, want server", role, err)
+	}
+	// no identity AND no SelfName: fail closed
+	frpLoadIdentity = func() (agentIdentity, bool) { return agentIdentity{}, false }
+	if _, err := frpResolveRole(p, ""); err == nil {
+		t.Fatal("missing identity and missing SelfName accepted")
+	}
 }

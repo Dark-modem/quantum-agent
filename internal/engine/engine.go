@@ -31,6 +31,9 @@ type Instance struct {
 	LocalServer  string
 	RemoteServer string
 	Params       json.RawMessage
+	// SelfName (R6, phase 17): the panel-stamped name of the receiving
+	// agent (empty = pre-R6 panel, drivers use their legacy resolution).
+	SelfName string
 }
 
 // Health is a driver's instantaneous view of one instance.
@@ -120,6 +123,11 @@ type TunnelSpec struct {
 	Engine       string
 	Params       json.RawMessage
 	Enabled      bool
+	// SelfName (R6, phase 17): the panel-stamped mesh server name of the
+	// RECEIVING agent (DesiredV2.Self.Name), authoritative for engines
+	// that resolve their side of a tunnel by name. Empty = pre-R6 panel:
+	// drivers fall back to their pre-R6 self-resolution (enrollment name).
+	SelfName string
 }
 
 // EngineSpec enables or disables a whole engine.

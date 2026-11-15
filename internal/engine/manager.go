@@ -221,6 +221,7 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 			LocalServer:  t.LocalServer,
 			RemoteServer: t.RemoteServer,
 			Params:       t.Params,
+			SelfName:     t.SelfName,
 		}
 		slot, running := m.running[t.ID]
 		if running && slot.drv.ID() != drv.ID() {
