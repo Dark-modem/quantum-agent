@@ -12,6 +12,10 @@
 #                                    TCP/UDP echo → restart (go test -tags
 #                                    integration -run TestCtunnelIntegration)
 #   [4/5] e2e netns lab            — REAL panel + 6 REAL agents over netns:
+#   [4b]  force-cleanup            — idempotent post-lab sweep in its own
+#                                    WSL session (WSL kills the distro
+#                                    instance when the last client leaves,
+#                                    racing the labs' in-script traps)
 #                                    v2 negotiation, DesiredV2, weighted
 #                                    forwards, failover, counters (e2e_real.sh)
 #   [5/5] installer container test — shellcheck + verify/install lifecycle in
@@ -135,6 +139,33 @@ EOF
 else
     skip "e2e netns lab"
 fi
+
+# [4b] force-cleanup (always runs, not skippable) ----------------------------------
+# The netns labs clean up trap-driven INSIDE their own wsl.exe session, but
+# WSL terminates the distro instance the moment the last client disconnects
+# (observed phase16: a fresh instance is 2 s old; the e2e trap's cleanup
+# lost that race twice). This idempotent force-cleanup runs in its OWN
+# session after the netns labs and removes every lab resource it can see,
+# so the proof below reflects reality either way.
+say "step 4b force-cleanup (idempotent, own WSL session)"
+cat > "$SCRATCH/forceclean.sh" <<'EOF'
+sudo pkill -x quantum-panel 2>/dev/null
+sudo pkill -f "quantum-agent run" 2>/dev/null
+for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^(q-|ct-)' || true); do
+    timeout 10 sudo ip netns del "$ns" 2>/dev/null
+done
+timeout 10 sudo ip link del br-qe2e 2>/dev/null
+for l in $(ip -o link 2>/dev/null | awk -F: '/ct-veth|v-q-|v-ct-/{print $2}' | xargs 2>/dev/null); do
+    timeout 10 sudo ip link del "$l" 2>/dev/null
+done
+sudo nft delete table ip quantum-fwd 2>/dev/null
+while sudo iptables -D INPUT -s 10.200.0.0/24 -j ACCEPT 2>/dev/null; do :; done
+while sudo iptables -D INPUT -i br-qe2e -j ACCEPT 2>/dev/null; do :; done
+while sudo iptables -D FORWARD -i br-qe2e -o br-qe2e -j ACCEPT 2>/dev/null; do :; done
+while sudo iptables -D FORWARD -s 10.200.0.0/24 -d 10.200.0.0/24 -j ACCEPT 2>/dev/null; do :; done
+echo "force-cleanup done"
+EOF
+run_step "force-cleanup" "forceclean.sh"
 
 # [5/5] installer container test --------------------------------------------------
 say "step 5/5 installer container test (quantum-test-*)"
