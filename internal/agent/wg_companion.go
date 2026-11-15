@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -70,10 +71,59 @@ func (c *wgCompanion) validate() error {
 	if len(c.Password) < 8 || len(c.Password) > 256 || strings.ContainsAny(c.Password, "\"'\\\n\r ") {
 		return fmt.Errorf("wg: companion.password must be 8-256 chars without quotes/backslash/space")
 	}
-	if err := backhaulValidateArtifactPins2(c.Version, c.Artifact, c.SHA256Amd, c.SigAmd, c.SHA256Arm, c.SigArm, "wg companion"); err != nil {
+	if err := wgCompanionValidatePins(c); err != nil {
 		return err
 	}
 	return nil
+}
+
+// wgCompanionValidatePins validates the artifact pins for the udp2raw
+// companion. udp2raw is AMD64-ONLY upstream (the 20230206.0 release ships
+// no arm64 binary — the release pack's INDEX documents it), so the arm64
+// pin is OPTIONAL (both sha+sig together or neither), while the amd64 pin
+// is REQUIRED: an amd64 host must never fetch unverified, and an arm64
+// host fails closed at ensure time with the clear amd64-only message.
+func wgCompanionValidatePins(c *wgCompanion) error {
+	if strings.TrimSpace(c.Version) == "" || len(c.Version) > 64 ||
+		strings.ContainsAny(c.Version, "/\\\"' \t\n\r") {
+		return fmt.Errorf("wg companion: version must be 1-64 safe chars")
+	}
+	if !strings.Contains(c.Artifact, "{arch}") || strings.ContainsAny(c.Artifact, " \t\n\r\"\\") {
+		return fmt.Errorf("wg companion: artifact must be a name template containing {arch}")
+	}
+	if len(c.SHA256Amd) != 64 || strings.ContainsAny(c.SHA256Amd, " \t\n\r") {
+		return fmt.Errorf("wg companion: amd64 sha256 pin must be 64 hex chars (udp2raw is amd64-only upstream — the amd64 pin is mandatory)")
+	}
+	if len(c.SigAmd) < 64 || len(c.SigAmd) > 512 || strings.ContainsAny(c.SigAmd, " \t\n\r") {
+		return fmt.Errorf("wg companion: amd64 signature pin must be base64 (64-512 chars)")
+	}
+	armSHA, armSig := strings.TrimSpace(c.SHA256Arm) != "", strings.TrimSpace(c.SigArm) != ""
+	if armSHA != armSig {
+		return fmt.Errorf("wg companion: arm64 sha256 and signature pins must be given together (or both omitted — udp2raw is amd64-only upstream)")
+	}
+	if armSHA && (len(c.SHA256Arm) != 64 || strings.ContainsAny(c.SHA256Arm, " \t\n\r") ||
+		len(c.SigArm) < 64 || len(c.SigArm) > 512 || strings.ContainsAny(c.SigArm, " \t\n\r")) {
+		return fmt.Errorf("wg companion: arm64 pins malformed (sha256 64 hex + base64 signature 64-512 chars)")
+	}
+	return nil
+}
+
+// wgCompanionArchPin resolves the pinned coordinates for one GOARCH,
+// failing CLOSED with the clear amd64-only message when arm64 has no pin
+// (AGENT-20: fail closed before ANY fetch — a missing artifact must never
+// surface as a cryptic checksum error).
+func wgCompanionArchPin(arch string, c *wgCompanion) (name, sha256Hex, sigB64 string, err error) {
+	switch arch {
+	case "amd64":
+		return strings.ReplaceAll(c.Artifact, "{arch}", "amd64"), c.SHA256Amd, c.SigAmd, nil
+	case "arm64":
+		if strings.TrimSpace(c.SHA256Arm) == "" || strings.TrimSpace(c.SigArm) == "" {
+			return "", "", "", fmt.Errorf(
+				"wg companion: udp2raw is amd64-only upstream — no arm64 artifact exists to fetch or pin; use the plain wireguard engine on arm64 hosts")
+		}
+		return strings.ReplaceAll(c.Artifact, "{arch}", "arm64"), c.SHA256Arm, c.SigArm, nil
+	}
+	return "", "", "", fmt.Errorf("wg companion: unsupported GOARCH %q", arch)
 }
 
 // wgCompanionUDP2RawArgs renders the udp2raw CLI for one end.
@@ -116,15 +166,15 @@ func wgCompanionEnsureRawCap(binPath string) error {
 
 // wgCompanionEnsureBinary delivers the udp2raw binary through the R5
 // manifest (engine "udp2raw") with the pinned fallback — fail closed
-// without a pinned key, like every engine artifact.
+// without a pinned key, and fail closed on arm64 with the clear
+// amd64-only message BEFORE any fetch.
 func wgCompanionEnsureBinary(ctx context.Context, tunnelID string, c *wgCompanion) (string, error) {
 	key := strings.TrimSpace(engineArtifactPubKeyB64)
 	if key == "" {
 		return "", fmt.Errorf("wg companion: no engine artifact signing key pinned in this build (fail closed)")
 	}
 	pin := func() (string, string, string, error) {
-		return enginePinForArch(EnginePin{Version: c.Version, Artifact: c.Artifact,
-			SHA256Amd: c.SHA256Amd, SHA256Arm: c.SHA256Arm, SigAmd: c.SigAmd, SigArm: c.SigArm})
+		return wgCompanionArchPin(runtime.GOARCH, c)
 	}
 	name, sha256Hex, sigB64, err := pin()
 	if err != nil {

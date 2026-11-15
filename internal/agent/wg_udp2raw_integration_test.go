@@ -261,6 +261,10 @@ func TestWgUdp2rawIntegration(t *testing.T) {
 	_ = nsByPort
 
 	d := NewWgDriver()
+	// AGENT-20 dispatch: inner MTU 1350 accounting — the tunnel runs at
+	// MTU:0 so the DRIVER DEFAULT applies (1350 for a udp2raw companion);
+	// the iface assertion below pins it live and the iperf legs prove
+	// bulk TCP carries at it.
 	p := wgParams{ServerSide: "germany", CarrierIP: wguIPA, CarrierPort: wguCarrier, MTU: 0}
 	p.Companion = &wgCompanion{
 		Kind: "udp2raw", ServerAddr: fmt.Sprintf("%s:%d", wguIPA, wguFake),
@@ -283,6 +287,13 @@ func TestWgUdp2rawIntegration(t *testing.T) {
 		t.Fatalf("client Start: %v", err)
 	}
 	ifaceB := mustIfaceName(t, d, "twgu-b")
+	// The companion default MTU is 1350 (MTU:0 above): assert the interface
+	// actually came up at it (dispatch: inner MTU 1350 accounting).
+	if mtuOut, err := runNS(wguNSB, "ip", "-o", "link", "show", ifaceB); err != nil ||
+		!strings.Contains(mtuOut, "mtu 1350") {
+		t.Fatalf("companion default MTU not applied: %v: %s", err, strings.TrimSpace(mtuOut))
+	}
+	t.Logf("lab-loopback WG@udp2raw companion default MTU: iface came up at 1350 (MTU:0)")
 
 	// The key exchange via LIVE revisions (same flow as the plain WG).
 	d.mu.Lock()
@@ -334,6 +345,134 @@ func TestWgUdp2rawIntegration(t *testing.T) {
 		t.Fatalf("reverse iperf: %v: %s", rerr, rev)
 	}
 	t.Logf("lab-loopback WG@udp2raw REVERSE (-R): %s", strings.TrimSpace(rev))
+
+	// AGENT-20: inner-MTU evidence — a 1300-byte-payload ping (1328 on the
+	// wire) crosses the wrapped tunnel at the 1350 MTU, and bulk TCP
+	// (iperf above) carried at it too.
+	if out, err := runNS(wguNSB, "ping", "-c", "1", "-W", "2", "-s", "1300", "10.189.0.1"); err != nil ||
+		!strings.Contains(out, " 0% packet loss") {
+		t.Fatalf("inner 1300-byte ping failed at MTU 1350: %v: %s", err, out)
+	}
+	t.Logf("lab-loopback WG@udp2raw inner MTU: 1300-byte payload ping OK at iface MTU 1350")
+
+	// AGENT-20: TCP ECHO through the wrapped tunnel (agent17-lab shape).
+	echoSrv := `import socket
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("10.189.0.1", 25501)); s.listen(4)
+while True:
+    c, a = s.accept()
+    try:
+        d = c.recv(2048)
+        c.sendall(b"ECHO:" + d)
+    finally:
+        c.close()
+`
+	echoCli := `import socket
+s = socket.create_connection(("10.189.0.1", 25501), timeout=8)
+s.sendall(b"udp2raw-e2e-payload-01")
+s.settimeout(8)
+buf = b""
+while b"ECHO:udp2raw-e2e-payload-01" not in buf:
+    b2 = s.recv(2048)
+    if not b2:
+        break
+    buf += b2
+print(buf.decode(errors="replace"))
+`
+	mustNS(wguNSA, "sh", "-c", "nohup python3 -c '"+echoSrv+"' > /dev/null 2>&1 &")
+	defer runNS(wguNSA, "pkill", "-f", "25501")
+	time.Sleep(time.Second)
+	echoOut, echoErr := runNS(wguNSB, "python3", "-c", echoCli)
+	if echoErr != nil || !strings.Contains(echoOut, "ECHO:udp2raw-e2e-payload-01") {
+		t.Fatalf("TCP echo through the wrapped tunnel failed: %v: %s", echoErr, echoOut)
+	}
+	t.Logf("lab-loopback WG@udp2raw TCP echo through the tunnel OK (ECHO:udp2raw-e2e-payload-01)")
+
+	// AGENT-20: kill the SERVER-end udp2raw → the supervisor's capped
+	// backoff respawns it → the handshake recovers (ping 0%% loss again).
+	// pgrep -x (exact process name) + a "-s " cmdline filter: a bare
+	// pgrep -f 'udp2raw' matches THIS TEST's own harness cmdline
+	// (UDP2RAW_INTEG_DIR=…-udp2raw …) and killing that pid killed the
+	// whole run — found live by this very test.
+	srvUdp2rawPid := func() string {
+		out, _ := runNS(wguNSA, "sh", "-c",
+			`for p in $(pgrep -x udp2raw); do tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | grep -q -- '-s ' && echo $p; done | head -1`)
+		return strings.TrimSpace(out)
+	}
+	srvPid := srvUdp2rawPid()
+	if srvPid == "" {
+		t.Fatal("no server-end udp2raw process found (companion not running?)")
+	}
+	if _, err := runNS(wguNSA, "kill", "-9", srvPid); err != nil {
+		t.Fatalf("kill udp2raw: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if still := srvUdp2rawPid(); still != "" {
+		t.Fatalf("server udp2raw still alive after kill -9 (pid %s)", still)
+	}
+	supOK := false
+	for i := 0; i < 30; i++ {
+		out, err := runNS(wguNSB, "ping", "-c", "1", "-W", "1", "10.189.0.1")
+		if err == nil && strings.Contains(out, " 0% packet loss") && srvUdp2rawPid() != "" {
+			supOK = true
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if !supOK {
+		t.Fatalf("handshake did not recover within 30s of killing udp2raw (supervisor respawn failed)")
+	}
+	t.Logf("lab-loopback WG@udp2raw supervisor: kill -9 → respawned (capped backoff) → handshake recovered")
+
+	// AGENT-20: RESTART KEEPS KEYS — Stop both ends, Start again (fresh
+	// params, no PeerPublic), the persisted 0600 keypairs must reload
+	// unchanged (no re-key) and the tunnel must carry a ping again.
+	d.mu.Lock()
+	pubA0, pubB0 := d.runs["twgu-a"].pubB64, d.runs["twgu-b"].pubB64
+	d.mu.Unlock()
+	serveNS = wguNSA
+	if err := d.Stop(instA); err != nil {
+		t.Fatal(err)
+	}
+	serveNS = wguNSB
+	if err := d.Stop(instB); err != nil {
+		t.Fatal(err)
+	}
+	serveNS = wguNSA
+	if err := d.Start(context.Background(), instA); err != nil {
+		t.Fatalf("server restart: %v", err)
+	}
+	serveNS = wguNSB
+	if err := d.Start(context.Background(), instB); err != nil {
+		t.Fatalf("client restart: %v", err)
+	}
+	d.mu.Lock()
+	pubA1, pubB1 := d.runs["twgu-a"].pubB64, d.runs["twgu-b"].pubB64
+	d.mu.Unlock()
+	if pubA1 != pubA0 || pubB1 != pubB0 {
+		t.Fatalf("restart RE-KEYED the tunnel: pubA %s→%s pubB %s→%s (keys must persist per tunnel)", pubA0, pubA1, pubB0, pubB1)
+	}
+	serveNS = wguNSA
+	if err := d.Reload(engine.Instance{TunnelID: "twgu-a", Params: mustJSON(revA)}); err != nil {
+		t.Fatalf("server revision after restart: %v", err)
+	}
+	serveNS = wguNSB
+	if err := d.Reload(engine.Instance{TunnelID: "twgu-b", Params: mustJSON(revB)}); err != nil {
+		t.Fatalf("client revision after restart: %v", err)
+	}
+	reOK := false
+	for i := 0; i < 30; i++ {
+		if out, err := runNS(wguNSB, "ping", "-c", "1", "-W", "1", "10.189.0.1"); err == nil &&
+			strings.Contains(out, " 0% packet loss") {
+			reOK = true
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if !reOK {
+		t.Fatalf("tunnel never recovered after the restart (keys persisted but handshake failed)")
+	}
+	t.Logf("lab-loopback WG@udp2raw restart: keypairs persisted (no re-key), handshake + ping recovered")
 
 	// Cleanup: the kernel RST rule must be GONE from nsA.
 	serveNS = wguNSA
