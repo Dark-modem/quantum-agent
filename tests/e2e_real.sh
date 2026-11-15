@@ -562,22 +562,25 @@ PYEOF
 # The counters reach the store only on the NEXT heartbeat (30 s cadence,
 # 5 s sample throttle) — the harness polls, never assumes.
 wait_usage() { # wait_usage BEFORE_SNAPSHOT — poll until the totals grow past
-  # the snapshot, then settle one full heartbeat cadence before returning:
-  # the counters reach the store on the NEXT heartbeat (30 s cadence, 5 s
-  # sample throttle) and the FIRST growth-carrying heartbeat can hold a
-  # mid-send partial window — measuring it skewed the phase16 weight-change
-  # split (34/66 over ~172 conns instead of 30/70 over the full 10000).
-  local before="$1" deadline=$(( $(date +%s) + 85 )) sum grew=0
+  # the snapshot AND then hold STILL across one full heartbeat cadence.
+  # The counters reach the store on the NEXT heartbeat (30 s cadence, 5 s
+  # sample throttle); the first growth-carrying heartbeat can hold a
+  # mid-send partial window, and one agent's heartbeat can lag another's by
+  # a full cadence (phase16: 12/88 and 0/100 splits measured on lagging
+  # store counters while the kernel map was verifiably correct). Polling
+  # to stability measures the TRUE final split; a genuinely broken split
+  # stays broken across samples, so this cannot mask a real failure.
+  local before="$1" deadline=$(( $(date +%s) + 150 )) sum prev="" grew=0
   while [ $(date +%s) -lt $deadline ]; do
     sum=$(fake_tunnel_usage | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)
     if [ -n "$sum" ] && [ "$sum" -gt "$before" ]; then
-      if [ "$grew" = "0" ]; then
-        grew=1
-        # one heartbeat cadence later the store holds the full window
-        sleep 31
-        continue
+      grew=1
+      if [ -n "$prev" ] && [ "$sum" = "$prev" ]; then
+        return 0 # unchanged across a 31 s gap: the window is complete
       fi
-      return 0
+      prev=$sum
+      sleep 31
+      continue
     fi
     sleep 3
   done
@@ -887,11 +890,28 @@ if [ "$WT" -gt 0 ] && [ "$WP1" -ge 28 ] && [ "$WP1" -le 32 ]; then
   ok "distribution followed the weight change (${WP1}%/$((100-WP1))% of $WT bytes — want 30/70)"
 else
   bad "distribution did not follow the weight change (hz-fra-1=${W1:-0} hz-fra-2=${W2:-0} of $WT — want ~30/70)"
+  # Diagnose (never mask): a portless map element (`0-29 : IP . 0`) passes
+  # the re-render grep but the kernel no-ops it — conns fall through to
+  # the local listener, connect_ok stays 10000, sinks count 0. Dump the
+  # live ruleset + the agent's own runtime view for post-mortem.
+  echo "[e2e] nft table at failure:"
+  nft_map | grep -E 'map|dnat|elements' | head -8 | sed 's/^/[e2e]   /'
+  echo "[e2e] agent runtime view:"
+  sudo ip netns exec q-ir-drak-1 env GRE_PANEL_DIR=$LAB/agents/ir-drak-1 \
+    $LAB/quantum-agent balancer status 2>/dev/null | head -30 | sed 's/^/[e2e]   /'
 fi
 
 # verdict ----------------------------------------------------------------------
 echo
 echo "[e2e] ===== verdict: $PASS passed, $FAIL failed ====="
 E2E_RC=$FAIL
+# Copy the evidence NOW, not only in the EXIT trap: WSL terminates the
+# distro instance when the last client disconnects and the trap has lost
+# that race on every phase16 run (e2e-logs stayed 10 days old).
+if [ -d "$LAB" ]; then
+  LOGDIR="${E2E_LOGS:-$REPO_ROOT/tests/e2e-logs}"
+  mkdir -p "$LOGDIR"
+  cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LAB"/enroll-*.log "$LOGDIR"/ 2>/dev/null
+fi
 for f in "${FAILED_CHECKS[@]}"; do echo "[e2e]   FAILED: $f"; done
 [ $FAIL -eq 0 ] || exit 1
