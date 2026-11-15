@@ -291,7 +291,10 @@ normalize_server_url() {
     fi
     # Validate BEFORE enrolling (item 7: the enroll must not 404 silently).
     local code
-    code="$(trun 15 curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    # -k: the panel's FIRST-start certificate is self-signed by design
+    # (the agent binary pins it on enroll); this probe only checks that
+    # the endpoint EXISTS — TLS trust is not its job.
+    code="$(trun 15 curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
         "$url/api/agent/enroll" -X POST 2>/dev/null || echo 000)"
     case "$code" in
         400|401|405) ;;   # the endpoint EXISTS (bad/missing body or method) — good
@@ -317,7 +320,7 @@ enroll() {
     display_name="${NAME:-$(hostname 2>/dev/null || printf agent)}"
     [[ -n "$ROLE" ]] && display_name="${display_name} (${ROLE})"
     set +e
-    out="$(trun 90 "$BIN" agent enroll --server "$SERVER" --token "$TOKEN" --name "$display_name" 2>&1)"
+    out="$(trun 90 "$BIN" enroll --server "$SERVER" --token "$TOKEN" --name "$display_name" 2>&1)"
     rc=$?
     set -e
     if [[ $rc -ne 0 ]]; then
@@ -350,7 +353,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=GRE_PANEL_DIR=${AGENT_DIR}
-ExecStart=${BIN} agent run
+ExecStart=${BIN} run
 Restart=always
 RestartSec=5
 
@@ -692,13 +695,22 @@ prereq_step() {
 
 agent_doctor_step() {
     # quantum-agent doctor is session 1's preflight — call it when the
-    # installed binary has it (report, never fatal here).
-    if "$BIN" doctor check >/dev/null 2>&1; then
+    # installed binary has it (report, NEVER fatal here). set +e around the
+    # whole probe: the doctor binary may be the NEWLY INSTALLED upgrade
+    # candidate, and a broken one (corrupt upload, wrong arch) fails to
+    # exec (127 through this pipe under pipefail) — an unguarded failure
+    # killed the installer mid-upgrade BEFORE the restart/rollback logic,
+    # leaving the broken binary at $BIN while the old daemon kept running
+    # from its inode (found by the AGENT-19 systemd installer e2e).
+    set +e
+    local out rc
+    out="$("$BIN" doctor check 2>&1 | tail -3)"
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
         info "quantum-agent doctor check: OK"
     else
-        local out
-        out="$("$BIN" doctor check 2>&1 | tail -3)"
-        warn "quantum-agent doctor check flagged findings: ${out:-no output}"
+        warn "quantum-agent doctor check flagged findings (rc=$rc): ${out:-no output}"
     fi
 }
 
@@ -773,7 +785,17 @@ if [[ $UPGRADE -eq 1 ]]; then
         sleep 2
         if ! systemctl is-active --quiet gre-agent.service; then
             warn "service failed to start — rolling back the binary"
-            [[ -f "${BIN}.bak" ]] && { cp -a "${BIN}.bak" "$BIN"; info "rolled back to the previous binary"; }
+            # A failed cp (binary still held by a live daemon — ETXTBSY)
+            # must not errexit before the recovery restart: if the copy is
+            # refused, the daemon is by definition still running the OLD
+            # (good) binary from its inode, so the restart alone recovers.
+            if [[ -f "${BIN}.bak" ]]; then
+                if cp -a "${BIN}.bak" "$BIN"; then
+                    info "rolled back to the previous binary"
+                else
+                    warn "rollback copy refused (binary held by the old daemon) — restarting the old binary instead"
+                fi
+            fi
             systemctl restart gre-agent.service 2>/dev/null || true
             die "upgrade rolled back: the service still fails to start after rollback"
         fi

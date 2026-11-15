@@ -729,7 +729,7 @@ func agentUnitContent(exe string) string {
 		exe = "\"" + exe + "\""
 	}
 	return "[Unit]\nDescription=Quantum Panel Agent\nAfter=network-online.target\nWants=network-online.target\n\n" +
-		"[Service]\nType=simple\nExecStart=" + exe + " agent run\nRestart=always\nRestartSec=5\n\n" +
+		"[Service]\nType=simple\nExecStart=" + exe + " run\nRestart=always\nRestartSec=5\n\n" +
 		"[Install]\nWantedBy=multi-user.target\n"
 }
 
