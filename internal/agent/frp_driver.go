@@ -130,16 +130,27 @@ func frpValidateParams(p frpParams) error {
 // frpResolveRole decides this end's role. The tunnel's two end names
 // arrive in Instance.LocalServer/RemoteServer — but both ends see the
 // SAME two names (swapped between fields), so they cannot identify self.
-// The robust self-identifier is the agent's own enrollment name: the
-// operator links agents to mesh servers whose names match the enrollment
-// names (the panel's link step is where that alignment is controlled).
+//
+// Self resolution order (R6, phase 17):
+//  1. selfName — DesiredV2.Self.Name, panel-stamped for the RECEIVING
+//     agent (the linked mesh server's name). Authoritative: it removes
+//     the enrollment-name == server-name alignment assumption, since the
+//     panel knows the link even when the names diverge.
+//  2. the agent's own enrollment name (pre-R6 panels omit Self; the
+//     operator links agents to mesh servers whose names match the
+//     enrollment names — the panel's link step controls that alignment).
+//
 // name == server_side → this agent hosts frps; anything else → frpc.
-func frpResolveRole(p frpParams) (string, error) {
-	ident, ok := frpLoadIdentity()
-	if !ok {
-		return "", fmt.Errorf("frp: no controller identity — cannot resolve this end's role (fail closed)")
+func frpResolveRole(p frpParams, selfName string) (string, error) {
+	selfName = strings.TrimSpace(selfName)
+	if selfName == "" {
+		ident, ok := frpLoadIdentity()
+		if !ok {
+			return "", fmt.Errorf("frp: no controller identity — cannot resolve this end's role (fail closed)")
+		}
+		selfName = ident.Name
 	}
-	if strings.TrimSpace(p.ServerSide) == ident.Name {
+	if strings.TrimSpace(p.ServerSide) == selfName {
 		return "server", nil
 	}
 	return "client", nil
@@ -422,7 +433,7 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = d.Stop(inst) // params changed or dead process: clean restart
 	}
 
-	role, err := frpResolveRole(p)
+	role, err := frpResolveRole(p, inst.SelfName)
 	if err != nil {
 		return err
 	}
