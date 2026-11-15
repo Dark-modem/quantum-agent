@@ -498,3 +498,78 @@ func TestWgTwoAgentKeyPersistence(t *testing.T) {
 		t.Fatalf("MTU change must require a restart, got %v", err)
 	}
 }
+
+// TestWgRoleResolutionSelfName (R6, phase 18): the panel-stamped Self.Name
+// is authoritative — it resolves which end listens on the UDP carrier even
+// when the enrollment name differs from the mesh server name, and an empty
+// SelfName (pre-R6 panel) keeps the enrollment-name behavior.
+func TestWgRoleResolutionSelfName(t *testing.T) {
+	p := wgTestParams() // ServerSide: the foreign end name
+	origIdent := frpLoadIdentity
+	t.Cleanup(func() { frpLoadIdentity = origIdent })
+
+	// R6: the enrollment name ("legacy-node") does NOT match the mesh
+	// server name, yet the panel-stamped Self.Name resolves the server end.
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Name: "legacy-node"}, true
+	}
+	if role, err := wgResolveRole(p, "germany"); err != nil || role != engineSideServer {
+		t.Fatalf("self=germany: role=%q err=%v, want server", role, err)
+	}
+	if role, err := wgResolveRole(p, "iran-1"); err != nil || role != engineSideClient {
+		t.Fatalf("self=iran-1: role=%q err=%v, want client", role, err)
+	}
+	// blank Self.Name falls back to the enrollment identity (pre-R6)
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		return agentIdentity{Name: "germany"}, true
+	}
+	if role, err := wgResolveRole(p, "  "); err != nil || role != engineSideServer {
+		t.Fatalf("blank self fallback: role=%q err=%v, want server", role, err)
+	}
+	// no identity AND no SelfName: fail closed
+	frpLoadIdentity = func() (agentIdentity, bool) { return agentIdentity{}, false }
+	if _, err := wgResolveRole(p, ""); err == nil {
+		t.Fatal("missing identity and missing SelfName accepted")
+	}
+}
+
+// TestWgUninstallRemovesKeys (ENGINE-GUIDE item 5, phase 18): Uninstall on
+// idle removes the persisted per-tunnel keypairs — keys survive
+// Stop→Start restarts (the panel's peer_public revision targets the ack'd
+// key) but an IDLE engine leaves zero files behind.
+func TestWgUninstallRemovesKeys(t *testing.T) {
+	withTempConfig(t)
+	cmds, _ := wgSetTestEnv(t)
+	d := NewWgDriver()
+	p := wgTestParams()
+	inst := engine.Instance{TunnelID: "twu", LocalServer: "germany", RemoteServer: "iran",
+		Params: mustJSON(p)}
+	if err := d.Start(context.Background(), inst); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	keyPath := filepath.Join(configDir, "wg", "twu.key")
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key file must exist while the tunnel runs: %v", err)
+	}
+	// Stop→Start (a restart) must KEEP the key: persistence is required.
+	if err := d.Stop(inst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatal("key file must survive Stop→Start (restart persistence)")
+	}
+	if err := d.Start(context.Background(), inst); err != nil {
+		t.Fatalf("restart Start: %v", err)
+	}
+	// Uninstall on idle: keys + dir gone.
+	if err := d.Uninstall(context.Background()); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("key file must be removed by Uninstall on idle, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "wg")); !os.IsNotExist(err) {
+		t.Fatalf("wg key dir must be removed by Uninstall on idle, stat err=%v", err)
+	}
+	_ = cmds
+}
