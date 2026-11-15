@@ -353,7 +353,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment=GRE_PANEL_DIR=${AGENT_DIR}
-ExecStart=${BIN} agent run
+ExecStart=${BIN} run
 Restart=always
 RestartSec=5
 

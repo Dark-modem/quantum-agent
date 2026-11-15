@@ -552,8 +552,12 @@ func TestAgentLifecycleIndependence(t *testing.T) {
 				t.Fatalf("WantedBy=%s, want multi-user.target", val)
 			}
 		case "ExecStart":
-			if !strings.HasSuffix(val, " agent run") {
-				t.Fatalf("ExecStart=%q must run `agent run`", val)
+			// The CLI dispatches on args[0]: `agent run` hits the
+			// unknown-subcommand branch and the unit crash-loops
+			// (found by the AGENT-19 systemd installer e2e). The unit
+			// must invoke the daemon as `<exe> run`.
+			if !strings.HasSuffix(val, " run") {
+				t.Fatalf("ExecStart=%q must run `run` (the daemon dispatches on args[0] — `agent run` is an unknown subcommand)", val)
 			}
 		}
 	}
