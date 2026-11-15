@@ -291,7 +291,10 @@ normalize_server_url() {
     fi
     # Validate BEFORE enrolling (item 7: the enroll must not 404 silently).
     local code
-    code="$(trun 15 curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    # -k: the panel's FIRST-start certificate is self-signed by design
+    # (the agent binary pins it on enroll); this probe only checks that
+    # the endpoint EXISTS — TLS trust is not its job.
+    code="$(trun 15 curl -sk -o /dev/null -w '%{http_code}' --max-time 10 \
         "$url/api/agent/enroll" -X POST 2>/dev/null || echo 000)"
     case "$code" in
         400|401|405) ;;   # the endpoint EXISTS (bad/missing body or method) — good
