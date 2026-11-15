@@ -37,6 +37,9 @@ NS_ALL=("${NS_IRAN[@]}" "${NS_FOREIGN[@]}")
 IP_ALL=("${IP_IRAN[@]}" "${IP_FOREIGN[@]}")
 
 PASS=0; FAIL=0
+# Real script exit status, restored by the EXIT trap (a completed trap
+# otherwise masks `exit 1` with its own last rc — observed phase16).
+E2E_RC=1
 FAILED_CHECKS=()
 PANEL_PID=""; AGENT_PIDS=""
 
@@ -63,17 +66,45 @@ cleanup() {
   sudo pkill -x quantum-panel 2>/dev/null
   for p in $AGENT_PIDS; do sudo ip netns pids "${p}" >/dev/null 2>&1; done
   sudo pkill -f "quantum-agent run" 2>/dev/null
+  # Bridge FIRST, netns second. Deleting a bridge whose ports are the
+  # freshly-orphaned ends of veths from netns deleted moments earlier has
+  # been observed to hang the netlink call and abort this trap mid-way
+  # (phase16: bridge left behind twice) — the settled bridge deletes fine.
+  # timeout() keeps a hang from killing the whole cleanup either way.
+  del_bridge() {
+    timeout 10 sudo ip link del $BR 2>/dev/null
+    if ip link show $BR >/dev/null 2>&1; then
+      sleep 2
+      timeout 10 sudo ip link del $BR 2>/dev/null
+    fi
+    ip link show $BR >/dev/null 2>&1 \
+      && echo "[e2e] WARNING: bridge $BR STILL PRESENT after cleanup" \
+      || echo "[e2e] cleanup: bridge $BR removed"
+  }
+  del_bridge
   for ns in "${NS_ALL[@]}"; do
     sudo ip netns pids "$ns" 2>/dev/null | while read -r p; do kill "$p" 2>/dev/null; done
     sudo ip netns del "$ns" 2>/dev/null
   done
-  sudo ip link del $BR 2>/dev/null
+  # (re-check netns too: a leftover ns would poison the NEXT run)
+  LEFT_NS=0
+  for ns in "${NS_ALL[@]}"; do
+    ip netns list | grep -q "^$ns " && { echo "[e2e] WARNING: netns $ns STILL PRESENT"; LEFT_NS=1; }
+  done
+  [ "$LEFT_NS" = "0" ] && echo "[e2e] cleanup: all lab netns removed"
+  del_bridge
   sudo nft delete table ip quantum-fwd 2>/dev/null
-  sudo iptables -D INPUT -s 10.200.0.0/24 -j ACCEPT 2>/dev/null
-  sudo iptables -D INPUT -i $BR -j ACCEPT 2>/dev/null
-  sudo iptables -D FORWARD -i $BR -o $BR -j ACCEPT 2>/dev/null
-  sudo iptables -D FORWARD -s 10.200.0.0/24 -d 10.200.0.0/24 -j ACCEPT 2>/dev/null
+  # -D removes ONE occurrence per call; earlier aborted runs can leave
+  # duplicates — loop until none remain.
+  while sudo iptables -D INPUT -s 10.200.0.0/24 -j ACCEPT 2>/dev/null; do :; done
+  while sudo iptables -D INPUT -i $BR -j ACCEPT 2>/dev/null; do :; done
+  while sudo iptables -D FORWARD -i $BR -o $BR -j ACCEPT 2>/dev/null; do :; done
+  while sudo iptables -D FORWARD -s 10.200.0.0/24 -d 10.200.0.0/24 -j ACCEPT 2>/dev/null; do :; done
   say "cleanup done"
+  # bash uses the EXIT trap's last command status as the script's exit
+  # status — restore the script's real rc so the lab harness sees failures
+  # (a completed trap otherwise masks `exit 1` as 0; observed phase16).
+  [ "$E2E_RC" -eq 0 ]
 }
 trap cleanup EXIT
 
@@ -141,7 +172,11 @@ sudo iptables -I FORWARD 1 -s 10.200.0.0/24 -d 10.200.0.0/24 -j ACCEPT 2>/dev/nu
 
 # 2. panel ------------------------------------------------------------------
 say "starting the real panel..."
-export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS
+# GRE_PANEL_HTTP_BIND: the panel's plain-HTTP listener defaults to
+# 127.0.0.1 (cleartext-login hardening) — the netns agents reach the panel
+# over the bridge, so this lab needs the documented container/unit escape
+# hatch. Scope: this lab run only; the lab subnet is firewalled in above.
+export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS GRE_PANEL_HTTP_BIND=0.0.0.0
 mkdir -p $LAB/panel
 # Pin the port BEFORE first start: the panel's preferred port (7777) is
 # held by a boot-time process on this machine and the panel's auto-switch
@@ -526,13 +561,30 @@ PYEOF
 # delta between the two = the measured split.
 # The counters reach the store only on the NEXT heartbeat (30 s cadence,
 # 5 s sample throttle) — the harness polls, never assumes.
-wait_usage() { # wait_usage BEFORE_SNAPSHOT — poll until the totals grow past the snapshot
-  local before="$1" deadline=$(( $(date +%s) + 50 )) sum
+wait_usage() { # wait_usage BEFORE_SNAPSHOT — poll until the totals grow past
+  # the snapshot AND then hold STILL across one full heartbeat cadence.
+  # The counters reach the store on the NEXT heartbeat (30 s cadence, 5 s
+  # sample throttle); the first growth-carrying heartbeat can hold a
+  # mid-send partial window, and one agent's heartbeat can lag another's by
+  # a full cadence (phase16: 12/88 and 0/100 splits measured on lagging
+  # store counters while the kernel map was verifiably correct). Polling
+  # to stability measures the TRUE final split; a genuinely broken split
+  # stays broken across samples, so this cannot mask a real failure.
+  local before="$1" deadline=$(( $(date +%s) + 150 )) sum prev="" grew=0
   while [ $(date +%s) -lt $deadline ]; do
     sum=$(fake_tunnel_usage | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)
-    [ -n "$sum" ] && [ "$sum" -gt "$before" ] && return 0
+    if [ -n "$sum" ] && [ "$sum" -gt "$before" ]; then
+      grew=1
+      if [ -n "$prev" ] && [ "$sum" = "$prev" ]; then
+        return 0 # unchanged across a 31 s gap: the window is complete
+      fi
+      prev=$sum
+      sleep 31
+      continue
+    fi
     sleep 3
   done
+  [ "$grew" = "1" ] && return 0
   return 1
 }
 fake_tunnel_usage() { # → "tunnel_key:payload_rx ..." for ir-drak-1's fake tunnels
@@ -771,7 +823,11 @@ PANEL_DEATH_FAILOVER_TIME=$DT4
 
 # 11. panel restart: re-sync without a revision storm -------------------------
 say "panel restart..."
-export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS
+# GRE_PANEL_HTTP_BIND: the panel's plain-HTTP listener defaults to
+# 127.0.0.1 (cleartext-login hardening) — the netns agents reach the panel
+# over the bridge, so this lab needs the documented container/unit escape
+# hatch. Scope: this lab run only; the lab subnet is firewalled in above.
+export GRE_PANEL_DIR=$LAB/panel GRE_PANEL_PASSWORD=$PANEL_PASS GRE_PANEL_HTTP_BIND=0.0.0.0
 $LAB/quantum-panel >> $LAB/panel.log 2>&1 &
 PANEL_PID=$!
 LIVE=""
@@ -834,10 +890,28 @@ if [ "$WT" -gt 0 ] && [ "$WP1" -ge 28 ] && [ "$WP1" -le 32 ]; then
   ok "distribution followed the weight change (${WP1}%/$((100-WP1))% of $WT bytes — want 30/70)"
 else
   bad "distribution did not follow the weight change (hz-fra-1=${W1:-0} hz-fra-2=${W2:-0} of $WT — want ~30/70)"
+  # Diagnose (never mask): a portless map element (`0-29 : IP . 0`) passes
+  # the re-render grep but the kernel no-ops it — conns fall through to
+  # the local listener, connect_ok stays 10000, sinks count 0. Dump the
+  # live ruleset + the agent's own runtime view for post-mortem.
+  echo "[e2e] nft table at failure:"
+  nft_map | grep -E 'map|dnat|elements' | head -8 | sed 's/^/[e2e]   /'
+  echo "[e2e] agent runtime view:"
+  sudo ip netns exec q-ir-drak-1 env GRE_PANEL_DIR=$LAB/agents/ir-drak-1 \
+    $LAB/quantum-agent balancer status 2>/dev/null | head -30 | sed 's/^/[e2e]   /'
 fi
 
 # verdict ----------------------------------------------------------------------
 echo
 echo "[e2e] ===== verdict: $PASS passed, $FAIL failed ====="
+E2E_RC=$FAIL
+# Copy the evidence NOW, not only in the EXIT trap: WSL terminates the
+# distro instance when the last client disconnects and the trap has lost
+# that race on every phase16 run (e2e-logs stayed 10 days old).
+if [ -d "$LAB" ]; then
+  LOGDIR="${E2E_LOGS:-$REPO_ROOT/tests/e2e-logs}"
+  mkdir -p "$LOGDIR"
+  cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LAB"/enroll-*.log "$LOGDIR"/ 2>/dev/null
+fi
 for f in "${FAILED_CHECKS[@]}"; do echo "[e2e]   FAILED: $f"; done
 [ $FAIL -eq 0 ] || exit 1
