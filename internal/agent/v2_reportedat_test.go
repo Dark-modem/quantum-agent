@@ -17,7 +17,13 @@ import (
 // TestAgentReportV2ReportedAtPresent: the builder stamps ReportedAt from
 // the (injectable) agent clock on EVERY v2 report — the healthy path and
 // the runtime-error path alike. Clock-injected: no sleeps, no flakiness.
+// The lazy runtime the builder builds must be torn down (resetV2Runtime
+// cleanup), like every other runtime-touching test: leaving it alive
+// pinned a registry built WITHOUT the next test's fake driver (found by
+// the WSL full suite — TestApplyDesiredV2StartsTunnelsAndAcks then saw
+// `unknown engine: "fake"`).
 func TestAgentReportV2ReportedAtPresent(t *testing.T) {
+	t.Cleanup(resetV2Runtime)
 	fixed := time.Unix(1796479255, 0)
 	old := agentReportClock
 	agentReportClock = func() time.Time { return fixed }
