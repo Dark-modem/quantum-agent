@@ -80,13 +80,28 @@ func wgValidateParams(p wgParams) error {
 	return nil
 }
 
-// wgResolveRole resolves this end's role through the enrollment name.
-func wgResolveRole(p wgParams) (engineSide, error) {
-	ident, ok := frpLoadIdentity()
-	if !ok {
-		return "", fmt.Errorf("wg: no controller identity — cannot resolve this end's role (fail closed)")
+// wgResolveRole resolves this end's role (which end listens on the UDP
+// carrier). Self resolution order (R6, phase 18):
+//  1. selfName — DesiredV2.Self.Name, panel-stamped for the RECEIVING
+//     agent (the linked mesh server's name). Authoritative: it removes
+//     the enrollment-name == server-name alignment assumption, since the
+//     panel knows the link even when the names diverge.
+//  2. the agent's own enrollment name (pre-R6 panels omit Self; the
+//     operator links agents to mesh servers whose names match the
+//     enrollment names — the panel's link step controls that alignment).
+//
+// name == server_side → this end listens on the carrier; anything else
+// dials out.
+func wgResolveRole(p wgParams, selfName string) (engineSide, error) {
+	selfName = strings.TrimSpace(selfName)
+	if selfName == "" {
+		ident, ok := frpLoadIdentity()
+		if !ok {
+			return "", fmt.Errorf("wg: no controller identity — cannot resolve this end's role (fail closed)")
+		}
+		selfName = ident.Name
 	}
-	if strings.TrimSpace(p.ServerSide) == ident.Name {
+	if strings.TrimSpace(p.ServerSide) == selfName {
 		return engineSideServer, nil
 	}
 	return engineSideClient, nil
@@ -247,7 +262,7 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 	}
 	d.mu.Unlock()
 
-	role, err := wgResolveRole(p)
+	role, err := wgResolveRole(p, inst.SelfName)
 	if err != nil {
 		return err
 	}
@@ -608,6 +623,11 @@ func wgIfaceBytes(iface string) (uint64, uint64, bool) {
 }
 
 // Uninstall implements engine.Driver: remove every interface + state.
+// The engine is IDLE here (the Manager calls it after the last instance
+// stopped): the persisted per-tunnel keypairs go too — keys must survive
+// Stop→Start restarts (the panel's peer_public revision targets the ack'd
+// key), but an idle engine leaves zero files behind (ENGINE-GUIDE
+// production checklist item 5).
 func (d *WgDriver) Uninstall(ctx context.Context) error {
 	d.mu.Lock()
 	ids := make([]string, 0, len(d.runs))
@@ -617,7 +637,10 @@ func (d *WgDriver) Uninstall(ctx context.Context) error {
 	d.mu.Unlock()
 	for _, id := range ids {
 		_ = d.Stop(engine.Instance{TunnelID: id})
+		_ = os.Remove(filepath.Join(configDir, "wg", id+".key"))
 	}
+	// remove the key dir when empty (never anyone else's files)
+	_ = os.Remove(filepath.Join(configDir, "wg"))
 	return nil
 }
 
