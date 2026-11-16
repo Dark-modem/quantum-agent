@@ -132,6 +132,13 @@ func agentCheckTLSPin(ident *agentIdentity, got string) error {
 	return nil
 }
 
+// agentPanelReadLimit caps one inbound panel frame (phase-21 ingest
+// audit): the panel channel previously had no read limit, so a hostile
+// panel could stream an unbounded "desired"/"command" frame and exhaust
+// the agent's memory. 8 MiB is far above any legitimate DesiredV2 +
+// hardening-profile document and far below the OOM line.
+const agentPanelReadLimit = 8 << 20
+
 // dialAgentWS dials <server><base_path>/api/agent/ws with the agent auth
 // headers, using standard certificate verification plus TOFU pinning of the
 // leaf certificate as extra defense (the controller may terminate TLS itself
@@ -154,6 +161,11 @@ func dialAgentWS(ident agentIdentity) (agentWS, error) {
 			return nil, err
 		}
 	}
+	// Fail-safe against oversized panel frames (agentPanelReadLimit). The
+	// dial returns the concrete *websocket.Conn (the agentWS interface
+	// exists only for the test doubles), so the limit rides the real
+	// connection; test dialer seams are unaffected.
+	ws.SetReadLimit(agentPanelReadLimit)
 	return ws, nil
 }
 

@@ -202,8 +202,11 @@ func agentUpdateValidateRequest(req agentUpdateRequest, fromController bool) err
 	}
 	// Architecture gate: the artifact must be built for this host's GOARCH.
 	// The controller resolves release artifacts per agent architecture; the
-	// naming convention is part of the approval.
-	if !strings.Contains(req.URL, "linux-"+runtime.GOARCH) {
+	// naming convention is part of the approval. Checked on the URL PATH
+	// (phase-21 ingest audit): a query string carrying "linux-amd64" on a
+	// differently-named path must not pass.
+	u, perr := url.Parse(req.URL)
+	if perr != nil || u.Host == "" || !strings.Contains(u.Path, "linux-"+runtime.GOARCH) {
 		return fmt.Errorf("artifact is not for this architecture (%s)", runtime.GOARCH)
 	}
 	if fromController {

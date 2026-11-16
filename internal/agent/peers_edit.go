@@ -302,8 +302,13 @@ func handlePeersPatch(w http.ResponseWriter, r *http.Request) {
 	// Validate carrier if provided
 	if body.Carrier != "" {
 		c := strings.ToLower(body.Carrier)
-		if c != "direct" && !strings.HasPrefix(c, "fou:") && !strings.HasPrefix(c, "wss:") && c != "fou" && c != "wss" {
-			writeAPIError(w, r, "E-PEER-07", "invalid carrier mode (must be direct, fou:PORT, or wss:PORT)")
+		// fou:/wss: carry a decimal port (the value is applied through the
+		// quantum script's carrier_apply — carrierPortOK keeps anything
+		// beyond a plain port out of that path, phase-21 ingest audit).
+		if c != "direct" && c != "fou" && c != "wss" &&
+			!(strings.HasPrefix(c, "fou:") && carrierPortOK(strings.TrimPrefix(c, "fou:"))) &&
+			!(strings.HasPrefix(c, "wss:") && carrierPortOK(strings.TrimPrefix(c, "wss:"))) {
+			writeAPIError(w, r, "E-PEER-07", "invalid carrier mode (must be direct, fou:PORT, or wss:PORT with a decimal port 1-65535)")
 			return
 		}
 	}
