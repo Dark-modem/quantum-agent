@@ -99,10 +99,25 @@ func renderForwardChain(proto string, r forwardRender) string {
 		// reason "portless-target").
 		log.Printf("[nft] forward %s: target %s excluded from the %s rotation: no usable port for a per-target-port map (target port 0, rule target_port %d)", r.ID, t.TunnelID, proto, r.TargetPort)
 	}
+	// Phase-21 ingest guard (defense in depth): the balancer's tick
+	// refuses non-IPv4 targets before they reach this renderer, but the
+	// transaction is applied as root — the renderer independently refuses
+	// to write anything but a parsed IPv4 literal as a DNAT target.
+	safeKept := kept[:0]
+	for _, t := range kept {
+		if !forwardTargetIPValid(t.IP) {
+			log.Printf("[nft] forward %s: target %s excluded from the %s rotation: %q is not an IPv4 address", r.ID, t.TunnelID, proto, t.IP)
+			continue
+		}
+		safeKept = append(safeKept, t)
+	}
+	kept = safeKept
 	if len(kept) == 0 {
-		// Every target was port-less in what must be a ported map: render
-		// the fail-fast pass-through (defensive; forwardUsableTargets
-		// keeps at least one target whenever Targets is non-empty).
+		// Every target was dropped (all port-less in what must be a ported
+		// map, or none an IPv4 literal): render the fail-fast pass-through
+		// (defensive; forwardUsableTargets keeps at least one target
+		// whenever Targets is non-empty, and the balancer refuses non-IP
+		// targets before they get here).
 		fmt.Fprintf(&b, "  %s dport %d counter return\n", proto, r.ListenPort)
 		b.WriteString(" }\n")
 		return b.String()

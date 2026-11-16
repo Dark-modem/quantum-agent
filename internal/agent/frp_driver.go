@@ -109,11 +109,18 @@ func frpValidateParams(p frpParams) error {
 	if p.RemotePort < 1 || p.RemotePort > 65535 {
 		return fmt.Errorf("frp: remote_port must be 1-65535")
 	}
-	if strings.TrimSpace(p.ServerAddr) == "" {
-		return fmt.Errorf("frp: server_addr required (frps host as seen from the frpc side)")
-	}
-	if strings.TrimSpace(p.LocalAddr) == "" {
-		return fmt.Errorf("frp: local_addr required (Iran-side target host)")
+	// server_addr/local_addr are rendered into the TOML config with plain
+	// quoting: a quote, backslash or newline would inject configuration
+	// structure beyond the schema the panel is allowed to deliver (extra
+	// proxies/visitors, transport overrides). Both must be 1-128 TOML-safe
+	// chars — the same discipline the other TOML-rendering drivers apply
+	// (phase-21 ingest audit).
+	for _, a := range []struct{ label, v string }{
+		{"server_addr", p.ServerAddr}, {"local_addr", p.LocalAddr},
+	} {
+		if strings.TrimSpace(a.v) == "" || len(a.v) > 128 || strings.ContainsAny(a.v, "\"'\n\r\\ \t") {
+			return fmt.Errorf("frp: %s must be 1-128 TOML-safe chars (no quotes, backslash or whitespace)", a.label)
+		}
 	}
 	if p.LocalPort < 1 || p.LocalPort > 65535 {
 		return fmt.Errorf("frp: local_port must be 1-65535")

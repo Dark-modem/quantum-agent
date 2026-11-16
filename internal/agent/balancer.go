@@ -338,6 +338,14 @@ func (b *forwardBalancer) tick() balTickReport {
 				rep.Errors = append(rep.Errors, fmt.Sprintf("forward %s: %v", fr.ID, perr))
 				continue
 			}
+			if !forwardTargetIPValid(host) {
+				// Hostile/typo target: the nft transaction is applied as
+				// root and must never carry a string the panel controls
+				// (a crafted non-IP value could close the map braces and
+				// inject arbitrary rules). Refuse the rule per-entry.
+				rep.Errors = append(rep.Errors, fmt.Sprintf("forward %s: target %q is not an IPv4 address; refusing", fr.ID, fr.Target))
+				continue
+			}
 			rules = append(rules, forwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto,
 				Targets: []balTarget{{TunnelID: "static:" + fr.ID, IP: host, Port: port, Weight: 1}}})
 			runtime.Targets = append(runtime.Targets, "static:"+fr.ID)
@@ -372,6 +380,14 @@ func (b *forwardBalancer) tick() balTickReport {
 			fa, hasAddr := forwardAddressOf(b.mgr, b.reg, st)
 			if !hasAddr || fa.host == "" {
 				diag(fr.ID, tid, "no-forward-address", h, nil, w)
+				continue
+			}
+			if !forwardTargetIPValid(fa.host) {
+				// The driver's forward address comes from engine_params
+				// (panel-delivered). Only an IPv4 literal may reach the nft
+				// renderer (table ip DNAT target); anything else is skipped
+				// per-target — never rendered, never trusted.
+				diag(fr.ID, tid, "invalid-target", h, &fa, w)
 				continue
 			}
 			diag(fr.ID, tid, "selected", h, &fa, w)
@@ -562,6 +578,17 @@ func orDefault(v, def int) int {
 		return v
 	}
 	return def
+}
+
+// forwardTargetIPValid reports whether host may appear as a DNAT target
+// in the nft transaction: the ruleset is `table ip`, so only an IPv4
+// literal is ever valid — and requiring a parsed literal guarantees no
+// panel-controlled string (spaces, semicolons, braces, quotes) can reach
+// the rendered script. Hostnames were never usable as dnat targets in
+// table ip; refusing them is fail-closed, not a behavior change.
+func forwardTargetIPValid(host string) bool {
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.To4() != nil
 }
 
 // writeTempFile is a small helper (0600, agent temp dir).

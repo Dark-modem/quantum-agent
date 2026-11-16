@@ -523,4 +523,67 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	}
 	t.Logf("PASS failback (post window): t1 re-admitted (DetectedUp=%v — may have been consumed by the balancer's own loop), weighted map restored, A receiving again (%d sticky sources)",
 		upRep.DetectedUp, stickyAfter)
+
+	// AGENT-21 hostile leg (phase-21 ingest audit): panel-controlled
+	// target strings must never reach the REAL kernel nft transaction
+	// (applied as root inside this netns). A static rule with a hostile
+	// Target, a query-smuggle, an IPv6 target (table ip), and a group
+	// rule whose DRIVER forward address is hostile — every one refused
+	// or skipped, the applied scripts clean, and the real nft accepted
+	// what was applied (the pass-through seam returned nil).
+	t.Run("hostile-targets", func(t *testing.T) {
+		scriptMu.Lock()
+		n0 := len(scripts)
+		scriptMu.Unlock()
+		fake.SetForwardAddress("t1", "10.208.0.2; flush ruleset", balLabPortA)
+		hostileDoc := protocol.DesiredV2{
+			Revision: "agent21-hostile",
+			Balancing: &protocol.BalancingPolicy{
+				HealthCheck: protocol.HealthCheckParams{IntervalS: 1, TimeoutMS: 200, Probe: "engine"},
+			},
+			TargetGroups: []protocol.TargetGroup{{ID: "grp-lab", TopologyID: "topo-lab"}},
+			Forwards: []protocol.ForwardRule{
+				{ID: "fw-evil-static", ListenPort: balLabPort + 1, Proto: "tcp", Target: "10.208.0.2; flush ruleset", TargetPort: balLabPortA},
+				{ID: "fw-evil-query", ListenPort: balLabPort + 2, Proto: "tcp", Target: "$(touch /tmp/q21)", TargetPort: balLabPortA},
+				{ID: "fw-evil-v6", ListenPort: balLabPort + 3, Proto: "tcp", Target: "[2001:db8::1]:15901", TargetPort: balLabPortA},
+				{ID: "fw-evil-driver", ListenPort: balLabPort + 4, Proto: "tcp", TargetGroup: "grp-lab"},
+			},
+		}
+		bal.Reconcile(&hostileDoc)
+		rep := bal.tick()
+		scriptMu.Lock()
+		applied := append([]string(nil), scripts[n0:]...)
+		scriptMu.Unlock()
+		for _, s := range applied {
+			// Injection payloads must never appear. ("evil" DOES appear —
+			// inside the chain name derived from the rule ID by chainID's
+			// sanitizing map; an ID is never a DNAT target.)
+			for _, bad := range []string{"flush", "touch", "db8"} {
+				if strings.Contains(s, bad) {
+					t.Fatalf("hostile target leaked into a REAL kernel-applied script:\n%s", s)
+				}
+			}
+		}
+		for _, rule := range []string{"fw-evil-static", "fw-evil-query", "fw-evil-v6"} {
+			found := false
+			for _, e := range rep.Errors {
+				if strings.Contains(e, rule) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("rule %s must be refused with an error (rep.Errors=%v)", rule, rep.Errors)
+			}
+		}
+		sawInvalid := false
+		for _, tg := range rep.Targets {
+			if tg.Tunnel == "t1" && tg.Reason == "invalid-target" {
+				sawInvalid = true
+			}
+		}
+		if !sawInvalid {
+			t.Fatalf("the hostile driver forward address must surface as invalid-target (diag %+v)", rep.Targets)
+		}
+		t.Logf("PASS hostile-targets: 3 static rules refused + driver address skipped; %d kernel-applied script(s) clean", len(applied))
+	})
 }

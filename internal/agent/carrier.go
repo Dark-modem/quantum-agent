@@ -243,8 +243,8 @@ func handleCarrierPost(w http.ResponseWriter, r *http.Request) {
 	switch act {
 	case "set_mode", "set-mode":
 		m := strings.TrimSpace(req.Mode)
-		if m != "direct" && !strings.HasPrefix(m, "wss") {
-			writeAPIError(w, r, "E-ACTION-01", "invalid mode: want direct or wss:PORT")
+		if m != "direct" && !(m == "wss" || (strings.HasPrefix(m, "wss:") && carrierPortOK(strings.TrimPrefix(m, "wss:")))) {
+			writeAPIError(w, r, "E-ACTION-01", "invalid mode: want direct or wss:PORT (decimal port 1-65535)")
 			return
 		}
 		cfg.Mode = m
@@ -539,6 +539,25 @@ func ensureFrpsUDPListeners() error {
 	return nil
 }
 
+// carrierPortOK reports whether s is a strict decimal port (1-65535). The
+// fou:/wss: remainders are handed to the installed quantum script as ONE
+// argv element, and (legacy) script generations interpolate them into
+// shell lines — only a plain decimal port may ever ride there (phase-21
+// ingest audit: `fou:` used to accept ANY remainder).
+func carrierPortOK(s string) bool {
+	if s == "" || len(s) > 5 {
+		return false
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		n = n*10 + int(s[i]-'0')
+	}
+	return n >= 1 && n <= 65535
+}
+
 // carrierApplicable reports whether t is a carrier applyCarrierMode can switch
 // to live. Backhaul and Bagher are engines, not GRE carriers: quantum.sh
 // carrier_apply has no branch for them and used to rebuild the GRE interface
@@ -546,7 +565,17 @@ func ensureFrpsUDPListeners() error {
 func carrierApplicable(t string) error {
 	t = strings.TrimSpace(t)
 	switch {
-	case t == "direct", strings.HasPrefix(t, "fou:"), t == "wss", strings.HasPrefix(t, "wss:"), isCarrier6(t):
+	case t == "direct", t == "wss", isCarrier6(t):
+		return nil
+	case strings.HasPrefix(t, "fou:"):
+		if !carrierPortOK(strings.TrimPrefix(t, "fou:")) {
+			return fmt.Errorf("carrier %q: fou:PORT needs a decimal port 1-65535", t)
+		}
+		return nil
+	case strings.HasPrefix(t, "wss:"):
+		if !carrierPortOK(strings.TrimPrefix(t, "wss:")) {
+			return fmt.Errorf("carrier %q: wss:PORT needs a decimal port 1-65535", t)
+		}
 		return nil
 	case strings.HasPrefix(t, "frp:"):
 		switch strings.TrimPrefix(t, "frp:") {
@@ -567,6 +596,15 @@ func applyCarrierModeOpts(t string, o carrier6Opts) (string, error) {
 	t = strings.TrimSpace(t)
 	if strings.HasPrefix(t, "backhaul:") || strings.HasPrefix(t, "bagher:") {
 		return "", carrierApplicable(t)
+	}
+	// fou:/wss: targets reach the quantum script (and the legacy GRE
+	// interface rebuild) verbatim: refuse a non-port remainder here —
+	// never hand the script a string the panel controls beyond the
+	// documented shapes (phase-21 ingest audit).
+	if strings.HasPrefix(t, "fou:") || strings.HasPrefix(t, "wss:") {
+		if err := carrierApplicable(t); err != nil {
+			return "", err
+		}
 	}
 	if t != "direct" && !strings.HasPrefix(t, "fou:") && !strings.HasPrefix(t, "wss") && !strings.HasPrefix(t, "frp:") && !isCarrier6(t) {
 		t = cfg.ActiveCarrier
