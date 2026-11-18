@@ -51,10 +51,7 @@ func (d *FRPDriver) ProcessPIDs(inst engine.Instance) []int {
 }
 
 func (d *BackhaulDriver) ProcessPIDs(inst engine.Instance) []int {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	return engineProcPIDs(st)
+	return engineProcPIDs(d.runs.peek(inst.TunnelID))
 }
 
 func (d *ChiselDriver) ProcessPIDs(inst engine.Instance) []int {

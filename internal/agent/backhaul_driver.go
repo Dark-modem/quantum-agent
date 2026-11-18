@@ -21,16 +21,13 @@ package agent
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
@@ -150,30 +147,18 @@ func backhaulResolveRole(p backhaulParams) (string, error) {
 }
 
 type backhaulInstState struct {
-	params  backhaulParams
-	role    string
-	cfg     string
-	binPath string
-	proc    frpProcess
-	stop    chan struct{}
-	mu      sync.Mutex
-}
-
-func (st *backhaulInstState) setProc(p frpProcess) { st.mu.Lock(); st.proc = p; st.mu.Unlock() }
-func (st *backhaulInstState) current() frpProcess {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.proc
+	engineInst
+	params backhaulParams
+	role   string
 }
 
 // BackhaulDriver implements engine.Driver for Backhaul.
 type BackhaulDriver struct {
-	mu   sync.Mutex
-	runs map[string]*backhaulInstState
+	runs *instTable[backhaulInstState]
 }
 
 func NewBackhaulDriver() *BackhaulDriver {
-	return &BackhaulDriver{runs: map[string]*backhaulInstState{}}
+	return &BackhaulDriver{runs: newInstTable[backhaulInstState]()}
 }
 
 func (d *BackhaulDriver) ID() string { return backhaulID }
@@ -251,11 +236,12 @@ func backhaulRenderConfig(role string, p backhaulParams) string {
 	return b.String()
 }
 
-// backhaulParamsEqual compares parsed params (key-order independent).
+// backhaulParamsEqual was the Reload no-op comparison; A1 moved the
+// canonical-JSON compare to the shared engineParamsEqual (the sweep
+// commit deletes this stub).
+
 func backhaulParamsEqual(a, b backhaulParams) bool {
-	ab, _ := json.Marshal(a)
-	bb, _ := json.Marshal(b)
-	return subtle.ConstantTimeCompare(ab, bb) == 1
+	return engineParamsEqual(a, b)
 }
 
 // backhaulEnsureBinary makes the backhaul binary available and returns
@@ -336,9 +322,7 @@ func (d *BackhaulDriver) Start(ctx context.Context, inst engine.Instance) error 
 		return fmt.Errorf("backhaul: invalid tunnel id %q", inst.TunnelID)
 	}
 
-	d.mu.Lock()
-	prev := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
 		if backhaulParamsEqual(prev.params, p) && prev.current() != nil {
 			select {
@@ -372,12 +356,10 @@ func (d *BackhaulDriver) Start(ctx context.Context, inst engine.Instance) error 
 		_ = os.Remove(cfgPath)
 		return err
 	}
-	st := &backhaulInstState{params: p, role: role, cfg: cfgPath, binPath: binPath,
-		proc: proc, stop: make(chan struct{})}
-	d.mu.Lock()
-	d.runs[inst.TunnelID] = st
-	d.mu.Unlock()
-	go d.supervise(st)
+	st := &backhaulInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
+		cfg: cfgPath, binPath: binPath}, params: p, role: role}
+	d.runs.put(inst.TunnelID, st)
+	go engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn)
 	// Wire accounting on the SERVER end only: the carrier port's bytes
 	// are this tunnel's wire view (the client's dial port is shared and
 	// cannot be attributed per instance).
@@ -391,77 +373,43 @@ func (d *BackhaulDriver) Start(ctx context.Context, inst engine.Instance) error 
 	return nil
 }
 
-// backhaulPortOf extracts the port from "host:port" (0 when absent).
+// backhaulPortOf was the local host:port parser; A1 moved it to the
+// shared enginePortOf (byte-identical body; the sweep commit deletes
+// this stub).
+
 func backhaulPortOf(addr string) int {
-	_, port, err := net.SplitHostPort(strings.TrimSpace(addr))
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for i := 0; i < len(port); i++ {
-		if port[i] < '0' || port[i] > '9' {
-			return 0
-		}
-		n = n*10 + int(port[i]-'0')
-		if n > 65535 {
-			return 0
-		}
-	}
-	return n
+	return enginePortOf(addr)
 }
 
-// supervise keeps the instance's process alive until Stop: an unexpected
-// exit restarts with a capped backoff (mirrors the FRP supervisor).
-func (d *BackhaulDriver) supervise(st *backhaulInstState) {
-	engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn)
-}
-
-// Stop implements engine.Driver.
+// Stop implements engine.Driver: the shared teardown order, with the
+// server end's carrier-port accounting rule as the driver-specific hook.
 func (d *BackhaulDriver) Stop(inst engine.Instance) error {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	delete(d.runs, inst.TunnelID)
-	d.mu.Unlock()
+	st := d.runs.take(inst.TunnelID)
 	if st == nil {
 		return nil
 	}
-	close(st.stop)
-	frpProcStop(st.current())
-	_ = os.Remove(st.cfg)
-	if st.role == "server" {
-		if port := backhaulPortOf(st.params.BindAddr); port > 0 {
-			_ = frpWireRulesDel(inst.TunnelID, port, port)
+	engineStopInst(&st.engineInst, func() {
+		if st.role == "server" {
+			if port := backhaulPortOf(st.params.BindAddr); port > 0 {
+				_ = frpWireRulesDel(inst.TunnelID, port, port)
+			}
 		}
-	}
+	})
 	return nil
 }
 
 // Reload implements engine.Driver: equal params are a no-op, anything
 // else is a restart.
 func (d *BackhaulDriver) Reload(inst engine.Instance) error {
-	var p backhaulParams
-	if err := json.Unmarshal(inst.Params, &p); err != nil {
-		return fmt.Errorf("backhaul: engine_params: %w", err)
-	}
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	if st == nil {
-		return fmt.Errorf("backhaul: reload on stopped instance %q", inst.TunnelID)
-	}
-	if backhaulParamsEqual(st.params, p) {
-		return nil
-	}
-	return engine.ErrRestartRequired
+	return engineReload(d.runs, backhaulID, inst.TunnelID, inst.Params,
+		func(st *backhaulInstState) backhaulParams { return st.params }, backhaulParamsEqual)
 }
 
 // Health implements engine.Driver: the process alive, and on the server
 // end (when a web_port is configured) the upstream /stats JSON's
 // tunnelStatus must say the tunnel is connected.
 func (d *BackhaulDriver) Health(inst engine.Instance) engine.Health {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Health{OK: false, Detail: "not running", LatencyMs: -1}
 	}
@@ -518,9 +466,7 @@ func backhaulTunnelStatus(webPort int) (string, error) {
 // endpoint in any release note. Keep Unknown; re-check on the next
 // upstream release.
 func (d *BackhaulDriver) Counters(inst engine.Instance) engine.Counters {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil || st.role != "server" {
 		return engine.Counters{}
 	}
@@ -536,15 +482,8 @@ func (d *BackhaulDriver) Counters(inst engine.Instance) engine.Counters {
 // Uninstall implements engine.Driver: stop everything, remove the binary
 // cache + config dir (idle engines leave zero processes and zero files).
 func (d *BackhaulDriver) Uninstall(ctx context.Context) error {
-	d.mu.Lock()
-	ids := make([]string, 0, len(d.runs))
-	for id := range d.runs {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-	for _, id := range ids {
+	engineUninstallAll(d.runs, func(id string) {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-	}
-	_ = os.RemoveAll(backhaulEngineDir())
+	}, backhaulEngineDir())
 	return nil
 }
