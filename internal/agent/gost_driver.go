@@ -38,7 +38,6 @@ package agent
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -48,7 +47,6 @@ import (
 	"runtime"
 
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
@@ -126,31 +124,22 @@ func gostResolveRole(p gostParams) (string, error) {
 	return "client", nil
 }
 
+// gostInstState is one RUNNING instance's state. The proc/stop/binPath
+// base rides the shared engineInst (A1); cfg stays empty (args-form —
+// no config file is written or removed).
 type gostInstState struct {
-	params  gostParams
-	role    string
-	cfg     string // unused (args-form); kept for symmetry
-	binPath string
-	proc    frpProcess
-	stop    chan struct{}
-	mu      sync.Mutex
-}
-
-func (st *gostInstState) setProc(p frpProcess) { st.mu.Lock(); st.proc = p; st.mu.Unlock() }
-func (st *gostInstState) current() frpProcess {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.proc
+	engineInst
+	params gostParams
+	role   string
 }
 
 // GostDriver implements engine.Driver for gost v3.
 type GostDriver struct {
-	mu   sync.Mutex
-	runs map[string]*gostInstState
+	runs *instTable[gostInstState]
 }
 
 func NewGostDriver() *GostDriver {
-	return &GostDriver{runs: map[string]*gostInstState{}}
+	return &GostDriver{runs: newInstTable[gostInstState]()}
 }
 
 func (d *GostDriver) ID() string { return gostID }
@@ -171,15 +160,7 @@ func (d *GostDriver) Validate(params json.RawMessage) error {
 }
 
 func gostEngineDir() string {
-	return filepath.Join(configDir, "engines", gostID)
-}
-
-func gostCacheHit(dir, sha256Hex string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "artifact.sha256"))
-	if err != nil || !strings.EqualFold(strings.TrimSpace(string(data)), sha256Hex) {
-		return false
-	}
-	return fileExists(filepath.Join(dir, "gost"))
+	return engineEngineDir(gostID)
 }
 
 // gostEnsureBinary: manifest-first (engine "gost"), pinned fallback.
@@ -188,7 +169,7 @@ func gostEnsureBinary(ctx context.Context, p gostParams) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("gost: no engine artifact signing key pinned in this build (fail closed)")
 	}
-	if _, pinnedSHA, _, pinErr := p.gostArtifactPin(); pinErr == nil && gostCacheHit(gostBinDir(p.Version), pinnedSHA) {
+	if _, pinnedSHA, _, pinErr := p.gostArtifactPin(); pinErr == nil && engineCacheHit(gostBinDir(p.Version), pinnedSHA, []string{"gost"}) {
 		return gostBinDir(p.Version), nil
 	}
 	ident, ok := frpLoadIdentity()
@@ -205,7 +186,7 @@ func gostEnsureBinary(ctx context.Context, p gostParams) (string, error) {
 		downloadURL = engineManifestFileURL(ident, name)
 	}
 	dir := gostBinDir(p.Version)
-	if gostCacheHit(dir, sha256Hex) {
+	if engineCacheHit(dir, sha256Hex, []string{"gost"}) {
 		return dir, nil
 	}
 	body, err := frpFetchArtifact(ctx, downloadURL)
@@ -221,7 +202,7 @@ func gostEnsureBinary(ctx context.Context, p gostParams) (string, error) {
 	if err := engineExtractTarball(body, dir, map[string]bool{"gost": true}); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "artifact.sha256"), []byte(sha256Hex), 0o600); err != nil {
+	if err := engineWriteCacheMarker(dir, sha256Hex); err != nil {
 		return "", fmt.Errorf("gost: cache marker: %w", err)
 	}
 	return dir, nil
@@ -258,22 +239,10 @@ func gostArgs(role, transport string, p gostParams) []string {
 	}
 }
 
+// gostPortOf was the local host:port parser; A1 moved it to the shared
+// enginePortOf (byte-identical body; the sweep commit removes the stub).
 func gostPortOf(addr string) int {
-	_, port, err := net.SplitHostPort(strings.TrimSpace(addr))
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for i := 0; i < len(port); i++ {
-		if port[i] < '0' || port[i] > '9' {
-			return 0
-		}
-		n = n*10 + int(port[i]-'0')
-		if n > 65535 {
-			return 0
-		}
-	}
-	return n
+	return enginePortOf(addr)
 }
 
 // Start implements engine.Driver.
@@ -288,9 +257,7 @@ func (d *GostDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if !frpTunnelIDOK(inst.TunnelID) {
 		return fmt.Errorf("gost: invalid tunnel id %q", inst.TunnelID)
 	}
-	d.mu.Lock()
-	prev := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
 		if gostParamsEqual(prev.params, p) && prev.current() != nil {
 			select {
@@ -315,12 +282,12 @@ func (d *GostDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if err != nil {
 		return err
 	}
-	st := &gostInstState{params: p, role: role, binPath: binPath, proc: proc,
-		stop: make(chan struct{})}
-	d.mu.Lock()
-	d.runs[inst.TunnelID] = st
-	d.mu.Unlock()
-	go d.supervise(st)
+	st := &gostInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
+		binPath: binPath}, params: p, role: role}
+	d.runs.put(inst.TunnelID, st)
+	go engineSupervise(st.stop, st, st.binPath, "", func(b, _ string) (frpProcess, error) {
+		return gostSpawn(b, gostArgs(st.role, strings.ToLower(strings.TrimSpace(st.params.Transport)), st.params))
+	})
 	if role == "server" {
 		if port := gostPortOf(p.CarrierAddr); port > 0 {
 			if err := frpWireRulesAdd(inst.TunnelID, port, port); err != nil {
@@ -331,52 +298,32 @@ func (d *GostDriver) Start(ctx context.Context, inst engine.Instance) error {
 	return nil
 }
 
+// gostParamsEqual compares parsed params. A1: delegates to the shared
+// engineParamsEqual.
 func gostParamsEqual(a, b gostParams) bool {
-	ab, _ := json.Marshal(a)
-	bb, _ := json.Marshal(b)
-	return subtle.ConstantTimeCompare(ab, bb) == 1
+	return engineParamsEqual(a, b)
 }
 
-// supervise: capped backoff 2s→15s; Stop closes the stop channel first.
-func (d *GostDriver) supervise(st *gostInstState) {
-	backoff := 2 * time.Second
-	for {
-		select {
-		case <-st.stop:
-			return
-		case <-st.current().Done():
-			select {
-			case <-st.stop:
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < 15*time.Second {
-				backoff *= 2
-			}
-			if proc, err := gostSpawn(st.binPath, gostArgs(st.role,
-				strings.ToLower(strings.TrimSpace(st.params.Transport)), st.params)); err == nil {
-				st.setProc(proc)
-			}
-		}
-	}
-}
+// supervise was the local copy of the capped-backoff supervisor; A1
+// deleted it — Start calls the shared engineSupervise directly (same
+// 2s→15s backoff, same re-rendered args on respawn, Stop closes the
+// stop channel first).
 
-// Stop implements engine.Driver.
+// Stop implements engine.Driver: the shared teardown order (cfg stays
+// empty for the args-form driver — nothing to remove), with the server
+// end's carrier-port accounting rule as the driver-specific hook.
 func (d *GostDriver) Stop(inst engine.Instance) error {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	delete(d.runs, inst.TunnelID)
-	d.mu.Unlock()
+	st := d.runs.take(inst.TunnelID)
 	if st == nil {
 		return nil
 	}
-	close(st.stop)
-	frpProcStop(st.current())
-	if st.role == "server" {
-		if port := gostPortOf(st.params.CarrierAddr); port > 0 {
-			_ = frpWireRulesDel(inst.TunnelID, port, port)
+	engineStopInst(&st.engineInst, func() {
+		if st.role == "server" {
+			if port := gostPortOf(st.params.CarrierAddr); port > 0 {
+				_ = frpWireRulesDel(inst.TunnelID, port, port)
+			}
 		}
-	}
+	})
 	return nil
 }
 
@@ -395,9 +342,7 @@ var gostHealthDial = func(port int) error {
 // connection is live — the dial is the end-to-end signal (warmup gate,
 // item 11), retried 0/300/800ms.
 func (d *GostDriver) Health(inst engine.Instance) engine.Health {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Health{OK: false, Detail: "not running", LatencyMs: -1}
 	}
@@ -435,9 +380,7 @@ func (d *GostDriver) Health(inst engine.Instance) engine.Health {
 // payload stays Unknown (no per-instance machine-readable stats in the
 // OSS v3 binary).
 func (d *GostDriver) Counters(inst engine.Instance) engine.Counters {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil || st.role != "server" {
 		return engine.Counters{}
 	}
@@ -452,34 +395,15 @@ func (d *GostDriver) Counters(inst engine.Instance) engine.Counters {
 
 // Uninstall implements engine.Driver.
 func (d *GostDriver) Uninstall(ctx context.Context) error {
-	d.mu.Lock()
-	ids := make([]string, 0, len(d.runs))
-	for id := range d.runs {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-	for _, id := range ids {
+	engineUninstallAll(d.runs, func(id string) {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-	}
-	_ = os.RemoveAll(gostEngineDir())
+	}, gostEngineDir())
 	return nil
 }
 
 // Reload implements engine.Driver: equal params are a no-op, anything
 // else is a restart (gost has no live reload).
 func (d *GostDriver) Reload(inst engine.Instance) error {
-	var p gostParams
-	if err := json.Unmarshal(inst.Params, &p); err != nil {
-		return fmt.Errorf("gost: engine_params: %w", err)
-	}
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	if st == nil {
-		return fmt.Errorf("gost: reload on stopped instance %q", inst.TunnelID)
-	}
-	if gostParamsEqual(st.params, p) {
-		return nil
-	}
-	return engine.ErrRestartRequired
+	return engineReload(d.runs, gostID, inst.TunnelID, inst.Params,
+		func(st *gostInstState) gostParams { return st.params }, gostParamsEqual)
 }
