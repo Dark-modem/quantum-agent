@@ -1,13 +1,19 @@
 package agent
 
-// engine_common.go — production-shape helpers for NEW engine drivers
-// (Phase 6). These implement the PRODUCTION CHECKLIST items from
-// 00-ADMIN/ENGINE-GUIDE.md as seam-able functions so every new driver
+// engine_common.go — production-shape helpers for the engine drivers
+// (originally Phase 6). These implement the PRODUCTION CHECKLIST items
+// from 00-ADMIN/ENGINE-GUIDE.md as seam-able functions so every driver
 // gets the FRP/Backhaul lessons for free.
 //
-// The existing FRP and Backhaul drivers still carry their own copies of
-// these helpers (listed as technical debt in ENGINE-GUIDE.md) — do NOT
-// refactor them here; new engines only.
+// History note (REFACTOR-A1): this file's original header said the FRP
+// and Backhaul drivers still carried their own copies of these helpers
+// and that new engines only should use them. That debt was paid down in
+// two waves: frp/backhaul first delegated their supervise loops here,
+// and stage A1 (2026-11-18) moved the remaining per-driver boilerplate —
+// the runs table, per-instance stop/proc/cfg state, and the
+// Stop/Reload/Uninstall/params-equal/port-of shapes — into
+// driver_core.go, converting every process driver onto it (wg keeps its
+// live-reload semantics; matrix is stateless by design).
 
 import (
 	"archive/tar"
