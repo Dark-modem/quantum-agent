@@ -45,7 +45,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -158,30 +157,19 @@ func wstServerArgs(p wstParams) []string {
 }
 
 // wstInstState is one RUNNING instance's state (supervisor target).
+// The proc/stop/cfg/binPath base rides the shared engineInst (A1).
 type wstInstState struct {
-	mu      sync.Mutex
-	params  wstParams
-	role    engineSide
-	cfg     string // rendered args file (0600) — ops/forensics, not read back
-	binPath string
-	proc    frpProcess
-	stop    chan struct{}
-}
-
-func (st *wstInstState) setProc(p frpProcess) { st.mu.Lock(); st.proc = p; st.mu.Unlock() }
-func (st *wstInstState) current() frpProcess {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.proc
+	engineInst
+	params wstParams
+	role   engineSide
 }
 
 // WstDriver implements engine.Driver for wstunnel.
 type WstDriver struct {
-	mu   sync.Mutex
-	runs map[string]*wstInstState
+	runs *instTable[wstInstState]
 }
 
-func NewWstDriver() *WstDriver { return &WstDriver{runs: map[string]*wstInstState{}} }
+func NewWstDriver() *WstDriver { return &WstDriver{runs: newInstTable[wstInstState]()} }
 
 func (d *WstDriver) ID() string { return wstID }
 
@@ -215,9 +203,7 @@ func wstEnsureBinary(ctx context.Context, p wstParams) (string, error) {
 	if !ok || strings.TrimSpace(ident.Server) == "" {
 		return "", fmt.Errorf("wstunnel: no controller identity — cannot fetch engine artifact (fail closed)")
 	}
-	name, sha256Hex, sigB64, viaManifest, err := enginePinOrManifest(ctx, ident, wstID,
-		EnginePin{Version: p.Version, Artifact: p.Artifact, SHA256Amd: p.SHA256Amd, SHA256Arm: p.SHA256Arm,
-			SigAmd: p.SigAmd, SigArm: p.SigArm},
+	name, sha256Hex, sigB64, viaManifest, err := engineArtifactPin(ctx, ident, wstID,
 		func() (string, string, string, error) { return p.wstArtifactPin() })
 	if err != nil {
 		return "", err
@@ -249,10 +235,8 @@ func wstEnsureBinary(ctx context.Context, p wstParams) (string, error) {
 	return dir, nil
 }
 
-// wstParamsEqual is the Reload no-op comparison.
-func wstParamsEqual(a, b wstParams) bool {
-	return mustJSON(a) != nil && string(mustJSON(a)) == string(mustJSON(b))
-}
+// wstParamsEqual was the Reload no-op comparison; A1 moved the
+// canonical-JSON compare to the shared engineParamsEqual.
 
 var wstSpawn = func(binPath string, args []string) (frpProcess, error) {
 	cmd := exec.Command(binPath, args...)
@@ -280,11 +264,9 @@ func (d *WstDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if !frpTunnelIDOK(inst.TunnelID) {
 		return fmt.Errorf("wstunnel: invalid tunnel id %q", inst.TunnelID)
 	}
-	d.mu.Lock()
-	prev := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
-		if wstParamsEqual(prev.params, p) && prev.current() != nil {
+		if engineParamsEqual(prev.params, p) && prev.current() != nil {
 			select {
 			case <-prev.current().Done():
 			default:
@@ -320,11 +302,9 @@ func (d *WstDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = os.Remove(cfgPath)
 		return err
 	}
-	st := &wstInstState{params: p, role: role, cfg: cfgPath, binPath: binPath,
-		proc: proc, stop: make(chan struct{})}
-	d.mu.Lock()
-	d.runs[inst.TunnelID] = st
-	d.mu.Unlock()
+	st := &wstInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
+		cfg: cfgPath, binPath: binPath}, params: p, role: role}
+	d.runs.put(inst.TunnelID, st)
 	go engineSupervise(st.stop, st, binPath, "", func(b, _ string) (frpProcess, error) {
 		return wstSpawn(b, args)
 	})
@@ -338,42 +318,28 @@ func (d *WstDriver) Start(ctx context.Context, inst engine.Instance) error {
 	return nil
 }
 
-// Stop implements engine.Driver: stop channel closed BEFORE the kill so
-// the supervisor never resurrects a deliberately stopped process.
+// Stop implements engine.Driver: the shared teardown order (stop channel
+// closed BEFORE the kill so the supervisor never resurrects a
+// deliberately stopped process), with the server end's wire-accounting
+// rule as the driver-specific teardown hook.
 func (d *WstDriver) Stop(inst engine.Instance) error {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	delete(d.runs, inst.TunnelID)
-	d.mu.Unlock()
+	st := d.runs.take(inst.TunnelID)
 	if st == nil {
 		return nil
 	}
-	close(st.stop)
-	frpProcStop(st.current())
-	_ = os.Remove(st.cfg)
-	if st.role == engineSideServer {
-		_ = frpWireRulesDel(inst.TunnelID, st.params.RemotePort, st.params.RemotePort)
-	}
+	engineStopInst(&st.engineInst, func() {
+		if st.role == engineSideServer {
+			_ = frpWireRulesDel(inst.TunnelID, st.params.RemotePort, st.params.RemotePort)
+		}
+	})
 	return nil
 }
 
 // Reload implements engine.Driver: equal params are a no-op, anything
 // else is a restart.
 func (d *WstDriver) Reload(inst engine.Instance) error {
-	var p wstParams
-	if err := json.Unmarshal(inst.Params, &p); err != nil {
-		return fmt.Errorf("wstunnel: engine_params: %w", err)
-	}
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	if st == nil {
-		return fmt.Errorf("wstunnel: reload on stopped instance %q", inst.TunnelID)
-	}
-	if wstParamsEqual(st.params, p) {
-		return nil
-	}
-	return engine.ErrRestartRequired
+	return engineReload(d.runs, wstID, inst.TunnelID, inst.Params,
+		func(st *wstInstState) wstParams { return st.params }, engineParamsEqual[wstParams])
 }
 
 // wstProbeRelay performs the REAL through-the-tunnel probe: dial the
@@ -404,9 +370,7 @@ func wstProbeRelay(port int, timeout time.Duration) error {
 // Health implements engine.Driver: process alive; on the SERVER end the
 // forwarded port must answer THROUGH the tunnel.
 func (d *WstDriver) Health(inst engine.Instance) engine.Health {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Health{OK: false, Detail: "not running", LatencyMs: -1}
 	}
@@ -431,9 +395,7 @@ func (d *WstDriver) Health(inst engine.Instance) engine.Health {
 // per direction from the nftables rules on the forwarded port; payload
 // stays UNKNOWN (wstunnel has no stats API — honest per CANDIDATES).
 func (d *WstDriver) Counters(inst engine.Instance) engine.Counters {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil || st.role != engineSideServer {
 		return engine.Counters{}
 	}
@@ -448,16 +410,9 @@ func (d *WstDriver) Counters(inst engine.Instance) engine.Counters {
 // the binary cache + instance configs + accounting rules. Idle = zero
 // processes, zero files, zero goroutines.
 func (d *WstDriver) Uninstall(ctx context.Context) error {
-	d.mu.Lock()
-	ids := make([]string, 0, len(d.runs))
-	for id := range d.runs {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-	for _, id := range ids {
+	engineUninstallAll(d.runs, func(id string) {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-	}
-	_ = os.RemoveAll(engineEngineDir(wstID))
+	}, engineEngineDir(wstID))
 	return nil
 }
 

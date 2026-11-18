@@ -398,9 +398,7 @@ func TestWstSupervisorRestartsAndStopKeepsItDead(t *testing.T) {
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
-	d.mu.Lock()
-	st := d.runs["t-wst-2"]
-	d.mu.Unlock()
+	st := d.runs.peek("t-wst-2")
 	if st == nil {
 		t.Fatal("no instance state")
 	}
@@ -428,10 +426,7 @@ func TestWstSupervisorRestartsAndStopKeepsItDead(t *testing.T) {
 	if *spawned != 2 {
 		t.Fatalf("stop resurrected the process: spawned=%d", *spawned)
 	}
-	d.mu.Lock()
-	runs := len(d.runs)
-	d.mu.Unlock()
-	if runs != 0 {
+	if runs := d.runs.len(); runs != 0 {
 		t.Fatalf("runs not empty after stop: %d", runs)
 	}
 }
