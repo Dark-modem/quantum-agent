@@ -27,22 +27,15 @@ package agent
 // releases, none of v0.5.0's notes mention an API).
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
@@ -160,32 +153,22 @@ func ratholeResolveRole(p ratholeParams) (string, error) {
 	return "client", nil
 }
 
+// ratholeInstState is one RUNNING instance's state. The proc/stop/cfg/
+// binPath base rides the shared engineInst (A1).
 type ratholeInstState struct {
-	params  ratholeParams
-	role    string
-	iface   string // TOML service name (shared by both ends)
-	cfg     string
-	binPath string
-	proc    frpProcess
-	stop    chan struct{}
-	mu      sync.Mutex
-}
-
-func (st *ratholeInstState) setProc(p frpProcess) { st.mu.Lock(); st.proc = p; st.mu.Unlock() }
-func (st *ratholeInstState) current() frpProcess {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.proc
+	engineInst
+	params ratholeParams
+	role   string
+	iface  string // TOML service name (shared by both ends)
 }
 
 // RatholeDriver implements engine.Driver for rathole.
 type RatholeDriver struct {
-	mu   sync.Mutex
-	runs map[string]*ratholeInstState
+	runs *instTable[ratholeInstState]
 }
 
 func NewRatholeDriver() *RatholeDriver {
-	return &RatholeDriver{runs: map[string]*ratholeInstState{}}
+	return &RatholeDriver{runs: newInstTable[ratholeInstState]()}
 }
 
 func (d *RatholeDriver) ID() string { return ratholeID }
@@ -248,10 +231,10 @@ func ratholeRenderConfig(role, svc string, p ratholeParams, noisePrivB64 string)
 	return b.String()
 }
 
+// ratholeParamsEqual compares parsed params. A1: delegates to the
+// shared engineParamsEqual.
 func ratholeParamsEqual(a, b ratholeParams) bool {
-	ab, _ := json.Marshal(a)
-	bb, _ := json.Marshal(b)
-	return subtle.ConstantTimeCompare(ab, bb) == 1
+	return engineParamsEqual(a, b)
 }
 
 // ratholeEnsureBinary: manifest-first (engine "rathole"), pinned
@@ -261,7 +244,7 @@ func ratholeEnsureBinary(ctx context.Context, p ratholeParams) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("rathole: no engine artifact signing key pinned in this build (fail closed)")
 	}
-	if _, pinnedSHA, _, pinErr := p.ratholeArtifactPin(); pinErr == nil && ratholeCacheHit(ratholeBinDir(p.Version), pinnedSHA) {
+	if _, pinnedSHA, _, pinErr := p.ratholeArtifactPin(); pinErr == nil && engineCacheHit(ratholeBinDir(p.Version), pinnedSHA, []string{"rathole"}) {
 		return ratholeBinDir(p.Version), nil
 	}
 	ident, ok := frpLoadIdentity()
@@ -278,7 +261,7 @@ func ratholeEnsureBinary(ctx context.Context, p ratholeParams) (string, error) {
 		downloadURL = engineManifestFileURL(ident, name)
 	}
 	dir := ratholeBinDir(p.Version)
-	if ratholeCacheHit(dir, sha256Hex) {
+	if engineCacheHit(dir, sha256Hex, []string{"rathole"}) {
 		return dir, nil
 	}
 	body, err := frpFetchArtifact(ctx, downloadURL)
@@ -294,18 +277,29 @@ func ratholeEnsureBinary(ctx context.Context, p ratholeParams) (string, error) {
 	if err := ratholeExtract(body, dir); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "artifact.sha256"), []byte(sha256Hex), 0o600); err != nil {
+	if err := engineWriteCacheMarker(dir, sha256Hex); err != nil {
 		return "", fmt.Errorf("rathole: cache marker: %w", err)
 	}
 	return dir, nil
 }
 
-func ratholeCacheHit(dir, sha256Hex string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "artifact.sha256"))
-	if err != nil || !strings.EqualFold(strings.TrimSpace(string(data)), sha256Hex) {
-		return false
+// ratholeCacheHit was the local cache-marker check; A1 replaced it with
+// the identical engineCacheHit (want = the single rathole binary).
+
+// ratholeExtract unpacks the release tar.gz (the packer repackages the
+// upstream zip into this shape, LICENSE+SOURCE inside): only the regular
+// `rathole` binary installs (0755); directory entries skipped, anything
+// else refused. A1: the local tar-copy is deleted — delegates to the
+// shared engineExtractTarball with the driver error prefix kept (the one
+// textual delta: the missing-binary error now reads
+// `rathole: engine: artifact missing "rathole"` instead of
+// `rathole: artifact missing the rathole binary`; no caller or test
+// matches that string).
+func ratholeExtract(body []byte, dir string) error {
+	if err := engineExtractTarball(body, dir, map[string]bool{"rathole": true}); err != nil {
+		return fmt.Errorf("rathole: %w", err)
 	}
-	return fileExists(filepath.Join(dir, "rathole"))
+	return nil
 }
 
 // ratholeSpawn runs the rathole binary with the config as a POSITIONAL
@@ -322,56 +316,6 @@ var ratholeSpawn = func(binPath, cfgPath string) (frpProcess, error) {
 		done <- cmd.Wait()
 	}()
 	return &frpExecProcess{cmd: cmd, done: done}, nil
-}
-
-// ratholeExtract unpacks the release tar.gz (the packer repackages the
-// upstream zip into this shape, LICENSE+SOURCE inside): only the regular
-// `rathole` binary installs (0755); directory entries skipped, anything
-// else refused.
-func ratholeExtract(body []byte, dir string) error {
-	gz, err := gzip.NewReader(strings.NewReader(string(body)))
-	if err != nil {
-		return fmt.Errorf("rathole: artifact is not gzip: %w", err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	found := false
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("rathole: artifact tar: %w", err)
-		}
-		if hdr.Typeflag == tar.TypeDir {
-			continue
-		}
-		if hdr.Typeflag != tar.TypeReg {
-			return fmt.Errorf("rathole: artifact contains non-regular entry %q", hdr.Name)
-		}
-		if hdr.Size > 256<<20 {
-			return fmt.Errorf("rathole: artifact entry %q too large", hdr.Name)
-		}
-		if filepath.Base(hdr.Name) != "rathole" {
-			continue
-		}
-		if found {
-			return fmt.Errorf("rathole: artifact has duplicate %q", hdr.Name)
-		}
-		data, err := io.ReadAll(io.LimitReader(tr, 256<<20))
-		if err != nil {
-			return fmt.Errorf("rathole: artifact read %q: %w", hdr.Name, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "rathole"), data, 0o755); err != nil {
-			return fmt.Errorf("rathole: install: %w", err)
-		}
-		found = true
-	}
-	if !found {
-		return fmt.Errorf("rathole: artifact missing the rathole binary")
-	}
-	return nil
 }
 
 // ratholeNoiseKeypair: the server's noise X25519 keypair — the same
@@ -402,9 +346,7 @@ func (d *RatholeDriver) Start(ctx context.Context, inst engine.Instance) error {
 		return fmt.Errorf("rathole: invalid tunnel id %q", inst.TunnelID)
 	}
 
-	d.mu.Lock()
-	prev := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
 		if ratholeParamsEqual(prev.params, p) && prev.current() != nil {
 			select {
@@ -448,12 +390,10 @@ func (d *RatholeDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = os.Remove(cfgPath)
 		return err
 	}
-	st := &ratholeInstState{params: p, role: role, iface: svc, cfg: cfgPath,
-		binPath: binPath, proc: proc, stop: make(chan struct{})}
-	d.mu.Lock()
-	d.runs[inst.TunnelID] = st
-	d.mu.Unlock()
-	go d.supervise(st)
+	st := &ratholeInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
+		cfg: cfgPath, binPath: binPath}, params: p, role: role, iface: svc}
+	d.runs.put(inst.TunnelID, st)
+	go engineSupervise(st.stop, st, st.binPath, st.cfg, ratholeSpawn)
 	// Wire accounting on the SERVER end: the carrier port multiplexes the
 	// tunnel's control AND data bytes.
 	if role == "server" {
@@ -491,66 +431,32 @@ func ratholeNoisePrivateKey(tunnelID string) (string, error) {
 	return privB64, nil
 }
 
-// ratholePortOf extracts the port from "host:port" (0 when absent).
+// ratholePortOf was the local host:port parser; A1 moved it to the
+// shared enginePortOf (byte-identical body; the sweep commit removes
+// the stub).
 func ratholePortOf(addr string) int {
-	_, port, err := net.SplitHostPort(strings.TrimSpace(addr))
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for i := 0; i < len(port); i++ {
-		if port[i] < '0' || port[i] > '9' {
-			return 0
-		}
-		n = n*10 + int(port[i]-'0')
-		if n > 65535 {
-			return 0
-		}
-	}
-	return n
+	return enginePortOf(addr)
 }
 
-// supervise: capped backoff 2s→15s; Stop closes the stop channel before
-// killing the process (no resurrection).
-func (d *RatholeDriver) supervise(st *ratholeInstState) {
-	backoff := 2 * time.Second
-	for {
-		select {
-		case <-st.stop:
-			return
-		case <-st.current().Done():
-			select {
-			case <-st.stop:
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < 15*time.Second {
-				backoff *= 2
-			}
-			if proc, err := ratholeSpawn(st.binPath, st.cfg); err == nil {
-				st.setProc(proc)
-			}
-		}
-	}
-}
+// supervise was the local copy of the capped-backoff supervisor; A1
+// deleted it — Start calls the shared engineSupervise directly (same
+// 2s→15s backoff, same respawn via ratholeSpawn(bin, cfg), Stop closes
+// the stop channel before killing the process — no resurrection).
 
-// Stop implements engine.Driver.
+// Stop implements engine.Driver: the shared teardown order, with the
+// server end's carrier-port accounting rule as the driver-specific hook.
 func (d *RatholeDriver) Stop(inst engine.Instance) error {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	delete(d.runs, inst.TunnelID)
-	d.mu.Unlock()
+	st := d.runs.take(inst.TunnelID)
 	if st == nil {
 		return nil
 	}
-	close(st.stop)
-	frpProcStop(st.current())
-	_ = os.Remove(st.cfg)
-	if st.role == "server" {
-		if port := ratholePortOf(st.params.ServerAddr); port > 0 {
-			_ = frpWireRulesDel(inst.TunnelID, port, port)
+	engineStopInst(&st.engineInst, func() {
+		if st.role == "server" {
+			if port := ratholePortOf(st.params.ServerAddr); port > 0 {
+				_ = frpWireRulesDel(inst.TunnelID, port, port)
+			}
 		}
-	}
+	})
 	return nil
 }
 
@@ -559,20 +465,8 @@ func (d *RatholeDriver) Stop(inst engine.Instance) error {
 // rathole has no config reload; the persisted server noise key makes the
 // restart key-stable.
 func (d *RatholeDriver) Reload(inst engine.Instance) error {
-	var p ratholeParams
-	if err := json.Unmarshal(inst.Params, &p); err != nil {
-		return fmt.Errorf("rathole: engine_params: %w", err)
-	}
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	if st == nil {
-		return fmt.Errorf("rathole: reload on stopped instance %q", inst.TunnelID)
-	}
-	if ratholeParamsEqual(st.params, p) {
-		return nil
-	}
-	return engine.ErrRestartRequired
+	return engineReload(d.runs, ratholeID, inst.TunnelID, inst.Params,
+		func(st *ratholeInstState) ratholeParams { return st.params }, ratholeParamsEqual)
 }
 
 // ratholeHealthDial seams the service-port health dial (the integration
@@ -592,9 +486,7 @@ var ratholeHealthDial = func(port int) error {
 // end-to-end signal (the warmup gate, checklist item 11), retried with
 // backoff.
 func (d *RatholeDriver) Health(inst engine.Instance) engine.Health {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Health{OK: false, Detail: "not running", LatencyMs: -1}
 	}
@@ -636,9 +528,7 @@ func (d *RatholeDriver) Health(inst engine.Instance) engine.Health {
 // the tunnel's control AND data bytes); payload stays Unknown (v0.5.0 has
 // no machine-readable stats — verified from the upstream releases).
 func (d *RatholeDriver) Counters(inst engine.Instance) engine.Counters {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil || st.role != "server" {
 		return engine.Counters{}
 	}
@@ -654,37 +544,8 @@ func (d *RatholeDriver) Counters(inst engine.Instance) engine.Counters {
 // Uninstall implements engine.Driver: stop everything, remove the binary
 // cache + config dir; idle engines leave zero processes and zero files.
 func (d *RatholeDriver) Uninstall(ctx context.Context) error {
-	d.mu.Lock()
-	ids := make([]string, 0, len(d.runs))
-	for id := range d.runs {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-	for _, id := range ids {
+	engineUninstallAll(d.runs, func(id string) {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-	}
-	_ = os.RemoveAll(ratholeEngineDir())
+	}, ratholeEngineDir())
 	return nil
-}
-
-// zipEntryBytes extracts a single named file from a zip archive (the
-// upstream release shape — the integration test repackages it into the
-// tar.gz artifact with a directory entry).
-func zipEntryBytes(body []byte, want string) ([]byte, error) {
-	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		return nil, fmt.Errorf("zip: %w", err)
-	}
-	for _, f := range zr.File {
-		if filepath.Base(f.Name) != want || f.FileInfo().IsDir() {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return nil, err
-		}
-		defer rc.Close()
-		return io.ReadAll(io.LimitReader(rc, 256<<20))
-	}
-	return nil, fmt.Errorf("zip: entry %q not found", want)
 }

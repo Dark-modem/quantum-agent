@@ -18,6 +18,7 @@ package agent
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -424,4 +425,27 @@ func TestRatholeIntegration(t *testing.T) {
 		t.Fatalf("post-restart iperf: %v: %s", ferr2, fwd2)
 	}
 	t.Logf("lab-loopback rathole supervisor restart → traffic again: %s", strings.TrimSpace(fwd2))
+}
+
+// zipEntryBytes extracts a single named file from a zip archive (the
+// upstream release shape — this test repackages it into the tar.gz
+// artifact with a directory entry). A1: moved here from rathole_driver.go
+// — it is test-only tooling.
+func zipEntryBytes(body []byte, want string) ([]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return nil, fmt.Errorf("zip: %w", err)
+	}
+	for _, f := range zr.File {
+		if filepath.Base(f.Name) != want || f.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		return io.ReadAll(io.LimitReader(rc, 256<<20))
+	}
+	return nil, fmt.Errorf("zip: entry %q not found", want)
 }
