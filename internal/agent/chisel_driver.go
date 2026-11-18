@@ -35,7 +35,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
@@ -152,30 +151,19 @@ func chiselServerArgs(p chiselParams) []string {
 }
 
 // chiselInstState is one RUNNING instance's state (supervisor target).
+// The proc/stop/cfg/binPath base rides the shared engineInst (A1).
 type chiselInstState struct {
-	mu      sync.Mutex
-	params  chiselParams
-	role    engineSide
-	cfg     string
-	binPath string
-	proc    frpProcess
-	stop    chan struct{}
-}
-
-func (st *chiselInstState) setProc(p frpProcess) { st.mu.Lock(); st.proc = p; st.mu.Unlock() }
-func (st *chiselInstState) current() frpProcess {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.proc
+	engineInst
+	params chiselParams
+	role   engineSide
 }
 
 // ChiselDriver implements engine.Driver for chisel.
 type ChiselDriver struct {
-	mu   sync.Mutex
-	runs map[string]*chiselInstState
+	runs *instTable[chiselInstState]
 }
 
-func NewChiselDriver() *ChiselDriver { return &ChiselDriver{runs: map[string]*chiselInstState{}} }
+func NewChiselDriver() *ChiselDriver { return &ChiselDriver{runs: newInstTable[chiselInstState]()} }
 
 func (d *ChiselDriver) ID() string { return chiselID }
 
@@ -208,9 +196,7 @@ func chiselEnsureBinary(ctx context.Context, p chiselParams) (string, error) {
 	if !ok || strings.TrimSpace(ident.Server) == "" {
 		return "", fmt.Errorf("chisel: no controller identity — cannot fetch engine artifact (fail closed)")
 	}
-	name, sha256Hex, sigB64, viaManifest, err := enginePinOrManifest(ctx, ident, chiselID,
-		EnginePin{Version: p.Version, Artifact: p.Artifact, SHA256Amd: p.SHA256Amd, SHA256Arm: p.SHA256Arm,
-			SigAmd: p.SigAmd, SigArm: p.SigArm},
+	name, sha256Hex, sigB64, viaManifest, err := engineArtifactPin(ctx, ident, chiselID,
 		func() (string, string, string, error) { return p.chiselArtifactPin() })
 	if err != nil {
 		return "", err
@@ -242,9 +228,8 @@ func chiselEnsureBinary(ctx context.Context, p chiselParams) (string, error) {
 	return dir, nil
 }
 
-func chiselParamsEqual(a, b chiselParams) bool {
-	return string(mustJSON(a)) == string(mustJSON(b))
-}
+// chiselParamsEqual was the Reload no-op comparison; A1 moved the
+// canonical-JSON compare to the shared engineParamsEqual.
 
 var chiselSpawn = func(binPath string, args []string) (frpProcess, error) {
 	cmd := exec.Command(binPath, args...)
@@ -270,11 +255,9 @@ func (d *ChiselDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if !frpTunnelIDOK(inst.TunnelID) {
 		return fmt.Errorf("chisel: invalid tunnel id %q", inst.TunnelID)
 	}
-	d.mu.Lock()
-	prev := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
-		if chiselParamsEqual(prev.params, p) && prev.current() != nil {
+		if engineParamsEqual(prev.params, p) && prev.current() != nil {
 			select {
 			case <-prev.current().Done():
 			default:
@@ -309,11 +292,9 @@ func (d *ChiselDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = os.Remove(cfgPath)
 		return err
 	}
-	st := &chiselInstState{params: p, role: role, cfg: cfgPath, binPath: binPath,
-		proc: proc, stop: make(chan struct{})}
-	d.mu.Lock()
-	d.runs[inst.TunnelID] = st
-	d.mu.Unlock()
+	st := &chiselInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
+		cfg: cfgPath, binPath: binPath}, params: p, role: role}
+	d.runs.put(inst.TunnelID, st)
 	go engineSupervise(st.stop, st, binPath, "", func(b, _ string) (frpProcess, error) {
 		return chiselSpawn(b, args)
 	})
@@ -325,40 +306,26 @@ func (d *ChiselDriver) Start(ctx context.Context, inst engine.Instance) error {
 	return nil
 }
 
-// Stop implements engine.Driver.
+// Stop implements engine.Driver: the shared teardown order, with the
+// server end's wire-accounting rule as the driver-specific hook.
 func (d *ChiselDriver) Stop(inst engine.Instance) error {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	delete(d.runs, inst.TunnelID)
-	d.mu.Unlock()
+	st := d.runs.take(inst.TunnelID)
 	if st == nil {
 		return nil
 	}
-	close(st.stop)
-	frpProcStop(st.current())
-	_ = os.Remove(st.cfg)
-	if st.role == engineSideServer {
-		_ = frpWireRulesDel(inst.TunnelID, st.params.RemotePort, st.params.RemotePort)
-	}
+	engineStopInst(&st.engineInst, func() {
+		if st.role == engineSideServer {
+			_ = frpWireRulesDel(inst.TunnelID, st.params.RemotePort, st.params.RemotePort)
+		}
+	})
 	return nil
 }
 
-// Reload implements engine.Driver.
+// Reload implements engine.Driver: equal params are a no-op, anything
+// else is a restart.
 func (d *ChiselDriver) Reload(inst engine.Instance) error {
-	var p chiselParams
-	if err := json.Unmarshal(inst.Params, &p); err != nil {
-		return fmt.Errorf("chisel: engine_params: %w", err)
-	}
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	if st == nil {
-		return fmt.Errorf("chisel: reload on stopped instance %q", inst.TunnelID)
-	}
-	if chiselParamsEqual(st.params, p) {
-		return nil
-	}
-	return engine.ErrRestartRequired
+	return engineReload(d.runs, chiselID, inst.TunnelID, inst.Params,
+		func(st *chiselInstState) chiselParams { return st.params }, engineParamsEqual[chiselParams])
 }
 
 // chiselProbeRelay performs the REAL through-the-tunnel probe (same
@@ -385,9 +352,7 @@ func chiselProbeRelay(port int, timeout time.Duration) error {
 // Health implements engine.Driver: process alive; on the SERVER end the
 // reverse port must answer THROUGH the tunnel.
 func (d *ChiselDriver) Health(inst engine.Instance) engine.Health {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Health{OK: false, Detail: "not running", LatencyMs: -1}
 	}
@@ -412,9 +377,7 @@ func (d *ChiselDriver) Health(inst engine.Instance) engine.Health {
 // per direction from the nftables rules on the reverse port; payload
 // UNKNOWN (chisel has no stats API — honest per CANDIDATES).
 func (d *ChiselDriver) Counters(inst engine.Instance) engine.Counters {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil || st.role != engineSideServer {
 		return engine.Counters{}
 	}
@@ -427,16 +390,9 @@ func (d *ChiselDriver) Counters(inst engine.Instance) engine.Counters {
 
 // Uninstall implements engine.Driver.
 func (d *ChiselDriver) Uninstall(ctx context.Context) error {
-	d.mu.Lock()
-	ids := make([]string, 0, len(d.runs))
-	for id := range d.runs {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-	for _, id := range ids {
+	engineUninstallAll(d.runs, func(id string) {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-	}
-	_ = os.RemoveAll(engineEngineDir(chiselID))
+	}, engineEngineDir(chiselID))
 	return nil
 }
 
