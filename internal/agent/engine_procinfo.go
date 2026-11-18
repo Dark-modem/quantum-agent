@@ -44,10 +44,7 @@ func engineProcPIDs(st engineProcState) []int {
 // ---- ProcessInfoer (one method per process driver) --------------------
 
 func (d *FRPDriver) ProcessPIDs(inst engine.Instance) []int {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	return engineProcPIDs(st)
+	return engineProcPIDs(d.runs.peek(inst.TunnelID))
 }
 
 func (d *BackhaulDriver) ProcessPIDs(inst engine.Instance) []int {

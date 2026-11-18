@@ -25,7 +25,6 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,7 +34,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -261,38 +259,22 @@ func frpProcStop(p frpProcess) {
 // goroutine (one per RUNNING instance; none when idle) restarts the
 // process if it dies unexpectedly — the engine Manager only reconciles
 // on desired-state changes and boot, so without it a killed frp process
-// would stay dead until the next panel push.
+// would stay dead until the next panel push. The proc/stop/cfg/binPath
+// base rides the shared engineInst (A1).
 type frpInstState struct {
-	params  frpParams
-	role    string
-	cfg     string
-	binPath string
-	proc    frpProcess
-	stop    chan struct{}
-	mu      sync.Mutex
-}
-
-func (st *frpInstState) setProc(p frpProcess) {
-	st.mu.Lock()
-	st.proc = p
-	st.mu.Unlock()
-}
-
-func (st *frpInstState) current() frpProcess {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.proc
+	engineInst
+	params frpParams
+	role   string
 }
 
 // FRPDriver implements engine.Driver over frps/frpc.
 type FRPDriver struct {
-	mu   sync.Mutex
-	runs map[string]*frpInstState // tunnelID -> state
+	runs *instTable[frpInstState] // tunnelID -> state
 }
 
 // NewFRPDriver returns the FRP engine driver.
 func NewFRPDriver() *FRPDriver {
-	return &FRPDriver{runs: map[string]*frpInstState{}}
+	return &FRPDriver{runs: newInstTable[frpInstState]()}
 }
 
 var (
@@ -391,9 +373,7 @@ func frpRenderConfig(tunnelID, role string, p frpParams) string {
 // explicit remote_port always wins over the rule's listen port (the
 // frps listener is bound to it).
 func (d *FRPDriver) ForwardAddress(inst engine.Instance) (string, int, bool) {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return "", 0, false
 	}
@@ -426,9 +406,7 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		return fmt.Errorf("frp: invalid tunnel id %q", inst.TunnelID)
 	}
 
-	d.mu.Lock()
-	prev := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
 		if frpParamsEqual(prev.params, p) && prev.proc != nil {
 			select {
@@ -466,11 +444,9 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = os.Remove(cfgPath)
 		return err
 	}
-	st := &frpInstState{params: p, role: role, cfg: cfgPath, binPath: binPath,
-		proc: proc, stop: make(chan struct{})}
-	d.mu.Lock()
-	d.runs[inst.TunnelID] = st
-	d.mu.Unlock()
+	st := &frpInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
+		cfg: cfgPath, binPath: binPath}, params: p, role: role}
+	d.runs.put(inst.TunnelID, st)
 	go d.supervise(inst.TunnelID, st) // one goroutine per RUNNING instance
 	// Wire accounting is installed on the server side only (the client's
 	// control port is shared across instances and cannot be attributed).
@@ -493,49 +469,32 @@ func (d *FRPDriver) supervise(tunnelID string, st *frpInstState) {
 }
 
 // Stop implements engine.Driver: terminate the process, drop the config
-// and the wire-accounting rule. Stopping a non-running instance is a
-// no-op.
+// and the wire-accounting rule (the shared teardown order; the server
+// end's allow-range rule is the driver-specific hook). Stopping a
+// non-running instance is a no-op.
 func (d *FRPDriver) Stop(inst engine.Instance) error {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	delete(d.runs, inst.TunnelID)
-	d.mu.Unlock()
+	st := d.runs.take(inst.TunnelID)
 	if st == nil {
 		return nil
 	}
-	close(st.stop)
-	frpProcStop(st.current())
-	_ = os.Remove(st.cfg)
-	if st.role == "server" {
-		_ = frpWireRulesDel(inst.TunnelID, st.params.AllowMin, st.params.AllowMax)
-	}
+	engineStopInst(&st.engineInst, func() {
+		if st.role == "server" {
+			_ = frpWireRulesDel(inst.TunnelID, st.params.AllowMin, st.params.AllowMax)
+		}
+	})
 	return nil
 }
 
 // Reload implements engine.Driver: frp applies nothing live through this
 // driver — equal params are a no-op, anything else is a restart.
 func (d *FRPDriver) Reload(inst engine.Instance) error {
-	var p frpParams
-	if err := json.Unmarshal(inst.Params, &p); err != nil {
-		return fmt.Errorf("frp: engine_params: %w", err)
-	}
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	if st == nil {
-		return fmt.Errorf("frp: reload on stopped instance %q", inst.TunnelID)
-	}
-	if frpParamsEqual(st.params, p) {
-		return nil
-	}
-	return engine.ErrRestartRequired
+	return engineReload(d.runs, frpID, inst.TunnelID, inst.Params,
+		func(st *frpInstState) frpParams { return st.params }, frpParamsEqual)
 }
 
 // Health implements engine.Driver.
 func (d *FRPDriver) Health(inst engine.Instance) engine.Health {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Health{OK: false, Detail: "not running", LatencyMs: -1}
 	}
@@ -567,9 +526,7 @@ func (d *FRPDriver) Health(inst engine.Instance) engine.Health {
 // counters reset daily; documented, never multiplied). Client side:
 // neither view is attributable per instance — Unknown, honestly.
 func (d *FRPDriver) Counters(inst engine.Instance) engine.Counters {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Counters{}
 	}
@@ -590,22 +547,15 @@ func (d *FRPDriver) Counters(inst engine.Instance) engine.Counters {
 // binary cache + config dir. The Manager calls it after the last
 // instance stopped, so idle engines leave zero processes and zero files.
 func (d *FRPDriver) Uninstall(ctx context.Context) error {
-	d.mu.Lock()
-	ids := make([]string, 0, len(d.runs))
-	for id := range d.runs {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-	for _, id := range ids {
+	engineUninstallAll(d.runs, func(id string) {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-	}
-	_ = os.RemoveAll(frpEngineDir())
+	}, frpEngineDir())
 	return nil
 }
 
-// frpParamsEqual compares parsed params (key-order independent).
+// frpParamsEqual compares parsed params (key-order independent). A1:
+// delegates to the shared engineParamsEqual (identical canonical-JSON,
+// constant-time compare).
 func frpParamsEqual(a, b frpParams) bool {
-	ab, _ := json.Marshal(a)
-	bb, _ := json.Marshal(b)
-	return subtle.ConstantTimeCompare(ab, bb) == 1
+	return engineParamsEqual(a, b)
 }
