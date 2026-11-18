@@ -20,7 +20,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -32,7 +31,6 @@ import (
 	"strconv"
 
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
@@ -431,30 +429,20 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 	return cfg
 }
 
+// xrayInstState is one RUNNING instance's state (supervisor target).
+// The proc/stop/cfg/binPath base rides the shared engineInst (A1).
 type xrayInstState struct {
-	params  xrayParams
-	role    engineSide
-	cfg     string
-	binPath string
-	proc    frpProcess
-	stop    chan struct{}
-	mu      sync.Mutex
-}
-
-func (st *xrayInstState) setProc(p frpProcess) { st.mu.Lock(); st.proc = p; st.mu.Unlock() }
-func (st *xrayInstState) current() frpProcess {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.proc
+	engineInst
+	params xrayParams
+	role   engineSide
 }
 
 // XrayDriver implements engine.Driver for Xray-core.
 type XrayDriver struct {
-	mu   sync.Mutex
-	runs map[string]*xrayInstState
+	runs *instTable[xrayInstState]
 }
 
-func NewXrayDriver() *XrayDriver { return &XrayDriver{runs: map[string]*xrayInstState{}} }
+func NewXrayDriver() *XrayDriver { return &XrayDriver{runs: newInstTable[xrayInstState]()} }
 
 func (d *XrayDriver) ID() string { return xrayID }
 
@@ -498,9 +486,7 @@ func xrayEnsureBinary(ctx context.Context, p xrayParams) (string, error) {
 	if !ok || strings.TrimSpace(ident.Server) == "" {
 		return "", fmt.Errorf("xray: no controller identity — cannot fetch engine artifact (fail closed)")
 	}
-	name, sha256Hex, sigB64, viaManifest, err := enginePinOrManifest(ctx, ident, xrayID,
-		EnginePin{Version: p.Version, Artifact: p.Artifact, SHA256Amd: p.SHA256Amd, SHA256Arm: p.SHA256Arm,
-			SigAmd: p.SigAmd, SigArm: p.SigArm},
+	name, sha256Hex, sigB64, viaManifest, err := engineArtifactPin(ctx, ident, xrayID,
 		func() (string, string, string, error) { return p.xrayArtifactPin() })
 	if err != nil {
 		return "", err
@@ -532,10 +518,10 @@ func xrayEnsureBinary(ctx context.Context, p xrayParams) (string, error) {
 	return dir, nil
 }
 
+// xrayParamsEqual compares parsed params (key-order independent). A1:
+// delegates to the shared engineParamsEqual.
 func xrayParamsEqual(a, b xrayParams) bool {
-	ab, _ := json.Marshal(a)
-	bb, _ := json.Marshal(b)
-	return subtle.ConstantTimeCompare(ab, bb) == 1
+	return engineParamsEqual(a, b)
 }
 
 // Start implements engine.Driver.
@@ -550,9 +536,7 @@ func (d *XrayDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if !frpTunnelIDOK(inst.TunnelID) {
 		return fmt.Errorf("xray: invalid tunnel id %q", inst.TunnelID)
 	}
-	d.mu.Lock()
-	prev := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
 		if xrayParamsEqual(prev.params, p) && prev.current() != nil {
 			select {
@@ -590,11 +574,9 @@ func (d *XrayDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = os.Remove(cfgPath)
 		return err
 	}
-	st := &xrayInstState{params: p, role: role, cfg: cfgPath, binPath: binPath,
-		proc: proc, stop: make(chan struct{})}
-	d.mu.Lock()
-	d.runs[inst.TunnelID] = st
-	d.mu.Unlock()
+	st := &xrayInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
+		cfg: cfgPath, binPath: binPath}, params: p, role: role}
+	d.runs.put(inst.TunnelID, st)
 	go engineSupervise(st.stop, st, binPath, cfgPath, xraySpawn)
 	// Wire accounting on the SERVER end's carrier port (the client's dial
 	// port is shared and cannot be attributed per instance).
@@ -620,41 +602,26 @@ var xraySpawn = func(binPath, cfgPath string) (frpProcess, error) {
 	return &frpExecProcess{cmd: cmd, done: done}, nil
 }
 
-// Stop implements engine.Driver.
+// Stop implements engine.Driver: the shared teardown order, with the
+// server end's carrier-port accounting rule as the driver-specific hook.
 func (d *XrayDriver) Stop(inst engine.Instance) error {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	delete(d.runs, inst.TunnelID)
-	d.mu.Unlock()
+	st := d.runs.take(inst.TunnelID)
 	if st == nil {
 		return nil
 	}
-	close(st.stop)
-	frpProcStop(st.current())
-	_ = os.Remove(st.cfg)
-	if st.role == engineSideServer {
-		_ = frpWireRulesDel(inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort)
-	}
+	engineStopInst(&st.engineInst, func() {
+		if st.role == engineSideServer {
+			_ = frpWireRulesDel(inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort)
+		}
+	})
 	return nil
 }
 
 // Reload implements engine.Driver: equal params are a no-op, anything
 // else is a restart.
 func (d *XrayDriver) Reload(inst engine.Instance) error {
-	var p xrayParams
-	if err := json.Unmarshal(inst.Params, &p); err != nil {
-		return fmt.Errorf("xray: engine_params: %w", err)
-	}
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	if st == nil {
-		return fmt.Errorf("xray: reload on stopped instance %q", inst.TunnelID)
-	}
-	if xrayParamsEqual(st.params, p) {
-		return nil
-	}
-	return engine.ErrRestartRequired
+	return engineReload(d.runs, xrayID, inst.TunnelID, inst.Params,
+		func(st *xrayInstState) xrayParams { return st.params }, xrayParamsEqual)
 }
 
 // Health implements engine.Driver: the process alive, and on the SERVER
@@ -662,9 +629,7 @@ func (d *XrayDriver) Reload(inst engine.Instance) error {
 // of the engine's control plane. The CLIENT end also probes the stats
 // API when configured (both ends may run one for local visibility).
 func (d *XrayDriver) Health(inst engine.Instance) engine.Health {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Health{OK: false, Detail: "not running", LatencyMs: -1}
 	}
@@ -716,9 +681,7 @@ func (d *XrayDriver) Health(inst engine.Instance) engine.Health {
 // pushed out), inbound dokodemo = the public-facing view. We report the
 // vless-in pair as payload (it is the tunnel-facing side).
 func (d *XrayDriver) Counters(inst engine.Instance) engine.Counters {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil || st.role != engineSideServer || st.params.APIPort <= 0 {
 		return engine.Counters{}
 	}
@@ -788,16 +751,9 @@ func xrayStatTraffic(apiPort int, prefix string) (uint64, uint64, bool) {
 
 // Uninstall implements engine.Driver.
 func (d *XrayDriver) Uninstall(ctx context.Context) error {
-	d.mu.Lock()
-	ids := make([]string, 0, len(d.runs))
-	for id := range d.runs {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-	for _, id := range ids {
+	engineUninstallAll(d.runs, func(id string) {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-	}
-	_ = os.RemoveAll(xrayEngineDir())
+	}, xrayEngineDir())
 	return nil
 }
 
