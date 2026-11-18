@@ -920,8 +920,12 @@ func (r *ctRelay) Close() {
 }
 
 // ctInstState is one RUNNING instance's state.
+// ctInstState is one RUNNING instance's state. The proc/stop/binPath
+// base rides the shared engineInst (A1); envPath stays its own field so
+// Stop's teardown removes it in the exact original order (AFTER the
+// rules are dropped — it holds the SECRET).
 type ctInstState struct {
-	mu      sync.Mutex
+	engineInst
 	params  ctunnelParams
 	role    string // ctunnel role: "iran" (server_side end) | "kharej"
 	dir     string
@@ -929,26 +933,15 @@ type ctInstState struct {
 	selfTun string
 	peerTun string
 	envPath string
-	binPath string
-	proc    frpProcess
-	stop    chan struct{}
 	relay   *ctRelay // kharej end only
-}
-
-func (st *ctInstState) setProc(p frpProcess) { st.mu.Lock(); st.proc = p; st.mu.Unlock() }
-func (st *ctInstState) current() frpProcess {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.proc
 }
 
 // CtunnelDriver implements engine.Driver for C-Tunnel.
 type CtunnelDriver struct {
-	mu   sync.Mutex
-	runs map[string]*ctInstState
+	runs *instTable[ctInstState]
 }
 
-func NewCtunnelDriver() *CtunnelDriver { return &CtunnelDriver{runs: map[string]*ctInstState{}} }
+func NewCtunnelDriver() *CtunnelDriver { return &CtunnelDriver{runs: newInstTable[ctInstState]()} }
 
 func (d *CtunnelDriver) ID() string { return ctunnelID }
 
@@ -1026,9 +1019,11 @@ func ctEnsureBinary(ctx context.Context, p ctunnelParams) (string, error) {
 	return dir, nil
 }
 
-// ctParamsEqual is the Reload no-op comparison.
+// ctParamsEqual is the Reload no-op comparison. A1: delegates to the
+// shared engineParamsEqual (the mustJSON string compare returned the
+// same boolean for every value ctunnelParams can carry).
 func ctParamsEqual(a, b ctunnelParams) bool {
-	return string(mustJSON(a)) == string(mustJSON(b))
+	return engineParamsEqual(a, b)
 }
 
 var ctSpawn = func(binPath string, args []string) (frpProcess, error) {
@@ -1057,9 +1052,7 @@ func (d *CtunnelDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if !frpTunnelIDOK(inst.TunnelID) {
 		return fmt.Errorf("ctunnel: invalid tunnel id %q", inst.TunnelID)
 	}
-	d.mu.Lock()
-	prev := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
 		if ctParamsEqual(prev.params, p) && prev.current() != nil {
 			select {
@@ -1104,17 +1097,15 @@ func (d *CtunnelDriver) Start(ctx context.Context, inst engine.Instance) error {
 		_ = ctIfaceDel(dir.iface)
 		return err
 	}
-	st := &ctInstState{params: p, role: role, dir: direction, iface: dir.iface,
-		selfTun: dir.selfTun, peerTun: dir.peerTun, envPath: envPath, binPath: binPath,
-		proc: proc, stop: make(chan struct{})}
+	st := &ctInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
+		binPath: binPath}, params: p, role: role, dir: direction, iface: dir.iface,
+		selfTun: dir.selfTun, peerTun: dir.peerTun, envPath: envPath}
 	target := strings.TrimSpace(p.LocalAddr)
 	targetPort := ctTargetPort(p)
 	if role == "kharej" {
 		st.relay = ctStartRelay(st.stop, net.JoinHostPort(dir.selfTun, fmt.Sprint(targetPort)), target, proto)
 	}
-	d.mu.Lock()
-	d.runs[inst.TunnelID] = st
-	d.mu.Unlock()
+	d.runs.put(inst.TunnelID, st)
 	go engineSupervise(st.stop, st, binPath, "", func(b, _ string) (frpProcess, error) {
 		return ctSpawn(b, ctEngineArgs(envPath))
 	})
@@ -1135,54 +1126,39 @@ func (d *CtunnelDriver) Start(ctx context.Context, inst engine.Instance) error {
 	return nil
 }
 
-// Stop implements engine.Driver: stop channel closed BEFORE the kill so
-// the supervisor never resurrects; relay closed; rules removed; env file
-// removed (it holds the SECRET).
+// Stop implements engine.Driver: the shared teardown order with the
+// ctunnel-specific hook — relay closed, the role's nft/iptables rules
+// dropped, THEN the env file removed (it holds the SECRET; the order is
+// the original one), then the TUN deleted (the engine re-attaches on
+// respawn; ctIfaceUp tolerates an existing interface).
 func (d *CtunnelDriver) Stop(inst engine.Instance) error {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	delete(d.runs, inst.TunnelID)
-	d.mu.Unlock()
+	st := d.runs.take(inst.TunnelID)
 	if st == nil {
 		return nil
 	}
-	close(st.stop)
-	frpProcStop(st.current())
-	if st.relay != nil {
-		st.relay.Close()
-	}
-	if st.role == "iran" {
-		ctForwardRulesDel(inst.TunnelID, st.iface, ctDefaultProto(st.params.Proto),
-			st.params.PublicPort, ctTargetPort(st.params), st.selfTun, st.peerTun)
-		ctWireRulesDel(inst.TunnelID, st.params.CarrierPort)
-	} else {
-		ctRelayInputRulesDel(inst.TunnelID, st.iface, ctDefaultProto(st.params.Proto),
-			ctTargetPort(st.params))
-	}
-	_ = os.Remove(st.envPath)
-	// The TUN goes with the instance (the engine re-attaches on respawn;
-	// ctIfaceUp tolerates an existing interface from a previous run).
-	_ = ctIfaceDel(st.iface)
+	engineStopInst(&st.engineInst, func() {
+		if st.relay != nil {
+			st.relay.Close()
+		}
+		if st.role == "iran" {
+			ctForwardRulesDel(inst.TunnelID, st.iface, ctDefaultProto(st.params.Proto),
+				st.params.PublicPort, ctTargetPort(st.params), st.selfTun, st.peerTun)
+			ctWireRulesDel(inst.TunnelID, st.params.CarrierPort)
+		} else {
+			ctRelayInputRulesDel(inst.TunnelID, st.iface, ctDefaultProto(st.params.Proto),
+				ctTargetPort(st.params))
+		}
+		_ = os.Remove(st.envPath)
+		_ = ctIfaceDel(st.iface)
+	})
 	return nil
 }
 
 // Reload implements engine.Driver: equal params are a no-op, anything
 // else is a restart (C-Tunnel has no live reload).
 func (d *CtunnelDriver) Reload(inst engine.Instance) error {
-	var p ctunnelParams
-	if err := json.Unmarshal(inst.Params, &p); err != nil {
-		return fmt.Errorf("ctunnel: engine_params: %w", err)
-	}
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	if st == nil {
-		return fmt.Errorf("ctunnel: reload on stopped instance %q", inst.TunnelID)
-	}
-	if ctParamsEqual(st.params, p) {
-		return nil
-	}
-	return engine.ErrRestartRequired
+	return engineReload(d.runs, ctunnelID, inst.TunnelID, inst.Params,
+		func(st *ctInstState) ctunnelParams { return st.params }, ctParamsEqual)
 }
 
 // ctProbeThrough performs the through-tunnel probe: dial the kharej end's
@@ -1220,9 +1196,7 @@ var ctProbeDial = ctProbeThrough
 // (warmup gate). kharej end: process alive + relay bound (+ TUN iface for
 // udp-only, where no TCP probe exists — honestly labeled).
 func (d *CtunnelDriver) Health(inst engine.Instance) engine.Health {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Health{OK: false, Detail: "not running", LatencyMs: -1}
 	}
@@ -1257,9 +1231,7 @@ func (d *CtunnelDriver) Health(inst engine.Instance) engine.Health {
 // iran end; payload = the per-tunnel TUN interface counters (inner bytes)
 // on BOTH ends via netdev — each agent reports its own view honestly.
 func (d *CtunnelDriver) Counters(inst engine.Instance) engine.Counters {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
+	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return engine.Counters{}
 	}
@@ -1281,16 +1253,9 @@ func (d *CtunnelDriver) Counters(inst engine.Instance) engine.Counters {
 // the binary cache + instance envs + rules. Idle = zero processes, zero
 // files, zero goroutines.
 func (d *CtunnelDriver) Uninstall(ctx context.Context) error {
-	d.mu.Lock()
-	ids := make([]string, 0, len(d.runs))
-	for id := range d.runs {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-	for _, id := range ids {
+	engineUninstallAll(d.runs, func(id string) {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-	}
-	_ = os.RemoveAll(ctEngineDir())
+	}, ctEngineDir())
 	return nil
 }
 
