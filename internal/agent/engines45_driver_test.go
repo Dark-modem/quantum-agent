@@ -524,9 +524,7 @@ func TestChiselSupervisorAndUninstall(t *testing.T) {
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
-	d.mu.Lock()
-	st := d.runs["t-ch-2"]
-	d.mu.Unlock()
+	st := d.runs.peek("t-ch-2")
 	if f, ok := st.current().(*fakeExitProcess); ok {
 		f.exit()
 	}
@@ -546,10 +544,7 @@ func TestChiselSupervisorAndUninstall(t *testing.T) {
 	if _, err := os.Stat(engineEngineDir(chiselID)); !os.IsNotExist(err) {
 		t.Fatalf("engine dir survived uninstall: %v", err)
 	}
-	d.mu.Lock()
-	runs := len(d.runs)
-	d.mu.Unlock()
-	if runs != 0 {
+	if runs := d.runs.len(); runs != 0 {
 		t.Fatalf("runs not empty after uninstall: %d", runs)
 	}
 }
