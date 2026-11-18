@@ -74,10 +74,7 @@ func (d *RatholeDriver) ProcessPIDs(inst engine.Instance) []int {
 }
 
 func (d *XrayDriver) ProcessPIDs(inst engine.Instance) []int {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	return engineProcPIDs(st)
+	return engineProcPIDs(d.runs.peek(inst.TunnelID))
 }
 
 // WgDriver: the wireguard-go FALLBACK is a process; kernel-mode has
