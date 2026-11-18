@@ -518,12 +518,6 @@ func xrayEnsureBinary(ctx context.Context, p xrayParams) (string, error) {
 	return dir, nil
 }
 
-// xrayParamsEqual compares parsed params (key-order independent). A1:
-// delegates to the shared engineParamsEqual.
-func xrayParamsEqual(a, b xrayParams) bool {
-	return engineParamsEqual(a, b)
-}
-
 // Start implements engine.Driver.
 func (d *XrayDriver) Start(ctx context.Context, inst engine.Instance) error {
 	var p xrayParams
@@ -538,7 +532,7 @@ func (d *XrayDriver) Start(ctx context.Context, inst engine.Instance) error {
 	}
 	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
-		if xrayParamsEqual(prev.params, p) && prev.current() != nil {
+		if engineParamsEqual[xrayParams](prev.params, p) && prev.current() != nil {
 			select {
 			case <-prev.current().Done():
 			default:
@@ -621,7 +615,7 @@ func (d *XrayDriver) Stop(inst engine.Instance) error {
 // else is a restart.
 func (d *XrayDriver) Reload(inst engine.Instance) error {
 	return engineReload(d.runs, xrayID, inst.TunnelID, inst.Params,
-		func(st *xrayInstState) xrayParams { return st.params }, xrayParamsEqual)
+		func(st *xrayInstState) xrayParams { return st.params }, engineParamsEqual[xrayParams])
 }
 
 // Health implements engine.Driver: the process alive, and on the SERVER
