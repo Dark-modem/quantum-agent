@@ -60,10 +60,7 @@ func (d *WstDriver) ProcessPIDs(inst engine.Instance) []int {
 }
 
 func (d *GostDriver) ProcessPIDs(inst engine.Instance) []int {
-	d.mu.Lock()
-	st := d.runs[inst.TunnelID]
-	d.mu.Unlock()
-	return engineProcPIDs(st)
+	return engineProcPIDs(d.runs.peek(inst.TunnelID))
 }
 
 func (d *RatholeDriver) ProcessPIDs(inst engine.Instance) []int {
