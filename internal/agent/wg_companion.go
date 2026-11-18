@@ -145,7 +145,7 @@ func wgCompanionIptablesRule(c *wgCompanion) int {
 	if c == nil || c.Kind != companionUDP2Raw {
 		return 0
 	}
-	return ratholePortOf(c.ListenAddr)
+	return enginePortOf(c.ListenAddr)
 }
 
 // osGeteuid seams the effective-uid check (hermetic tests stub it).

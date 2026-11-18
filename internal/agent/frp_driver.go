@@ -408,7 +408,7 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 
 	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
-		if frpParamsEqual(prev.params, p) && prev.proc != nil {
+		if engineParamsEqual[frpParams](prev.params, p) && prev.proc != nil {
 			select {
 			case <-prev.proc.Done(): // process exited: fall through to restart
 			default:
@@ -447,7 +447,7 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 	st := &frpInstState{engineInst: engineInst{proc: proc, stop: make(chan struct{}),
 		cfg: cfgPath, binPath: binPath}, params: p, role: role}
 	d.runs.put(inst.TunnelID, st)
-	go d.supervise(inst.TunnelID, st) // one goroutine per RUNNING instance
+	go engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn) // one goroutine per RUNNING instance
 	// Wire accounting is installed on the server side only (the client's
 	// control port is shared across instances and cannot be attributed).
 	if role == "server" {
@@ -459,14 +459,10 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 	return nil
 }
 
-// supervise keeps the instance's process alive until Stop: an
-// unexpected exit is restarted with a capped backoff. Exits when the
-// stop channel closes (Stop always closes it before killing the
-// process, so a killed process is never resurrected).
-func (d *FRPDriver) supervise(tunnelID string, st *frpInstState) {
-	_ = tunnelID
-	engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn)
-}
+// supervise was the per-driver wrapper over the shared engineSupervise;
+// A1 deleted it — Start calls engineSupervise directly (same contract:
+// Stop closes the stop channel before killing the process, so a killed
+// process is never resurrected).
 
 // Stop implements engine.Driver: terminate the process, drop the config
 // and the wire-accounting rule (the shared teardown order; the server
@@ -489,7 +485,7 @@ func (d *FRPDriver) Stop(inst engine.Instance) error {
 // driver — equal params are a no-op, anything else is a restart.
 func (d *FRPDriver) Reload(inst engine.Instance) error {
 	return engineReload(d.runs, frpID, inst.TunnelID, inst.Params,
-		func(st *frpInstState) frpParams { return st.params }, frpParamsEqual)
+		func(st *frpInstState) frpParams { return st.params }, engineParamsEqual[frpParams])
 }
 
 // Health implements engine.Driver.
@@ -551,11 +547,4 @@ func (d *FRPDriver) Uninstall(ctx context.Context) error {
 		_ = d.Stop(engine.Instance{TunnelID: id})
 	}, frpEngineDir())
 	return nil
-}
-
-// frpParamsEqual compares parsed params (key-order independent). A1:
-// delegates to the shared engineParamsEqual (identical canonical-JSON,
-// constant-time compare).
-func frpParamsEqual(a, b frpParams) bool {
-	return engineParamsEqual(a, b)
 }

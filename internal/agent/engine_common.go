@@ -18,7 +18,6 @@ package agent
 import (
 	"archive/tar"
 	"compress/gzip"
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -68,20 +67,9 @@ func enginePinForArch(p EnginePin) (name, sha256Hex, sigB64 string, err error) {
 	return "", "", "", fmt.Errorf("engine: no artifact pin for GOARCH %q", arch)
 }
 
-// enginePinOrManifest resolves the artifact coordinates through the R5
-// manifest first (engine name + this host's arch) and falls back to the
-// pinned triple. viaManifest reports which path produced the pin — the
-// caller downloads from the matching endpoint and verifies either way.
-func enginePinOrManifest(ctx context.Context, ident agentIdentity, engineID string, p EnginePin,
-	pinned func() (name, sha256Hex, sigB64 string, err error)) (name, sha256Hex, sigB64 string, viaManifest bool, err error) {
-	if entries, merr := engineManifestGet(ctx, ident, engineID, runtime.GOARCH); merr == nil {
-		if e, ok := engineResolveArtifact(entries, engineID, runtime.GOARCH); ok {
-			return e.Artifact, e.SHA256, e.Signature, true, nil
-		}
-	}
-	n, s, sig, perr := pinned()
-	return n, s, sig, false, perr
-}
+// enginePinOrManifest was the engineArtifactPin twin with an unused
+// EnginePin parameter; A1 deleted it — callers use engineArtifactPin
+// directly (byte-identical semantics).
 
 // engineExtractTarball unpacks a release-style tar.gz into dir: only
 // regular files whose base name is in want are installed (0755);

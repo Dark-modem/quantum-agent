@@ -231,12 +231,6 @@ func ratholeRenderConfig(role, svc string, p ratholeParams, noisePrivB64 string)
 	return b.String()
 }
 
-// ratholeParamsEqual compares parsed params. A1: delegates to the
-// shared engineParamsEqual.
-func ratholeParamsEqual(a, b ratholeParams) bool {
-	return engineParamsEqual(a, b)
-}
-
 // ratholeEnsureBinary: manifest-first (engine "rathole"), pinned
 // fallback; identical trust model to the FRP/Backhaul drivers.
 func ratholeEnsureBinary(ctx context.Context, p ratholeParams) (string, error) {
@@ -348,7 +342,7 @@ func (d *RatholeDriver) Start(ctx context.Context, inst engine.Instance) error {
 
 	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
-		if ratholeParamsEqual(prev.params, p) && prev.current() != nil {
+		if engineParamsEqual[ratholeParams](prev.params, p) && prev.current() != nil {
 			select {
 			case <-prev.current().Done():
 			default:
@@ -397,7 +391,7 @@ func (d *RatholeDriver) Start(ctx context.Context, inst engine.Instance) error {
 	// Wire accounting on the SERVER end: the carrier port multiplexes the
 	// tunnel's control AND data bytes.
 	if role == "server" {
-		if port := ratholePortOf(p.ServerAddr); port > 0 {
+		if port := enginePortOf(p.ServerAddr); port > 0 {
 			if err := frpWireRulesAdd(inst.TunnelID, port, port); err != nil {
 				fmt.Fprintf(os.Stderr, "rathole: wire accounting unavailable: %v\n", err)
 			}
@@ -431,13 +425,6 @@ func ratholeNoisePrivateKey(tunnelID string) (string, error) {
 	return privB64, nil
 }
 
-// ratholePortOf was the local host:port parser; A1 moved it to the
-// shared enginePortOf (byte-identical body; the sweep commit removes
-// the stub).
-func ratholePortOf(addr string) int {
-	return enginePortOf(addr)
-}
-
 // supervise was the local copy of the capped-backoff supervisor; A1
 // deleted it — Start calls the shared engineSupervise directly (same
 // 2s→15s backoff, same respawn via ratholeSpawn(bin, cfg), Stop closes
@@ -452,7 +439,7 @@ func (d *RatholeDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == "server" {
-			if port := ratholePortOf(st.params.ServerAddr); port > 0 {
+			if port := enginePortOf(st.params.ServerAddr); port > 0 {
 				_ = frpWireRulesDel(inst.TunnelID, port, port)
 			}
 		}
@@ -466,7 +453,7 @@ func (d *RatholeDriver) Stop(inst engine.Instance) error {
 // restart key-stable.
 func (d *RatholeDriver) Reload(inst engine.Instance) error {
 	return engineReload(d.runs, ratholeID, inst.TunnelID, inst.Params,
-		func(st *ratholeInstState) ratholeParams { return st.params }, ratholeParamsEqual)
+		func(st *ratholeInstState) ratholeParams { return st.params }, engineParamsEqual[ratholeParams])
 }
 
 // ratholeHealthDial seams the service-port health dial (the integration
@@ -502,7 +489,7 @@ func (d *RatholeDriver) Health(inst engine.Instance) engine.Health {
 	if st.role != "server" {
 		return engine.Health{OK: true, Detail: "rathole client running", LatencyMs: -1}
 	}
-	port := ratholePortOf(st.params.ServiceAddr)
+	port := enginePortOf(st.params.ServiceAddr)
 	if port <= 0 {
 		return engine.Health{OK: true, Detail: "rathole server running (no service port)", LatencyMs: -1}
 	}
@@ -533,7 +520,7 @@ func (d *RatholeDriver) Counters(inst engine.Instance) engine.Counters {
 		return engine.Counters{}
 	}
 	out := engine.Counters{}
-	if port := ratholePortOf(st.params.ServerAddr); port > 0 {
+	if port := enginePortOf(st.params.ServerAddr); port > 0 {
 		if rx, tx, ok := frpWireBytes(inst.TunnelID, port, port); ok {
 			out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 		}

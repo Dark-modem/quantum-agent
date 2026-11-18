@@ -231,18 +231,12 @@ var gostSpawn = func(binPath string, args []string) (frpProcess, error) {
 func gostArgs(role, transport string, p gostParams) []string {
 	if role == "server" {
 		return []string{"-L", fmt.Sprintf("relay+%s://:%d?bind=true",
-			transport, gostPortOf(p.CarrierAddr))}
+			transport, enginePortOf(p.CarrierAddr))}
 	}
 	return []string{
 		"-L", fmt.Sprintf("rtcp://:%d/%s", p.PublicPort, strings.TrimSpace(p.LocalAddr)),
 		"-F", fmt.Sprintf("relay+%s://%s", transport, strings.TrimSpace(p.CarrierAddr)),
 	}
-}
-
-// gostPortOf was the local host:port parser; A1 moved it to the shared
-// enginePortOf (byte-identical body; the sweep commit removes the stub).
-func gostPortOf(addr string) int {
-	return enginePortOf(addr)
 }
 
 // Start implements engine.Driver.
@@ -259,7 +253,7 @@ func (d *GostDriver) Start(ctx context.Context, inst engine.Instance) error {
 	}
 	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
-		if gostParamsEqual(prev.params, p) && prev.current() != nil {
+		if engineParamsEqual[gostParams](prev.params, p) && prev.current() != nil {
 			select {
 			case <-prev.current().Done():
 			default:
@@ -289,19 +283,13 @@ func (d *GostDriver) Start(ctx context.Context, inst engine.Instance) error {
 		return gostSpawn(b, gostArgs(st.role, strings.ToLower(strings.TrimSpace(st.params.Transport)), st.params))
 	})
 	if role == "server" {
-		if port := gostPortOf(p.CarrierAddr); port > 0 {
+		if port := enginePortOf(p.CarrierAddr); port > 0 {
 			if err := frpWireRulesAdd(inst.TunnelID, port, port); err != nil {
 				fmt.Fprintf(os.Stderr, "gost: wire accounting unavailable: %v\n", err)
 			}
 		}
 	}
 	return nil
-}
-
-// gostParamsEqual compares parsed params. A1: delegates to the shared
-// engineParamsEqual.
-func gostParamsEqual(a, b gostParams) bool {
-	return engineParamsEqual(a, b)
 }
 
 // supervise was the local copy of the capped-backoff supervisor; A1
@@ -319,7 +307,7 @@ func (d *GostDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == "server" {
-			if port := gostPortOf(st.params.CarrierAddr); port > 0 {
+			if port := enginePortOf(st.params.CarrierAddr); port > 0 {
 				_ = frpWireRulesDel(inst.TunnelID, port, port)
 			}
 		}
@@ -385,7 +373,7 @@ func (d *GostDriver) Counters(inst engine.Instance) engine.Counters {
 		return engine.Counters{}
 	}
 	out := engine.Counters{}
-	if port := gostPortOf(st.params.CarrierAddr); port > 0 {
+	if port := enginePortOf(st.params.CarrierAddr); port > 0 {
 		if rx, tx, ok := frpWireBytes(inst.TunnelID, port, port); ok {
 			out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 		}
@@ -405,5 +393,5 @@ func (d *GostDriver) Uninstall(ctx context.Context) error {
 // else is a restart (gost has no live reload).
 func (d *GostDriver) Reload(inst engine.Instance) error {
 	return engineReload(d.runs, gostID, inst.TunnelID, inst.Params,
-		func(st *gostInstState) gostParams { return st.params }, gostParamsEqual)
+		func(st *gostInstState) gostParams { return st.params }, engineParamsEqual[gostParams])
 }

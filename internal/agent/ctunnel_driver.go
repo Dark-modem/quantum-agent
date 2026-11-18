@@ -985,9 +985,7 @@ func ctEnsureBinary(ctx context.Context, p ctunnelParams) (string, error) {
 	if !ok || strings.TrimSpace(ident.Server) == "" {
 		return "", fmt.Errorf("ctunnel: no controller identity — cannot fetch engine artifact (fail closed)")
 	}
-	name, sha256Hex, sigB64, viaManifest, err := enginePinOrManifest(ctx, ident, ctunnelID,
-		EnginePin{Version: p.Version, Artifact: p.Artifact, SHA256Amd: p.SHA256Amd, SHA256Arm: p.SHA256Arm,
-			SigAmd: p.SigAmd, SigArm: p.SigArm},
+	name, sha256Hex, sigB64, viaManifest, err := engineArtifactPin(ctx, ident, ctunnelID,
 		func() (string, string, string, error) { return p.ctArtifactPin() })
 	if err != nil {
 		return "", err
@@ -1019,12 +1017,8 @@ func ctEnsureBinary(ctx context.Context, p ctunnelParams) (string, error) {
 	return dir, nil
 }
 
-// ctParamsEqual is the Reload no-op comparison. A1: delegates to the
-// shared engineParamsEqual (the mustJSON string compare returned the
-// same boolean for every value ctunnelParams can carry).
-func ctParamsEqual(a, b ctunnelParams) bool {
-	return engineParamsEqual(a, b)
-}
+// ctParamsEqual was the Reload no-op comparison; A1 moved it to
+// the shared engineParamsEqual (deleted in the A1 sweep).
 
 var ctSpawn = func(binPath string, args []string) (frpProcess, error) {
 	cmd := exec.Command(binPath, args...)
@@ -1054,7 +1048,7 @@ func (d *CtunnelDriver) Start(ctx context.Context, inst engine.Instance) error {
 	}
 	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
-		if ctParamsEqual(prev.params, p) && prev.current() != nil {
+		if engineParamsEqual[ctunnelParams](prev.params, p) && prev.current() != nil {
 			select {
 			case <-prev.current().Done():
 			default:
@@ -1158,7 +1152,7 @@ func (d *CtunnelDriver) Stop(inst engine.Instance) error {
 // else is a restart (C-Tunnel has no live reload).
 func (d *CtunnelDriver) Reload(inst engine.Instance) error {
 	return engineReload(d.runs, ctunnelID, inst.TunnelID, inst.Params,
-		func(st *ctInstState) ctunnelParams { return st.params }, ctParamsEqual)
+		func(st *ctInstState) ctunnelParams { return st.params }, engineParamsEqual[ctunnelParams])
 }
 
 // ctProbeThrough performs the through-tunnel probe: dial the kharej end's

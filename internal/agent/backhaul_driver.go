@@ -236,14 +236,6 @@ func backhaulRenderConfig(role string, p backhaulParams) string {
 	return b.String()
 }
 
-// backhaulParamsEqual was the Reload no-op comparison; A1 moved the
-// canonical-JSON compare to the shared engineParamsEqual (the sweep
-// commit deletes this stub).
-
-func backhaulParamsEqual(a, b backhaulParams) bool {
-	return engineParamsEqual(a, b)
-}
-
 // backhaulEnsureBinary makes the backhaul binary available and returns
 // the cache dir. Manifest-first (engine "backhaul"), pinned fallback —
 // identical trust model to the FRP driver.
@@ -324,7 +316,7 @@ func (d *BackhaulDriver) Start(ctx context.Context, inst engine.Instance) error 
 
 	prev := d.runs.peek(inst.TunnelID)
 	if prev != nil {
-		if backhaulParamsEqual(prev.params, p) && prev.current() != nil {
+		if engineParamsEqual[backhaulParams](prev.params, p) && prev.current() != nil {
 			select {
 			case <-prev.current().Done():
 			default:
@@ -364,21 +356,13 @@ func (d *BackhaulDriver) Start(ctx context.Context, inst engine.Instance) error 
 	// are this tunnel's wire view (the client's dial port is shared and
 	// cannot be attributed per instance).
 	if role == "server" {
-		if port := backhaulPortOf(p.BindAddr); port > 0 {
+		if port := enginePortOf(p.BindAddr); port > 0 {
 			if err := frpWireRulesAdd(inst.TunnelID, port, port); err != nil {
 				fmt.Fprintf(os.Stderr, "backhaul: wire accounting unavailable: %v\n", err)
 			}
 		}
 	}
 	return nil
-}
-
-// backhaulPortOf was the local host:port parser; A1 moved it to the
-// shared enginePortOf (byte-identical body; the sweep commit deletes
-// this stub).
-
-func backhaulPortOf(addr string) int {
-	return enginePortOf(addr)
 }
 
 // Stop implements engine.Driver: the shared teardown order, with the
@@ -390,7 +374,7 @@ func (d *BackhaulDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == "server" {
-			if port := backhaulPortOf(st.params.BindAddr); port > 0 {
+			if port := enginePortOf(st.params.BindAddr); port > 0 {
 				_ = frpWireRulesDel(inst.TunnelID, port, port)
 			}
 		}
@@ -402,7 +386,7 @@ func (d *BackhaulDriver) Stop(inst engine.Instance) error {
 // else is a restart.
 func (d *BackhaulDriver) Reload(inst engine.Instance) error {
 	return engineReload(d.runs, backhaulID, inst.TunnelID, inst.Params,
-		func(st *backhaulInstState) backhaulParams { return st.params }, backhaulParamsEqual)
+		func(st *backhaulInstState) backhaulParams { return st.params }, engineParamsEqual[backhaulParams])
 }
 
 // Health implements engine.Driver: the process alive, and on the server
@@ -471,7 +455,7 @@ func (d *BackhaulDriver) Counters(inst engine.Instance) engine.Counters {
 		return engine.Counters{}
 	}
 	out := engine.Counters{}
-	if port := backhaulPortOf(st.params.BindAddr); port > 0 {
+	if port := enginePortOf(st.params.BindAddr); port > 0 {
 		if rx, tx, ok := frpWireBytes(inst.TunnelID, port, port); ok {
 			out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 		}
