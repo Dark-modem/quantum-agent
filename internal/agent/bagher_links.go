@@ -6,13 +6,20 @@ package agent
 // to its foreign server, and all of them reach the same frps on Iran. Each
 // foreign server's frpc registers its own ports there, so the ports of two
 // links must not overlap (frp proxy names are p<port>/u<port>).
+//
+// REFACTOR-PLAN-AGENT §6.A3: the INTERACTIVE layer (add/remove links, port
+// clash checks, unit install/stop, the unit migrations — 13 funcs,
+// deadcode-RTA-unreachable from main; their HTTP entry points lived in the
+// purged legacy handler layer) is deleted. The STATUS/VIEW layer below stays:
+// sshfwd.go's live snapshot/bundle paths call bagherLinksStatus,
+// bagherProxiesOnline, bagherLinkUp, bagherCarrierRTT, staleBagherLinkUnits,
+// bagherLinkCfg and bagherLinkUnit.
 
 import (
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -30,25 +37,12 @@ type BagherLink struct {
 	UDP           bool   `json:"udp,omitempty"`
 }
 
-func findBagherLink(cfg SSHFwdConfig, id int) (BagherLink, bool) {
-	for _, l := range cfg.Links {
-		if l.ID == id {
-			return l, true
-		}
-	}
-	return BagherLink{}, false
-}
-
 // bagherLinkUnit is the carrier unit name of link id.
 func bagherLinkUnit(id int) string {
 	if id <= 1 {
 		return "quantum-bagher"
 	}
 	return fmt.Sprintf("quantum-bagher-%d", id)
-}
-
-func bagherLinkUnitPath(id int) string {
-	return filepath.Join("/etc/systemd/system", bagherLinkUnit(id)+".service")
 }
 
 // bagherLinkCfg is cfg as seen by link id: its host, SSH port, user, ports
@@ -66,18 +60,36 @@ func bagherLinkCfg(cfg SSHFwdConfig, l BagherLink) SSHFwdConfig {
 	return c
 }
 
+// staleBagherLinkUnits lists carrier units beyond the currently configured
+// links (left over from removed links).
+func staleBagherLinkUnits(keep map[string]bool) []string {
+	matches, _ := filepath.Glob("/etc/systemd/system/quantum-bagher-*.service")
+	var out []string
+	for _, m := range matches {
+		b := filepath.Base(m)
+		var n int
+		if _, err := fmt.Sscanf(b, "quantum-bagher-%d.service", &n); err == nil && n > 1 && !keep[b] {
+			out = append(out, b)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// bagherHostRe accepts an IP address or a DNS name, nothing that could break
+// out of a unit file or a command line.
 var bagherHostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 
-// validBagherHost accepts an IP address or a DNS name, nothing that could
-// break out of a unit file or a command line.
+// validBagherHost accepts an IP address or a DNS name. §6.A3 note: kept —
+// carrier.go's handleCarrierPost set_wss validation (driven by the live
+// TestCarrierSetWSSPortAndSNI) uses it; the dead link-add path went.
 func validBagherHost(h string) bool {
 	return net.ParseIP(h) != nil || bagherHostRe.MatchString(h)
 }
 
-var bagherUserRe = regexp.MustCompile(`^[a-z_][a-z0-9_.-]{0,31}$`)
-
-// bagherPortOwner returns which link already forwards port p (0: none),
-// skipping link skip.
+// bagherPortOwner reports which link (or link 1) claims port p. §6.A3 note:
+// xray.go's dead xrayClaimedPorts — that file being purged next in this
+// stage — still compiles against it.
 func bagherPortOwner(cfg SSHFwdConfig, p, skip int) int {
 	if skip != 1 {
 		for _, q := range cfg.Ports {
@@ -97,145 +109,6 @@ func bagherPortOwner(cfg SSHFwdConfig, p, skip int) int {
 		}
 	}
 	return 0
-}
-
-// checkBagherLinkPorts refuses ports another link (or this server's
-// internal FRP ports) already uses.
-func checkBagherLinkPorts(cfg SSHFwdConfig, ports []int, self int) error {
-	for _, p := range ports {
-		if p >= cfg.FRPBindPort && p <= cfg.FRPBindPort+2 {
-			return fmt.Errorf("port %d is Bagher's internal FRP port (%d-%d)", p, cfg.FRPBindPort, cfg.FRPBindPort+2)
-		}
-		if owner := bagherPortOwner(cfg, p, self); owner != 0 {
-			return fmt.Errorf("port %d is already forwarded to foreign server %d (%s)", p, owner, bagherLinkHost(cfg, owner))
-		}
-	}
-	return nil
-}
-
-func bagherLinkHost(cfg SSHFwdConfig, id int) string {
-	if id == 1 {
-		return cfg.RemoteHost
-	}
-	l, _ := findBagherLink(cfg, id)
-	return l.RemoteHost
-}
-
-// addBagherLink validates and appends a foreign server; it returns the new link.
-func addBagherLink(cfg *SSHFwdConfig, l BagherLink) (BagherLink, error) {
-	l.RemoteHost = strings.TrimSpace(l.RemoteHost)
-	if strings.TrimSpace(cfg.RemoteHost) == "" || len(cfg.Ports) == 0 {
-		return l, fmt.Errorf("set up Bagher with the first foreign server before adding more")
-	}
-	if !validBagherHost(l.RemoteHost) {
-		return l, fmt.Errorf("invalid foreign server address %q", l.RemoteHost)
-	}
-	if l.RemoteUser != "" && !bagherUserRe.MatchString(l.RemoteUser) {
-		return l, fmt.Errorf("invalid SSH user %q", l.RemoteUser)
-	}
-	if l.RemoteSSHPort < 0 || l.RemoteSSHPort > 65535 {
-		return l, fmt.Errorf("invalid SSH port %d", l.RemoteSSHPort)
-	}
-	if len(l.Ports) == 0 {
-		return l, fmt.Errorf("at least one port must be specified")
-	}
-	// The foreign sshd listens on 127.0.0.1:FRP for each session, so one
-	// foreign server can carry one link only.
-	taken := l.RemoteHost == cfg.RemoteHost
-	for _, x := range cfg.Links {
-		taken = taken || x.RemoteHost == l.RemoteHost
-	}
-	if taken {
-		return l, fmt.Errorf("%s is already a Bagher foreign server", l.RemoteHost)
-	}
-	if err := checkBagherLinkPorts(*cfg, l.Ports, 0); err != nil {
-		return l, err
-	}
-	l.ID = 2
-	for _, x := range cfg.Links {
-		if x.ID >= l.ID {
-			l.ID = x.ID + 1
-		}
-	}
-	cfg.Links = append(cfg.Links, l)
-	return l, nil
-}
-
-func removeBagherLink(cfg *SSHFwdConfig, id int) bool {
-	for i, l := range cfg.Links {
-		if l.ID == id {
-			cfg.Links = append(cfg.Links[:i], cfg.Links[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// installBagherLinkUnits writes the carrier unit of every extra link and
-// starts the ones not running (with restart, restarts all: the settings
-// they read changed); stale units of removed links are removed.
-func installBagherLinkUnits(cfg SSHFwdConfig, restart bool) error {
-	keep := map[string]bool{}
-	for _, l := range cfg.Links {
-		keep[bagherLinkUnit(l.ID)+".service"] = true
-		if err := os.WriteFile(bagherLinkUnitPath(l.ID), []byte(buildBagherCarrierUnit(cfg, l.ID)), 0644); err != nil {
-			return fmt.Errorf("failed writing unit: %w", err)
-		}
-	}
-	for _, u := range staleBagherLinkUnits(keep) {
-		_, _ = runCmd("systemctl", "disable", "--now", u)
-		_ = os.Remove(filepath.Join("/etc/systemd/system", u))
-	}
-	if _, err := runCmd("systemctl", "daemon-reload"); err != nil {
-		return fmt.Errorf("daemon-reload failed: %w", err)
-	}
-	for _, l := range cfg.Links {
-		u := bagherLinkUnit(l.ID) + ".service"
-		if out, err := runCmd("systemctl", "enable", "--now", u); err != nil {
-			return fmt.Errorf("failed starting %s: %v %s", u, err, strings.TrimSpace(out))
-		}
-		if restart {
-			_, _ = runCmd("systemctl", "restart", u)
-		}
-	}
-	return nil
-}
-
-// staleBagherLinkUnits lists quantum-bagher-<n>.service files not in keep.
-func staleBagherLinkUnits(keep map[string]bool) []string {
-	matches, _ := filepath.Glob("/etc/systemd/system/quantum-bagher-*.service")
-	var out []string
-	for _, m := range matches {
-		b := filepath.Base(m)
-		var n int
-		if _, err := fmt.Sscanf(b, "quantum-bagher-%d.service", &n); err == nil && n > 1 && !keep[b] {
-			out = append(out, b)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// stopBagherLinkUnits stops (and with remove, deletes) every extra link's carrier.
-func stopBagherLinkUnits(cfg SSHFwdConfig, remove bool) {
-	names := staleBagherLinkUnits(nil)
-	for _, l := range cfg.Links {
-		names = append(names, bagherLinkUnit(l.ID)+".service")
-	}
-	seen := map[string]bool{}
-	for _, u := range names {
-		if seen[u] {
-			continue
-		}
-		seen[u] = true
-		_, _ = runCmd("systemctl", "disable", "--now", u)
-		if remove {
-			_ = os.Remove(filepath.Join("/etc/systemd/system", u))
-		}
-	}
-	for _, l := range cfg.Links {
-		_ = os.Remove(bagherCarrierStatusPath(l.ID))
-	}
 }
 
 // bagherProxiesOnline asks the Iran frps which proxies are online
@@ -322,56 +195,4 @@ func bagherLinksStatus(cfg SSHFwdConfig, pubKey string, withBundle bool) []map[s
 		res = append(res, m)
 	}
 	return res
-}
-
-// migrateBagherCarrierUnit moves a Bagher unit written by an older panel
-// (ssh -N -R, the high-ping carrier) to the panel's carrier, so an update
-// alone fixes the ping. Only a unit for the configured foreign server is
-// touched; a running one is restarted onto the new carrier.
-func migrateBagherCarrierUnit(unitPath string) (bool, error) {
-	data, err := os.ReadFile(unitPath)
-	if err != nil {
-		return false, nil // no Bagher here
-	}
-	unit := string(data)
-	cfg := loadSSHFwdConfigLocked()
-	if !strings.Contains(unit, "ExecStart=/usr/bin/ssh -N ") || !strings.Contains(unit, fmt.Sprintf(" -R 127.0.0.1:%d:", cfg.FRPBindPort)) ||
-		cfg.RemoteHost == "" || !strings.HasSuffix(strings.TrimSpace(execStartOf(unit)), "@"+cfg.RemoteHost) {
-		return false, nil
-	}
-	if _, err := os.Stat(cfg.KeyPath); err != nil {
-		return false, nil
-	}
-	if err := os.WriteFile(unitPath, []byte(buildSSHFwdService(cfg)), 0644); err != nil {
-		return false, err
-	}
-	_, _ = runCmd("systemctl", "daemon-reload")
-	_, _ = runCmd("systemctl", "try-restart", filepath.Base(unitPath))
-	return true, nil
-}
-
-// migrateBagherFRPCTLS adds bagherFRPCNoTLS to a Bagher frpc.toml written by
-// an older panel or quantum.sh and restarts a running frpc, so an update alone
-// drops the second encryption layer. A file that sets TLS itself is left alone.
-func migrateBagherFRPCTLS(path string) (bool, error) {
-	data, err := os.ReadFile(path)
-	// a [transport] table would make the prepended dotted key a duplicate: leave such a file to its writer
-	if err != nil || strings.Contains(string(data), "transport.tls.enable") || strings.Contains(string(data), "[transport") {
-		return false, nil // no Bagher frpc here, or already decided
-	}
-	// first line: a top-level key must come before any [[proxies]] table
-	if err := writeTokenFile(path, append([]byte(bagherFRPCNoTLS+"\n"), data...)); err != nil {
-		return false, err
-	}
-	_, _ = runCmd("systemctl", "try-restart", "quantum-bagher-frpc.service")
-	return true, nil
-}
-
-func execStartOf(unit string) string {
-	for _, line := range strings.Split(unit, "\n") {
-		if strings.HasPrefix(line, "ExecStart=") {
-			return strings.TrimPrefix(line, "ExecStart=")
-		}
-	}
-	return ""
 }
