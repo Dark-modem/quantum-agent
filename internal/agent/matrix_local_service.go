@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 type matrixLocalService struct {
@@ -25,7 +27,7 @@ type matrixLocalService struct {
 // Each Matrix instance owns its own local-service registry file so instances
 // never share mutable state.
 func matrixLocalPath(in matrixInstance) string {
-	return filepath.Join(configDir, "matrix"+in.suffix()+"-local-services.json")
+	return filepath.Join(infra.ConfigDir, "matrix"+in.suffix()+"-local-services.json")
 }
 func matrixLocalServices(in matrixInstance) ([]matrixLocalService, error) {
 	var services []matrixLocalService
@@ -51,7 +53,7 @@ func saveMatrixLocalServices(in matrixInstance, services []matrixLocalService) e
 	if e != nil {
 		return e
 	}
-	f, e := os.CreateTemp(configDir, ".matrix-local-*")
+	f, e := os.CreateTemp(infra.ConfigDir, ".matrix-local-*")
 	if e != nil {
 		return e
 	}

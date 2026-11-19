@@ -1,4 +1,15 @@
-package agent
+// Package infra is the leaf package of shared host utilities that both the
+// agent runtime (internal/agent) and the engine drivers (internal/engines)
+// use: external-command execution, the config directory, IP/host helpers,
+// /proc parsing and the public-IP detection family.
+//
+// REFACTOR-PLAN-AGENT §6.A4: this package exists so internal/engines never
+// imports internal/agent — the leaf sits below both.
+//
+// SWAPPABLE SEAMS: Runner (external commands), CarrierLookup (DNS) and the
+// ConfigDir variable are package-level so tests still point them at temp
+// dirs — same semantics as before the move, one package up.
+package infra
 
 import (
 	"context"
@@ -11,18 +22,22 @@ import (
 	"time"
 )
 
-// cmdRunner executes one external command and returns its output. Tests swap
-// the package-level runner to stub the host.
+// ConfigDir is the agent's configuration directory.
+var ConfigDir = "/etc/quantum-agent"
+
+// EngineUnitDir is the systemd unit directory the engine units install to.
+var EngineUnitDir = "/etc/systemd/system"
+
 type cmdRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 type stdoutOnlyKey struct{}
 
-// runner is the single seam for external commands that go through runCmdTimeout.
-var runner cmdRunner = execRunner
+// Runner is the single seam for external commands that go through
+// RunCmdTimeout. Tests swap it to stub the host.
+var Runner cmdRunner = ExecRunner
 
-// execRunner is the real implementation: combined output, or stdout only when
-// the context was built by runCmdTimeoutOut.
-func execRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
+// ExecRunner is the real runner implementation, exported for lab tests.
+func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if ctx.Value(stdoutOnlyKey{}) != nil {
 		return cmd.Output()
@@ -80,7 +95,7 @@ func runCmdTimeoutCtx(ctx context.Context, timeout time.Duration, name string, a
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
-	out, err := runner(ctx, name, args...)
+	out, err := Runner(ctx, name, args...)
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 	var exitErr *exec.ExitError
 	answer := errors.As(err, &exitErr) && exitIsAnswer(name, args)
@@ -122,14 +137,14 @@ func exitIsAnswer(name string, args []string) bool {
 	return false
 }
 
-// runCmdTimeout runs name with a hard timeout (combined stdout+stderr), counting the
+// RunCmdTimeout runs name with a hard timeout (combined stdout+stderr), counting the
 // call in the exec metrics.
-func runCmdTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
+func RunCmdTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
 	return runCmdTimeoutCtx(context.Background(), timeout, name, args...)
 }
 
-// runCmdTimeoutOut is runCmdTimeout returning stdout only (stderr is dropped).
-func runCmdTimeoutOut(timeout time.Duration, name string, args ...string) ([]byte, error) {
+// RunCmdTimeoutOut is RunCmdTimeout returning stdout only (stderr is dropped).
+func RunCmdTimeoutOut(timeout time.Duration, name string, args ...string) ([]byte, error) {
 	return runCmdTimeoutCtx(context.WithValue(context.Background(), stdoutOnlyKey{}, true), timeout, name, args...)
 }
 
@@ -143,7 +158,8 @@ type execStatJSON struct {
 	CallsLast60s uint64  `json:"calls_last_60s"`
 }
 
-func execSnapshot() []execStatJSON {
+// ExecSnapshot returns the per-command exec counters (the diag view).
+func ExecSnapshot() []execStatJSON {
 	now := time.Now().Unix()
 	execMu.Lock()
 	defer execMu.Unlock()
@@ -164,7 +180,8 @@ func execSnapshot() []execStatJSON {
 	return res
 }
 
-func resetExecStats() {
+// ResetExecStats clears the exec counters (test helper).
+func ResetExecStats() {
 	execMu.Lock()
 	execStats = map[string]*execStat{}
 	execMu.Unlock()

@@ -26,7 +26,7 @@ package agent
 // replacement.
 //
 // Every apply records a before/after snapshot plus the executed commands
-// in <configDir>/firewall_audit.jsonl (append-only), supports dry-run,
+// in <infra.ConfigDir>/firewall_audit.jsonl (append-only), supports dry-run,
 // and rolls back its OWN applied steps in reverse order when a step
 // fails. All host execution goes through the fwRun seam so tests run
 // hermetically; tests/test_firewall_lab.sh exercises the real backends
@@ -43,13 +43,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // ---- execution seam ----
 
 // fwRun executes one host command (combined output). Tests swap it.
 var fwRun = func(name string, args ...string) (string, error) {
-	out, err := runCmdTimeout(15*time.Second, name, args...)
+	out, err := infra.RunCmdTimeout(15*time.Second, name, args...)
 	return string(out), err
 }
 
@@ -460,7 +462,7 @@ func fwPlanRemoveOwner(owner string) (fwPlan, error) {
 // ---- execution ----
 
 // fwAuditPath is the append-only audit trail.
-func fwAuditPath() string { return filepath.Join(configDir, "firewall_audit.jsonl") }
+func fwAuditPath() string { return filepath.Join(infra.ConfigDir, "firewall_audit.jsonl") }
 
 type fwAuditEntry struct {
 	At         int64      `json:"at"`

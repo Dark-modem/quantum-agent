@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestCarrierDefaultsAndLoadSave(t *testing.T) {
@@ -16,9 +18,9 @@ func TestCarrierDefaultsAndLoadSave(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	// Default when file is missing
 	def := loadCarrierConfig()
@@ -55,9 +57,9 @@ func TestCarrierAPIEndpoints(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	// Initial GET
 	req := httptest.NewRequest("GET", "/api/carrier", nil)

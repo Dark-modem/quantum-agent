@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // engineManifestTestEnv wires the seams for one manifest scenario: the
@@ -54,13 +56,13 @@ func engineManifestTestEnv(t *testing.T, pubB64 string, manifestBody []byte, man
 			return nil, fmt.Errorf("unexpected url %q", url)
 		}
 	}
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	t.Cleanup(func() {
 		engineArtifactPubKeyB64 = origKey
 		frpLoadIdentity = origIdent
 		frpFetchArtifact = origFetch
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return calls, urls
 }
@@ -127,7 +129,7 @@ func TestEngineManifestWrongArchFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fallback EnsureBinary: %v", err)
 	}
-	if !fileExists(filepath.Join(dir, "frps")) {
+	if !infra.FileExists(filepath.Join(dir, "frps")) {
 		t.Fatal("fallback binaries not installed")
 	}
 	usedPinned := false
@@ -155,7 +157,7 @@ func TestEngineManifestPanelUnreachableFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unreachable-manifest fallback: %v", err)
 	}
-	if !fileExists(filepath.Join(dir, "frps")) {
+	if !infra.FileExists(filepath.Join(dir, "frps")) {
 		t.Fatal("fallback binaries not installed")
 	}
 	// Second call: the pinned fast path (cache hit) — zero further fetches.

@@ -6,8 +6,8 @@ package agent
 // documented in docs/NETOPT-AGENT-MODE.md and MUST NOT change casually.
 //
 // Install roles (netInstallRole):
-//   - "controller": <configDir>/panel.json present (full panel)
-//   - "agent":      <configDir>/agent.json present, no panel.json (lightweight
+//   - "controller": <infra.ConfigDir>/panel.json present (full panel)
+//   - "agent":      <infra.ConfigDir>/agent.json present, no panel.json (lightweight
 //     endpoint — the panel.json check that Session 6's QA caught is gone;
 //     the engine never requires the full-panel config here and never creates
 //     a fake one)

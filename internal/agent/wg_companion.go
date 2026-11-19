@@ -24,7 +24,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"github.com/Dark-modem/quantum-agent/internal/engine"
 	"net"
 	"os"
 	"os/exec"
@@ -32,6 +31,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 const companionUDP2Raw = "udp2raw"
@@ -180,7 +182,7 @@ func wgCompanionEnsureBinary(ctx context.Context, tunnelID string, c *wgCompanio
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(configDir, "engines", companionUDP2Raw, "bin", c.Version)
+	dir := filepath.Join(infra.ConfigDir, "engines", companionUDP2Raw, "bin", c.Version)
 	if engineCacheHit(dir, sha256Hex, []string{"udp2raw"}) {
 		return dir, nil
 	}

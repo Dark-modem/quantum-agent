@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // netTestEnv replaces every seam with in-memory fixtures and restores them on
@@ -77,7 +79,7 @@ func netTestEnv(t *testing.T, files map[string]string, dirs map[string][]string,
 		netStat = os.Stat
 		netLstat = os.Readlink
 		netDetectExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			return runner(ctx, name, args...)
+			return infra.Runner(ctx, name, args...)
 		}
 	})
 }
@@ -158,15 +160,15 @@ func netIfaceFixtures() (map[string]string, map[string][]string, map[string]stri
 }
 
 // netApplyStubEnv installs the fixture env AND the apply machinery: owned
-// paths under the temp configDir, a sysctl -w/-p handler that mutates the
+// paths under the temp infra.ConfigDir, a sysctl -w/-p handler that mutates the
 // fixture map (so read-back verification is real), ring/rps handlers, and an
 // always-successful connectivity probe. Returns ringCur's pointer for the
 // ring assertions.
 func netApplyStubEnv(t *testing.T, files map[string]string, dirs map[string][]string, exec map[string]string) *string {
 	t.Helper()
 	oldSys, oldUnit := netOwnedSysctlFile, netOwnedUnitFile
-	netOwnedSysctlFile = filepath.Join(configDir, "sysctl.d", "99-quantum-netopt.conf")
-	netOwnedUnitFile = filepath.Join(configDir, "quantum-netopt-nic.service")
+	netOwnedSysctlFile = filepath.Join(infra.ConfigDir, "sysctl.d", "99-quantum-netopt.conf")
+	netOwnedUnitFile = filepath.Join(infra.ConfigDir, "quantum-netopt-nic.service")
 	t.Cleanup(func() { netOwnedSysctlFile, netOwnedUnitFile = oldSys, oldUnit })
 	exec["systemctl daemon-reload"] = ""
 	exec["systemctl enable quantum-netopt-nic.service"] = ""
@@ -409,17 +411,17 @@ func TestNetReservedPortsValueScansConfigs(t *testing.T) {
 	withTempConfig(t)
 	old := netReadFile
 	t.Cleanup(func() { netReadFile = old })
-	netReadFile = os.ReadFile // real fs under the temp configDir
-	if err := os.WriteFile(filepath.Join(configDir, "panel.json"), []byte(`{"port": 7777, "tls_port": 7443}`), 0600); err != nil {
+	netReadFile = os.ReadFile // real fs under the temp infra.ConfigDir
+	if err := os.WriteFile(filepath.Join(infra.ConfigDir, "panel.json"), []byte(`{"port": 7777, "tls_port": 7443}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "frps-main.toml"), []byte("bindPort = 7000\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(infra.ConfigDir, "frps-main.toml"), []byte("bindPort = 7000\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(configDir, "backhaul"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(infra.ConfigDir, "backhaul"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "backhaul", "srv.toml"), []byte(`bind_addr = "0.0.0.0:65000"`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(infra.ConfigDir, "backhaul", "srv.toml"), []byte(`bind_addr = "0.0.0.0:65000"`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	got := netReservedPortsValue()
@@ -443,10 +445,10 @@ func TestNetApplyAppliesVerifiesPersists(t *testing.T) {
 	// bbr becomes "current" after apply, as the -w stub will record.
 	files["/proc/sys/net/ipv4/tcp_notsent_lowat"] = "-1\n"
 
-	// Owned files live in the temp configDir for the test.
+	// Owned files live in the temp infra.ConfigDir for the test.
 	oldSys, oldUnit := netOwnedSysctlFile, netOwnedUnitFile
-	netOwnedSysctlFile = filepath.Join(configDir, "sysctl.d", "99-quantum-netopt.conf")
-	netOwnedUnitFile = filepath.Join(configDir, "quantum-netopt-nic.service")
+	netOwnedSysctlFile = filepath.Join(infra.ConfigDir, "sysctl.d", "99-quantum-netopt.conf")
+	netOwnedUnitFile = filepath.Join(infra.ConfigDir, "quantum-netopt-nic.service")
 	t.Cleanup(func() { netOwnedSysctlFile, netOwnedUnitFile = oldSys, oldUnit })
 
 	exec["systemctl daemon-reload"] = ""
@@ -551,8 +553,8 @@ func TestNetApplyRollsBackWhenConnectivityDies(t *testing.T) {
 	withTempConfig(t)
 	files, dirs, exec := netIfaceFixtures()
 	oldSys, oldUnit := netOwnedSysctlFile, netOwnedUnitFile
-	netOwnedSysctlFile = filepath.Join(configDir, "sysctl.d", "99-quantum-netopt.conf")
-	netOwnedUnitFile = filepath.Join(configDir, "quantum-netopt-nic.service")
+	netOwnedSysctlFile = filepath.Join(infra.ConfigDir, "sysctl.d", "99-quantum-netopt.conf")
+	netOwnedUnitFile = filepath.Join(infra.ConfigDir, "quantum-netopt-nic.service")
 	t.Cleanup(func() { netOwnedSysctlFile, netOwnedUnitFile = oldSys, oldUnit })
 
 	netTestEnv(t, files, dirs, exec)

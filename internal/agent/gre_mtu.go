@@ -8,11 +8,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Path MTU. quantum.sh gives GRE interfaces MTU 1380 and clamps TCP MSS to
 // 1340. When Diagnostics measures that 1380-byte packets do not cross the
-// path, Quick Repair saves the largest size that does in <configDir>/gre_mtu.
+// path, Quick Repair saves the largest size that does in <infra.ConfigDir>/gre_mtu.
 // quantum.sh reads that file wherever it sets the MTU or the clamp (start,
 // carrier switch, Optimize, Restore), and the panel re-checks it every minute
 // so an older quantum.sh cannot put 1380 back.
@@ -23,7 +25,7 @@ const (
 	greMSSDefault = 1340
 )
 
-func pathMTUFile() string { return filepath.Join(configDir, "gre_mtu") }
+func pathMTUFile() string { return filepath.Join(infra.ConfigDir, "gre_mtu") }
 
 // savedPathMTU is the saved path MTU, 0 when there is none.
 func savedPathMTU() int {
@@ -47,7 +49,7 @@ func savePathMTU(v int) error {
 
 // pathMTURun runs ip / iptables; swappable so tests never touch the host.
 var pathMTURun = func(name string, args ...string) ([]byte, error) {
-	return runCmdTimeoutOut(5*time.Second, name, args...)
+	return infra.RunCmdTimeoutOut(5*time.Second, name, args...)
 }
 
 // greInterfaces lists this server's GRE tunnel interfaces (gre-tunnel, gre-tN).

@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Regression: sendToPeer used to build a fresh http.Transport per call and
@@ -14,9 +16,9 @@ import (
 // closed). The peer sync loop calls it every 10s, so sockets, goroutines and
 // RAM grew without bound (tens of thousands of ESTABLISHED sockets).
 func TestSendToPeerDoesNotLeakConnections(t *testing.T) {
-	oldDir := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = oldDir })
+	oldDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = oldDir })
 
 	var open int64
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

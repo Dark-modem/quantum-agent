@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Error catalog ported VERBATIM from the controller monolith
@@ -215,7 +217,7 @@ var (
 	errEvents []errEvent
 )
 
-func errorLogPath() string { return filepath.Join(configDir, "panel-errors.log") }
+func errorLogPath() string { return filepath.Join(infra.ConfigDir, "panel-errors.log") }
 
 // recordError appends to the journal and mirrors it to the log file.
 func recordError(code, endpoint, detail string) {

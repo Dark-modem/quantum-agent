@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -75,8 +77,8 @@ func ctSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 	t.Cleanup(func() { frpLoadIdentity = origIdent })
 	origKey := engineArtifactPubKeyB64
 	engineArtifactPubKeyB64 = "test-pinned-key"
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	// Warm the artifact cache so Start never needs the network.
 	binDir := ctBinDir(ctPinnedVersion)
 	_ = os.MkdirAll(binDir, 0o700)
@@ -85,7 +87,7 @@ func ctSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 	t.Cleanup(func() {
 		frpLoadIdentity = origIdent
 		engineArtifactPubKeyB64 = origKey
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return cmds, spawned
 }
@@ -227,7 +229,7 @@ func TestCtunnelArgsShape(t *testing.T) {
 	d := NewCtunnelDriver()
 	p := ctTestParams()
 	inst := engine.Instance{TunnelID: "ct1", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -281,7 +283,7 @@ func TestCtunnelArgsShape(t *testing.T) {
 	}
 	t.Cleanup(func() { frpLoadIdentity = origIdent })
 	if err := d.Start(context.Background(), engine.Instance{TunnelID: "ct2",
-		LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(p)}); err != nil {
+		LocalServer: "iran", RemoteServer: "germany", Params: infra.MustJSON(p)}); err != nil {
 		t.Fatal(err)
 	}
 	clientJoined := strings.Join(*cmds, "\n")
@@ -322,7 +324,7 @@ func TestCtunnelArgsShape(t *testing.T) {
 	if err := d.Uninstall(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if fileExists(ctEngineDir()) {
+	if infra.FileExists(ctEngineDir()) {
 		t.Fatal("engine dir left after Uninstall")
 	}
 }
@@ -332,7 +334,7 @@ func TestCtunnelReloadAndForwardAddress(t *testing.T) {
 	d := NewCtunnelDriver()
 	p := ctTestParams()
 	inst := engine.Instance{TunnelID: "ct3", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +346,7 @@ func TestCtunnelReloadAndForwardAddress(t *testing.T) {
 	// Changed params: restart required.
 	p2 := p
 	p2.PublicPort = 25300
-	if err := d.Reload(engine.Instance{TunnelID: "ct3", Params: mustJSON(p2)}); err != engine.ErrRestartRequired {
+	if err := d.Reload(engine.Instance{TunnelID: "ct3", Params: infra.MustJSON(p2)}); err != engine.ErrRestartRequired {
 		t.Fatalf("changed reload: %v", err)
 	}
 	// ForwardAddress: the iran end answers via the kharej tunnel IP.

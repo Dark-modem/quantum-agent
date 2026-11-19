@@ -33,6 +33,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // legacyBrandReplacer maps the new brand back onto the legacy one.
@@ -116,7 +118,7 @@ func legacyUnitMigration(unit string) {
 		return
 	}
 	newPath := legacyUnitFilePath(unit)
-	if fileExists(newPath) {
+	if infra.FileExists(newPath) {
 		return
 	}
 	data, err := os.ReadFile(legacyUnitFilePath(legacy))
@@ -160,7 +162,7 @@ func legacyUnitRetire(unit string) {
 	if legacyOnce("retire", legacy) {
 		return
 	}
-	if !fileExists(legacyUnitFilePath(legacy)) {
+	if !infra.FileExists(legacyUnitFilePath(legacy)) {
 		return
 	}
 	log.Printf("[QUANTUM-MIGRATE] retiring legacy unit %s (replaced by %s)", legacy, unit)
@@ -178,7 +180,7 @@ func legacyFileMigration(path string) {
 	if legacyOnce("file", legacy) {
 		return
 	}
-	if fileExists(path) {
+	if infra.FileExists(path) {
 		return
 	}
 	data, err := os.ReadFile(legacy)

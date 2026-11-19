@@ -28,6 +28,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -151,8 +153,8 @@ func xraySetTestEnv(t *testing.T) (spawned *int, leaked *strings.Builder) {
 	// (no listener) — stub it healthy; the integration runs the real dial.
 	origProbe := xrayProbeFn
 	xrayProbeFn = func(int) error { return nil }
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	t.Cleanup(func() {
 		engineArtifactPubKeyB64 = origKey
 		frpLoadIdentity = origIdent
@@ -161,7 +163,7 @@ func xraySetTestEnv(t *testing.T) (spawned *int, leaked *strings.Builder) {
 		execCommandJSON = origStats
 		acctIptables = origIpt
 		xrayProbeFn = origProbe
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return spawned, leaked
 }
@@ -236,7 +238,7 @@ func TestXrayStartStopSecrets(t *testing.T) {
 	d := NewXrayDriver()
 	p := xrayTestParams()
 	serverInst := engine.Instance{TunnelID: "tx1", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), serverInst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -379,7 +381,7 @@ func TestXrayForwardAddress(t *testing.T) {
 	d := NewXrayDriver()
 	p := xrayTestParams()
 	serverInst := engine.Instance{TunnelID: "tx-fa", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	host, port, ok := d.ForwardAddress(serverInst)
 	if !ok || host != "127.0.0.1" || port != p.PublicPort {
 		t.Fatalf("server-side forward = %s:%d %v", host, port, ok)
@@ -388,7 +390,7 @@ func TestXrayForwardAddress(t *testing.T) {
 		return agentIdentity{Server: "http://panel.test", Name: "iran-1"}, true
 	}
 	host, port, ok = d.ForwardAddress(engine.Instance{TunnelID: "tx-fa", LocalServer: "iran",
-		RemoteServer: "germany", Params: mustJSON(p)})
+		RemoteServer: "germany", Params: infra.MustJSON(p)})
 	if !ok || host != p.RemoteAddr || port != p.PublicPort {
 		t.Fatalf("client-side forward = %s:%d %v", host, port, ok)
 	}
@@ -408,7 +410,7 @@ func TestXrayManagerReconcile(t *testing.T) {
 	res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "xray", Enabled: true}},
 		[]engine.TunnelSpec{{ID: "tx3", Engine: "xray", LocalServer: "germany", RemoteServer: "iran",
-			Params: mustJSON(p), Enabled: true}})
+			Params: infra.MustJSON(p), Enabled: true}})
 	if len(res.Errors) > 0 {
 		t.Fatalf("reconcile: %v", res.Errors)
 	}
@@ -572,9 +574,9 @@ func TestXrayMixedManagerShape(t *testing.T) {
 		{ID: "backhaul", Enabled: true}, {ID: "fake", Enabled: true},
 	}
 	tunnels := []engine.TunnelSpec{
-		{ID: "t-xray", Engine: "xray", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(xp), Enabled: true},
-		{ID: "t-frp", Engine: "frp", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(frpP), Enabled: true},
-		{ID: "t-bh", Engine: "backhaul", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(bp), Enabled: true},
+		{ID: "t-xray", Engine: "xray", LocalServer: "germany", RemoteServer: "iran", Params: infra.MustJSON(xp), Enabled: true},
+		{ID: "t-frp", Engine: "frp", LocalServer: "germany", RemoteServer: "iran", Params: infra.MustJSON(frpP), Enabled: true},
+		{ID: "t-bh", Engine: "backhaul", LocalServer: "germany", RemoteServer: "iran", Params: infra.MustJSON(bp), Enabled: true},
 		{ID: "t-matrix", Engine: "fake", LocalServer: "germany", RemoteServer: "iran", Enabled: true},
 	}
 	res := mgr.Reconcile(context.Background(), specs, tunnels)

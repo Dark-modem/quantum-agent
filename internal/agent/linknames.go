@@ -14,11 +14,13 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 var linkNamesMu sync.Mutex
 
-func linkNamesPath() string { return filepath.Join(configDir, "link_names.json") }
+func linkNamesPath() string { return filepath.Join(infra.ConfigDir, "link_names.json") }
 
 var linkNameKeyRe = regexp.MustCompile(`^(main|bagher-[1-9][0-9]{0,3})$`)
 

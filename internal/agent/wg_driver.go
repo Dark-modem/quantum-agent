@@ -25,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"regexp"
 	"strings"
 	"sync"
@@ -207,7 +209,7 @@ func (d *WgDriver) Validate(params json.RawMessage) error {
 }
 
 // wgKeyState is the persisted per-tunnel keypair (0600 under
-// configDir/wg): agent restarts and panel revisions must never re-key a
+// infra.ConfigDir/wg): agent restarts and panel revisions must never re-key a
 // tunnel — the panel's peer_public revision targets the ACK'D key, and a
 // regenerated key would orphan it.
 type wgKeyState struct {
@@ -218,7 +220,7 @@ type wgKeyState struct {
 // wgLoadOrGenKeys loads the tunnel's persisted keypair, generating and
 // saving one (0600) only when none exists.
 func wgLoadOrGenKeys(tunnelID string) (pubB64, privB64 string, err error) {
-	dir := filepath.Join(configDir, "wg")
+	dir := filepath.Join(infra.ConfigDir, "wg")
 	path := filepath.Join(dir, tunnelID+".key")
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		var ks wgKeyState
@@ -333,7 +335,7 @@ func (d *WgDriver) Start(ctx context.Context, inst engine.Instance) error {
 	// (ps exposure), and never "/dev/stdin <key>" — wg parses the value
 	// AFTER the file as the next attribute and refuses the whole call
 	// (found by the netns integration test).
-	keyFile := filepath.Join(configDir, "wg", iface+".key")
+	keyFile := filepath.Join(infra.ConfigDir, "wg", iface+".key")
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
 		_ = wgCmd("ip", "link", "del", iface)
 		return fmt.Errorf("wg: key dir: %w", err)
@@ -641,10 +643,10 @@ func (d *WgDriver) Uninstall(ctx context.Context) error {
 	d.mu.Unlock()
 	for _, id := range ids {
 		_ = d.Stop(engine.Instance{TunnelID: id})
-		_ = os.Remove(filepath.Join(configDir, "wg", id+".key"))
+		_ = os.Remove(filepath.Join(infra.ConfigDir, "wg", id+".key"))
 	}
 	// remove the key dir when empty (never anyone else's files)
-	_ = os.Remove(filepath.Join(configDir, "wg"))
+	_ = os.Remove(filepath.Join(infra.ConfigDir, "wg"))
 	return nil
 }
 
@@ -679,7 +681,7 @@ var wgToolExec = func(args ...string) (string, error) {
 			bin, rest = args[0], args[1:]
 		}
 	}
-	out, err := runCmdTimeout(10*time.Second, bin, rest...)
+	out, err := infra.RunCmdTimeout(10*time.Second, bin, rest...)
 	return string(out), err
 }
 

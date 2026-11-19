@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 const mangleWithClamp = `-P PREROUTING ACCEPT
@@ -68,7 +70,7 @@ func TestSavedPathMTUBounds(t *testing.T) {
 		t.Fatal("save/read round trip")
 	}
 	_ = savePathMTU(1380) // the default again: the file goes
-	if fileExists(pathMTUFile()) {
+	if infra.FileExists(pathMTUFile()) {
 		t.Fatal("saving the default must remove the file")
 	}
 }

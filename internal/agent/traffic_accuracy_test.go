@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // The bugs behind wrong totals and speeds, one test each.
@@ -18,13 +20,13 @@ import (
 // traffic state between these tests.
 func resetTrafficState(t *testing.T) {
 	t.Helper()
-	old := configDir
-	configDir = t.TempDir()
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	trafficStateMu.Lock()
 	trafficStateInit, lifetimeUp, lifetimeDown, lastRawUp, lastRawDown, lastRawIf = false, 0, 0, 0, 0, nil
 	lastSampleAt, speedDeltaUp, speedDeltaDown, currentSpeedUp, currentSpeedDown = time.Time{}, 0, 0, 0, 0
 	trafficStateMu.Unlock()
-	t.Cleanup(func() { configDir = old })
+	t.Cleanup(func() { infra.ConfigDir = old })
 }
 
 // devLines renders a /proc/net/dev snippet (was dashboard_test.go's helper).
@@ -180,8 +182,8 @@ func TestAcctRuleKey(t *testing.T) {
 // Each Backhaul unit and Bagher link gets its own counters, from the same
 // iptables-save read as the total.
 func TestCarrierTagCounters(t *testing.T) {
-	oldDir, oldCfg, oldRunner := backhaulDir, configDir, runner
-	backhaulDir, configDir = t.TempDir(), t.TempDir()
+	oldDir, oldCfg, oldRunner := backhaulDir, infra.ConfigDir, infra.Runner
+	backhaulDir, infra.ConfigDir = t.TempDir(), t.TempDir()
 	_ = os.WriteFile(filepath.Join(backhaulDir, "server.toml"), []byte("[server]\nbind_addr = \"0.0.0.0:3080\"\n"), 0o600)
 	_ = os.WriteFile(filepath.Join(backhaulDir, "server-3.toml"), []byte("[server]\nbind_addr = \"0.0.0.0:3090\"\n"), 0o600)
 	cfg := defaultSSHFwdConfig()
@@ -195,7 +197,7 @@ func TestCarrierTagCounters(t *testing.T) {
 		"[1:2000] -A QUANTUM_ACCT_OUT -p tcp -m tcp --sport 3080\n" +
 		"[1:300] -A QUANTUM_ACCT_IN -p tcp -m tcp --dport 3090\n[1:400] -A QUANTUM_ACCT_OUT -p tcp -m tcp --sport 3090\n" +
 		"[1:50] -A QUANTUM_ACCT_IN -s 198.51.100.1/32 -p tcp -m tcp --sport 22\n[1:60] -A QUANTUM_ACCT_OUT -d 198.51.100.1/32 -p tcp -m tcp --dport 22\nCOMMIT\n"
-	runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	infra.Runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name == "iptables-save" {
 			return []byte(save), nil
 		}
@@ -207,7 +209,7 @@ func TestCarrierTagCounters(t *testing.T) {
 		carrierState.Unlock()
 	}
 	t.Cleanup(func() {
-		backhaulDir, configDir, runner = oldDir, oldCfg, oldRunner
+		backhaulDir, infra.ConfigDir, infra.Runner = oldDir, oldCfg, oldRunner
 		carrierState.Lock()
 		carrierState.sig, carrierState.at, carrierState.tags, carrierState.ok = "", time.Time{}, nil, false
 		carrierState.Unlock()

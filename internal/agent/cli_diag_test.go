@@ -11,12 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestDiagBundleRedacted(t *testing.T) {
-	oldCfg := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = origCfgForDiag(oldCfg) })
+	oldCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = origCfgForDiag(oldCfg) })
 
 	// Seed secrets: the enrollment (key + pin), a Matrix state file with a
 	// token, and a private-key file in the state dir.
@@ -33,7 +35,7 @@ func TestDiagBundleRedacted(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	privKey := filepath.Join(configDir, "some-engine", "private.key")
+	privKey := filepath.Join(infra.ConfigDir, "some-engine", "private.key")
 	if err := os.MkdirAll(filepath.Dir(privKey), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +89,6 @@ func TestDiagBundleRedacted(t *testing.T) {
 
 }
 
-// origCfgForDiag restores the caller's configDir (named so the cleanup
+// origCfgForDiag restores the caller's infra.ConfigDir (named so the cleanup
 // reads naturally).
 func origCfgForDiag(old string) string { return old }

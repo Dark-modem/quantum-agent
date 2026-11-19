@@ -42,6 +42,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -119,15 +121,15 @@ func TestAgentUpdateE2E(t *testing.T) {
 	if err := os.WriteFile(install, oldBytes, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	origCfg := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = origCfg })
-	enrollPath := filepath.Join(configDir, "agent.json")
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = origCfg })
+	enrollPath := filepath.Join(infra.ConfigDir, "agent.json")
 	enroll := []byte(`{"id":"upd-agent","key":"upd-key","server":"` + srv.URL + `","name":"upd"}`)
 	if err := os.WriteFile(enrollPath, enroll, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tunnelState := filepath.Join(configDir, "tunnel-state.json")
+	tunnelState := filepath.Join(infra.ConfigDir, "tunnel-state.json")
 	tunnelBytes := []byte(`{"tunnel":"keep-me"}`)
 	if err := os.WriteFile(tunnelState, tunnelBytes, 0o600); err != nil {
 		t.Fatal(err)
@@ -187,7 +189,7 @@ func TestAgentUpdateE2E(t *testing.T) {
 
 	// ---- 2. the panel DEAD: the updated agent stays alive on backoff ----
 	run := exec.Command(install, "run")
-	run.Env = append(os.Environ(), "GRE_PANEL_DIR="+configDir)
+	run.Env = append(os.Environ(), "GRE_PANEL_DIR="+infra.ConfigDir)
 	if err := run.Start(); err != nil {
 		t.Fatal(err)
 	}

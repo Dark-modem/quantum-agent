@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -50,8 +52,8 @@ func gostSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 	t.Cleanup(func() { frpLoadIdentity = origIdent })
 	origKey := engineArtifactPubKeyB64
 	engineArtifactPubKeyB64 = "test-pinned-key"
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	binDir := gostBinDir("3.3.3")
 	_ = os.MkdirAll(binDir, 0o700)
 	_ = os.WriteFile(filepath.Join(binDir, "gost"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
@@ -59,7 +61,7 @@ func gostSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 	t.Cleanup(func() {
 		frpLoadIdentity = origIdent
 		engineArtifactPubKeyB64 = origKey
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return cmds, spawned
 }
@@ -96,7 +98,7 @@ func TestGostArgsShape(t *testing.T) {
 	d := NewGostDriver()
 	p := gostTestParams()
 	inst := engine.Instance{TunnelID: "tg1", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -123,7 +125,7 @@ func TestGostArgsShape(t *testing.T) {
 	}
 	t.Cleanup(func() { frpLoadIdentity = origIdent })
 	if err := d.Start(context.Background(), engine.Instance{TunnelID: "tg2",
-		LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(p)}); err != nil {
+		LocalServer: "iran", RemoteServer: "germany", Params: infra.MustJSON(p)}); err != nil {
 		t.Fatal(err)
 	}
 	clientArgs := strings.Join(*cmds, "\n")
@@ -145,7 +147,7 @@ func TestGostArgsShape(t *testing.T) {
 	if err := d.Uninstall(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if fileExists(gostEngineDir()) {
+	if infra.FileExists(gostEngineDir()) {
 		t.Fatal("engine dir left after Uninstall")
 	}
 }

@@ -5,14 +5,16 @@ import (
 	"os"
 	"reflect"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // A Backhaul peer written by an older quantum.sh has raw_ports as one string.
 // It used to fail the whole decode, so every peer tunnel vanished from the panel.
 func TestLoadPeersReadsStringRawPorts(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	defer func() { configDir = old }()
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	defer func() { infra.ConfigDir = old }()
 
 	doc := `{"peers": [
   {"id": 1, "name": "de", "frp_port": 7000, "ports": [443], "gre_if": "gre-tunnel", "frps_svc": "frps"},

@@ -117,14 +117,6 @@ func maxPeers() int {
 	return 10
 }
 
-// primaryInterface returns the outbound-facing interface name.
-func primaryInterface() string {
-	return "" // the agent uses net.Interfaces directly; this is a compat stub
-}
-
-// configDir is the agent's configuration directory.
-var configDir = "/etc/quantum-agent"
-
 // panelVersion is the agent binary version (independent from controller).
 var panelVersion = "v0.1.0"
 

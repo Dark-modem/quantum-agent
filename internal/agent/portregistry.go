@@ -32,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // ---- model ----
@@ -74,7 +76,7 @@ var (
 
 func portRegistryFilepath() string {
 	if portRegPath == "" {
-		portRegPath = filepath.Join(configDir, "port_registry.json")
+		portRegPath = filepath.Join(infra.ConfigDir, "port_registry.json")
 	}
 	return portRegPath
 }

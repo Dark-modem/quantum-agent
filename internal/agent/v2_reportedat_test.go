@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // TestAgentReportV2ReportedAtPresent: the builder stamps ReportedAt from

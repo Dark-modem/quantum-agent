@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 const (
@@ -125,7 +127,7 @@ func matrixInstanceOfNetwork(network string) (matrixInstance, bool) {
 // matrixInstances lists every instance that has a state file on this server,
 // legacy first, in ascending instance order.
 func matrixInstances() []matrixInstance {
-	entries, err := os.ReadDir(configDir)
+	entries, err := os.ReadDir(infra.ConfigDir)
 	if err != nil {
 		return []matrixInstance{matrixLegacyInstance()}
 	}
@@ -238,11 +240,11 @@ type matrixBundlePayload struct {
 }
 
 func matrixDirOf(in matrixInstance) string {
-	return filepath.Join(configDir, "matrix"+in.suffix()+"-tinc")
+	return filepath.Join(infra.ConfigDir, "matrix"+in.suffix()+"-tinc")
 }
 func matrixDir() string { return matrixDirOf(matrixLegacyInstance()) }
 func matrixStatePathOf(in matrixInstance) string {
-	return filepath.Join(configDir, in.ID+".json")
+	return filepath.Join(infra.ConfigDir, in.ID+".json")
 }
 func matrixStatePath() string { return matrixStatePathOf(matrixLegacyInstance()) }
 func matrixUnitPathOf(in matrixInstance) string {
@@ -259,14 +261,14 @@ func loadMatrixInstance(in matrixInstance) matrixState {
 }
 func loadMatrix() matrixState { return loadMatrixInstance(matrixLegacyInstance()) }
 func saveMatrixInstance(in matrixInstance, st matrixState) error {
-	if e := os.MkdirAll(configDir, 0700); e != nil {
+	if e := os.MkdirAll(infra.ConfigDir, 0700); e != nil {
 		return e
 	}
 	b, e := json.MarshalIndent(st, "", "  ")
 	if e != nil {
 		return e
 	}
-	f, e := os.CreateTemp(configDir, ".matrix-state-*")
+	f, e := os.CreateTemp(infra.ConfigDir, ".matrix-state-*")
 	if e != nil {
 		return e
 	}

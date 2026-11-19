@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 type trafficPoint struct {
@@ -212,7 +214,7 @@ type serverMetricsStore struct {
 
 var serverMetrics serverMetricsStore
 
-func serverMetricsFile() string { return filepath.Join(configDir, "server_metrics.json") }
+func serverMetricsFile() string { return filepath.Join(infra.ConfigDir, "server_metrics.json") }
 
 func (s *serverMetricsStore) loadLocked(path string, now time.Time) {
 	if s.path == path {

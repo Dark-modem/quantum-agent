@@ -44,6 +44,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // The chain names — kernel-visible, byte-identical to the pre-A2 layout
@@ -90,10 +92,10 @@ var acctIPv6 = func() bool {
 // chains and the udp2raw RST rule). Hermetic tests stub them.
 var (
 	acctIptables = func(args ...string) ([]byte, error) {
-		return runCmdTimeout(10*time.Second, "iptables", args...)
+		return infra.RunCmdTimeout(10*time.Second, "iptables", args...)
 	}
 	acctIptablesSave = func() ([]byte, error) {
-		return runCmdTimeout(15*time.Second, "iptables-save", "-c", "-t", "filter")
+		return infra.RunCmdTimeout(15*time.Second, "iptables-save", "-c", "-t", "filter")
 	}
 )
 
@@ -279,7 +281,7 @@ func carrierRulesFam(ch acctChains, ends []carrierEnd, ifname string, fam int) s
 		if peer == "" {
 			peer = e.From
 		}
-		if peer != "" && ipFamily(peer) != fam || peer == "" && fam == 6 && !v6host {
+		if peer != "" && infra.IPFamily(peer) != fam || peer == "" && fam == 6 && !v6host {
 			continue
 		}
 		n++
@@ -459,8 +461,8 @@ func readCarrierCounters() (rx, tx uint64, ok bool) {
 	if !carrierState.lastFailed.IsZero() && time.Since(carrierState.lastFailed) < time.Minute {
 		return 0, 0, false
 	}
-	rules := carrierRules(ends, primaryInterface())
-	out, err := runCmdTimeoutOut(5*time.Second, "iptables-save", "-c", "-t", "filter")
+	rules := carrierRules(ends, infra.PrimaryInterface())
+	out, err := infra.RunCmdTimeoutOut(5*time.Second, "iptables-save", "-c", "-t", "filter")
 	if err != nil {
 		carrierState.lastFailed = time.Now()
 		return 0, 0, false
@@ -478,11 +480,11 @@ func readCarrierCounters() (rx, tx uint64, ok bool) {
 		rx, tx, byEnd = 0, 0, nil
 	}
 	// IPv6: a failing ip6tables leaves the IPv4 counts alone
-	if rules6 := carrierRules6(ends, primaryInterface()); rules6 == "" && carrierState.sig6 != "" {
+	if rules6 := carrierRules6(ends, infra.PrimaryInterface()); rules6 == "" && carrierState.sig6 != "" {
 		carrierDropFam("ip6tables")
 		carrierState.sig6 = ""
 	} else if rules6 != "" {
-		if out6, err := runCmdTimeoutOut(5*time.Second, "ip6tables-save", "-c", "-t", "filter"); err == nil {
+		if out6, err := infra.RunCmdTimeoutOut(5*time.Second, "ip6tables-save", "-c", "-t", "filter"); err == nil {
 			rx6, tx6, byEnd6, ready6 := parseAcctSaveEnds(acctChainsCarrier, string(out6))
 			if !ready6 || rules6 != carrierState.sig6 {
 				if carrierLoadFam(acctChainsCarrier, "ip6tables", rules6) == nil {
@@ -515,20 +517,20 @@ func carrierLoad(rules string) error { return carrierLoadFam(acctChainsCarrier, 
 
 // carrierLoadFam is carrierLoad with bin ("iptables" or "ip6tables").
 func carrierLoadFam(ch acctChains, bin, rules string) error {
-	_ = os.MkdirAll(configDir, 0o700)
-	f := filepath.Join(configDir, "carrier-acct.v4")
+	_ = os.MkdirAll(infra.ConfigDir, 0o700)
+	f := filepath.Join(infra.ConfigDir, "carrier-acct.v4")
 	if bin == "ip6tables" {
-		f = filepath.Join(configDir, "carrier-acct.v6")
+		f = filepath.Join(infra.ConfigDir, "carrier-acct.v6")
 	}
 	if err := os.WriteFile(f, []byte(rules), 0o600); err != nil {
 		return err
 	}
-	if out, err := runCmdTimeout(10*time.Second, bin+"-restore", "-w", "5", "-n", f); err != nil {
+	if out, err := infra.RunCmdTimeout(10*time.Second, bin+"-restore", "-w", "5", "-n", f); err != nil {
 		return fmt.Errorf("%s-restore: %s", bin, strings.TrimSpace(string(out)))
 	}
 	for _, h := range [][2]string{{"INPUT", ch.In}, {"OUTPUT", ch.Out}} {
-		if _, err := runCmdTimeout(5*time.Second, bin, "-w", "5", "-C", h[0], "-j", h[1]); err != nil {
-			if out, err := runCmdTimeout(5*time.Second, bin, "-w", "5", "-I", h[0], "1", "-j", h[1]); err != nil {
+		if _, err := infra.RunCmdTimeout(5*time.Second, bin, "-w", "5", "-C", h[0], "-j", h[1]); err != nil {
+			if out, err := infra.RunCmdTimeout(5*time.Second, bin, "-w", "5", "-I", h[0], "1", "-j", h[1]); err != nil {
 				return fmt.Errorf("%s -I %s: %s", bin, h[0], strings.TrimSpace(string(out)))
 			}
 		}
@@ -545,13 +547,13 @@ func carrierDrop() {
 
 func carrierDropFam(bin string) {
 	// a host that never counted IPv6 has no chains to drop: skip the failing calls
-	if out, err := runCmdTimeoutOut(5*time.Second, bin+"-save", "-t", "filter"); err == nil &&
+	if out, err := infra.RunCmdTimeoutOut(5*time.Second, bin+"-save", "-t", "filter"); err == nil &&
 		strings.Contains(string(out), "*filter") && !strings.Contains(string(out), ":"+acctCarrierIn+" ") {
 		return
 	}
 	for _, h := range [][2]string{{"INPUT", acctCarrierIn}, {"OUTPUT", acctCarrierOut}} {
-		_, _ = runCmdTimeout(5*time.Second, bin, "-w", "5", "-D", h[0], "-j", h[1])
-		_, _ = runCmdTimeout(5*time.Second, bin, "-w", "5", "-F", h[1])
-		_, _ = runCmdTimeout(5*time.Second, bin, "-w", "5", "-X", h[1])
+		_, _ = infra.RunCmdTimeout(5*time.Second, bin, "-w", "5", "-D", h[0], "-j", h[1])
+		_, _ = infra.RunCmdTimeout(5*time.Second, bin, "-w", "5", "-F", h[1])
+		_, _ = infra.RunCmdTimeout(5*time.Second, bin, "-w", "5", "-X", h[1])
 	}
 }

@@ -29,6 +29,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // rlSysctlAll is the kernel key the balancer owns while any rendered
@@ -49,7 +51,7 @@ var (
 	// rlSysctlWrite writes one sysctl key (`sysctl -w key=value`, the
 	// value UNQUOTED — netapply's live-acceptance lesson).
 	rlSysctlWrite = func(key, val string) error {
-		_, err := runCmdTimeout(5*time.Second, "sysctl", "-w", key+"="+val)
+		_, err := infra.RunCmdTimeout(5*time.Second, "sysctl", "-w", key+"="+val)
 		return err
 	}
 	// rlListenIface resolves the interface a listen port is reached on.

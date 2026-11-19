@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // legacyBackhaulUnitDir is where the old separate Modified Backhaul script put
@@ -36,7 +38,7 @@ var legacyBackhaulMigrate = func() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runCmdTimeout(5*time.Minute, "bash", script, "backhaul-migrate")
+	return infra.RunCmdTimeout(5*time.Minute, "bash", script, "backhaul-migrate")
 }
 
 // migrateLegacyBackhaul runs `quantum.sh backhaul-migrate` once at startup when

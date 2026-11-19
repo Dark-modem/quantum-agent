@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Paths are vars so tests point them at temp dirs.
@@ -68,7 +70,7 @@ func parseSSListeners(out string) []xrayListener {
 
 // xrayListeners is every listening socket on this server; swappable for tests.
 var xrayListeners = func() []xrayListener {
-	out, err := runCmdTimeoutOut(5*time.Second, "ss", "-Htulnp")
+	out, err := infra.RunCmdTimeoutOut(5*time.Second, "ss", "-Htulnp")
 	if err != nil {
 		return nil
 	}

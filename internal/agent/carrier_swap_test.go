@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // TestParseCarrierChoice, the TestSwap* suite and TestForeignSwapAcceptsThenSwitches
@@ -46,7 +48,7 @@ func swapLab(t *testing.T) peerRecord {
 		GreIf: "gre-t2", FrpsSvc: "frps-2"}
 	writePeersJSON(t, p)
 	mustWrite(t, filepath.Join(frpDir, "frps-2.toml"), "bindPort = 7001\n")
-	mustWrite(t, filepath.Join(engineUnitDir, "frps-2.service"), "[Service]\nExecStart=/usr/local/bin/frps -c frps-2.toml\n")
+	mustWrite(t, filepath.Join(infra.EngineUnitDir, "frps-2.service"), "[Service]\nExecStart=/usr/local/bin/frps -c frps-2.toml\n")
 	t.Cleanup(func() {
 		for _, f := range []string{peersFile(), filepath.Join(frpDir, "frps-2.toml"), filepath.Join(backhaulDir, "server-2.toml"), swapStatePath(), tunnelLinksPath()} {
 			_ = os.Remove(f)
@@ -92,11 +94,11 @@ func TestSwitchPeerCarrierFRPToBackhaul(t *testing.T) {
 			t.Errorf("server-2.toml lacks %s:\n%s", want, conf)
 		}
 	}
-	unit := readFile(t, filepath.Join(engineUnitDir, "backhaul-server-2.service"))
+	unit := readFile(t, filepath.Join(infra.EngineUnitDir, "backhaul-server-2.service"))
 	if !strings.Contains(unit, "server-2.toml") || strings.Contains(unit, "gre-t2.service") {
 		t.Errorf("standalone Backhaul unit should run server-2.toml and not wait for GRE:\n%s", unit)
 	}
-	for _, gone := range []string{filepath.Join(frpDir, "frps-2.toml"), filepath.Join(engineUnitDir, "frps-2.service")} {
+	for _, gone := range []string{filepath.Join(frpDir, "frps-2.toml"), filepath.Join(infra.EngineUnitDir, "frps-2.service")} {
 		if _, err := os.Stat(gone); err == nil {
 			t.Errorf("%s should be removed after the swap", gone)
 		}
@@ -119,7 +121,7 @@ func TestSwitchPeerCarrierBackToFRPOverGRE(t *testing.T) {
 	if _, err := switchPeerCarrier(p, carrierChoice{Engine: "gre-backhaul", Transport: "tcpmux"}); err != nil {
 		t.Fatal(err)
 	}
-	if u := readFile(t, filepath.Join(engineUnitDir, "backhaul-server-2.service")); !strings.Contains(u, "gre-t2.service") {
+	if u := readFile(t, filepath.Join(infra.EngineUnitDir, "backhaul-server-2.service")); !strings.Contains(u, "gre-t2.service") {
 		t.Errorf("Backhaul over GRE must start after gre-t2:\n%s", u)
 	}
 	p2 := *findPeer(2)
@@ -151,7 +153,7 @@ func TestSwitchPeerCarrierRollsBack(t *testing.T) {
 	if readFile(t, filepath.Join(frpDir, "frps-2.toml")) != "bindPort = 7001\n" {
 		t.Error("the old frps config must be put back")
 	}
-	if _, err := os.Stat(filepath.Join(engineUnitDir, "frps-2.service")); err != nil {
+	if _, err := os.Stat(filepath.Join(infra.EngineUnitDir, "frps-2.service")); err != nil {
 		t.Error("the old frps unit must be kept")
 	}
 	if _, err := os.Stat(filepath.Join(backhaulDir, "server-2.toml")); err == nil {

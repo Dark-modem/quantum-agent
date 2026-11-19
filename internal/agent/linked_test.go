@@ -7,6 +7,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestLinkedFromSS(t *testing.T) {
@@ -98,8 +100,8 @@ func TestNormHost(t *testing.T) {
 		"[::ffff:1.2.3.4]": "1.2.3.4", "::ffff:1.2.3.4": "1.2.3.4", "1.2.3.4": "1.2.3.4",
 		"[2001:db8::1]": "2001:db8::1", "fe80::1%eth0": "fe80::1", "": "", "host": "host",
 	} {
-		if got := normHost(in); got != want {
-			t.Errorf("normHost(%q)=%q want %q", in, got, want)
+		if got := infra.NormHost(in); got != want {
+			t.Errorf("infra.NormHost(%q)=%q want %q", in, got, want)
 		}
 	}
 }

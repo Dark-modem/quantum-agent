@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// stubHost is a fake host behind the runner seam. It counts every command so
+// stubHost is a fake host behind the infra.Runner seam. It counts every command so
 // tests can assert exactly how much forking a tick or a request costs.
 type stubHost struct {
 	mu       sync.Mutex
@@ -113,7 +113,7 @@ func sessionLine(i int) string {
 	return fmt.Sprintf("0 0 192.0.2.10:%d 198.51.100.%d:4%04d\n\t cubic rtt:%d.5/1.0\n", 7000+i, i, i, 10+i)
 }
 
-// newStubHost installs n peers (peers.json), a stub procRoot and the runner.
+// newStubHost installs n peers (peers.json), a stub procRoot and the infra.Runner.
 func TestParsers(t *testing.T) {
 	m := parseAddrShow("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n" +
 		"5: gre-tunnel    inet 10.10.0.1/30 scope global gre-tunnel\\       valid_lft forever\n" +

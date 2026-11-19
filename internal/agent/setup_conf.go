@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // backhaulCoreVersion returns the first line of `backhaul -v` for the
@@ -24,7 +26,7 @@ var backhaulCoreVersion = func() string {
 		if !executableFile(bin) {
 			continue
 		}
-		out, err := runCmdTimeoutOut(5*time.Second, bin, "-v")
+		out, err := infra.RunCmdTimeoutOut(5*time.Second, bin, "-v")
 		if err != nil {
 			continue
 		}
@@ -110,7 +112,7 @@ func ensureBackhaulTLS() {
 		}
 	}
 	_ = os.MkdirAll(backhaulDir, 0755)
-	_, _ = runCmdTimeout(30*time.Second, "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "3650",
+	_, _ = infra.RunCmdTimeout(30*time.Second, "openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "3650",
 		"-keyout", key, "-out", crt, "-subj", "/CN=backhaul")
 	_ = os.Chmod(key, 0600)
 }

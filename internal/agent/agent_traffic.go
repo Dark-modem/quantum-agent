@@ -7,44 +7,12 @@ package agent
 
 import (
 	"errors"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
-
-// agentReadNetDev reads the kernel interface counters; seam for tests.
-var agentReadNetDev = func() (string, error) {
-	b, err := os.ReadFile("/proc/net/dev")
-	return string(b), err
-}
-
-type agentDevCounters struct{ Rx, Tx uint64 }
-
-// agentParseNetDev parses /proc/net/dev rows into name → rx/tx bytes.
-// Deliberately local to the agent (snapshot.go's parseNetDev serves the
-// panel's own snapshot pipeline) so the two stay independently evolvable.
-func agentParseNetDev(data string) map[string]agentDevCounters {
-	m := map[string]agentDevCounters{}
-	for _, line := range strings.Split(data, "\n") {
-		name, rest, ok := strings.Cut(strings.TrimSpace(line), ":")
-		if !ok {
-			continue
-		}
-		f := strings.Fields(rest)
-		if len(f) < 9 {
-			continue
-		}
-		rx, e1 := strconv.ParseUint(f[0], 10, 64)
-		tx, e2 := strconv.ParseUint(f[8], 10, 64)
-		if e1 != nil || e2 != nil {
-			continue
-		}
-		m[strings.TrimSpace(name)] = agentDevCounters{rx, tx}
-	}
-	return m
-}
 
 // Interface kinds produced by agentClassifyIface.
 const (
@@ -81,12 +49,12 @@ func agentClassifyIface(name string) string {
 // controller shows UNKNOWN rather than inventing a number.
 func agentCollectTraffic() *agentTrafficReport {
 	rep := &agentTrafficReport{TS: time.Now().Unix()}
-	data, err := agentReadNetDev()
+	data, err := infra.AgentReadNetDev()
 	if err != nil {
 		rep.Ifaces = []agentIfaceCounters{{Name: "_all", Kind: agentIfacePhysical, Known: false}}
 		return rep
 	}
-	for name, c := range agentParseNetDev(data) {
+	for name, c := range infra.AgentParseNetDev(data) {
 		kind := agentClassifyIface(name)
 		if kind != agentIfacePhysical && kind != agentIfaceTunnel {
 			continue

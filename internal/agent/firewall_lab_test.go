@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func fwLabEnabled() bool {
@@ -21,13 +23,13 @@ func fwLabEnabled() bool {
 }
 
 // fwLabHostCommands opts into real host commands: the package TestMain
-// stubs the runner for hermetic unit tests, and a lab test must restore
+// stubs the infra.Runner for hermetic unit tests, and a lab test must restore
 // the real executor exactly like cluster_lab_test.go does.
 func fwLabHostCommands(t *testing.T) {
 	t.Helper()
-	old := runner
-	runner = execRunner
-	t.Cleanup(func() { runner = old })
+	old := infra.Runner
+	infra.Runner = infra.ExecRunner
+	t.Cleanup(func() { infra.Runner = old })
 }
 
 func fwLabHave(bin string) bool {
@@ -49,9 +51,9 @@ func TestFirewallLabIptablesLifecycle(t *testing.T) {
 		t.Skip("iptables missing")
 	}
 	dir := t.TempDir()
-	oldDir := configDir
-	configDir = dir
-	t.Cleanup(func() { configDir = oldDir })
+	oldDir := infra.ConfigDir
+	infra.ConfigDir = dir
+	t.Cleanup(func() { infra.ConfigDir = oldDir })
 
 	// A pre-existing administrator rule that must survive everything below.
 	if _, err := fwRun("iptables", "-A", "INPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"); err != nil {
@@ -133,9 +135,9 @@ func TestFirewallLabListenerConflicts(t *testing.T) {
 	}
 	fwLabHostCommands(t)
 	dir := t.TempDir()
-	oldDir := configDir
-	configDir = dir
-	t.Cleanup(func() { configDir = oldDir })
+	oldDir := infra.ConfigDir
+	infra.ConfigDir = dir
+	t.Cleanup(func() { infra.ConfigDir = oldDir })
 
 	tcpL, err := net.Listen("tcp", "127.0.0.1:28080")
 	if err != nil {

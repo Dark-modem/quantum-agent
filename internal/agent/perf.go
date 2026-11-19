@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 type perfConfig struct {
@@ -114,7 +116,7 @@ type perfPostRequest struct {
 }
 
 func perfConfigPath() string {
-	return filepath.Join(configDir, "perf.json")
+	return filepath.Join(infra.ConfigDir, "perf.json")
 }
 
 func defaultPerfConfig() perfConfig {
@@ -183,7 +185,7 @@ func loadPerfConfig() perfConfig {
 }
 
 func autoPoolStatePath() string {
-	return filepath.Join(configDir, "auto_pool.json")
+	return filepath.Join(infra.ConfigDir, "auto_pool.json")
 }
 
 func loadAutoPoolState() autoPoolState {
@@ -287,7 +289,7 @@ func liveTCPMux() string {
 }
 
 func savePerfConfig(c perfConfig) error {
-	_ = os.MkdirAll(configDir, 0700)
+	_ = os.MkdirAll(infra.ConfigDir, 0700)
 	if c.FRPMaxPool <= 0 {
 		c.FRPMaxPool = 60
 	}
@@ -386,7 +388,7 @@ func checkLiveTomlSync(c perfConfig) (bool, string, string) {
 		return true, "All settings match live frpc.toml", role
 	case "iran":
 		hub := filepath.Join(frpDir, "frps.toml")
-		if !fileExists(hub) {
+		if !infra.FileExists(hub) {
 			if matches, _ := filepath.Glob(filepath.Join(frpDir, "frps*.toml")); len(matches) > 0 {
 				hub = matches[0]
 			}
@@ -414,7 +416,7 @@ func runPerfCmd(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", append([]string{script}, args...)...)
-	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -466,7 +468,7 @@ func perfEngine() string {
 		return "frp"
 	}
 	for _, c := range staleConfigCandidates() {
-		if c.engine == "backhaul" && fileExists(c.path) {
+		if c.engine == "backhaul" && infra.FileExists(c.path) {
 			return "backhaul"
 		}
 	}
@@ -503,15 +505,15 @@ func readNetStack() netStackStatus {
 		WmemMax:   procInt("/proc/sys/net/core/wmem_max"),
 		GREMTU:    interfaceMTU("gre-tunnel"),
 		PathMTU:   savedPathMTU(),
-		Persisted: fileExists("/etc/sysctl.d/99-gre-tune.conf"),
-		Backup:    fileExists(filepath.Join(configDir, "tune.bak")),
+		Persisted: infra.FileExists("/etc/sysctl.d/99-gre-tune.conf"),
+		Backup:    infra.FileExists(filepath.Join(infra.ConfigDir, "tune.bak")),
 	}
 	ns.Known = ns.CC != ""
 	ns.Conntrack = procInt("/proc/sys/net/netfilter/nf_conntrack_count")
 	if ns.ConntrackMax = procInt("/proc/sys/net/netfilter/nf_conntrack_max"); ns.ConntrackMax == 0 {
 		ns.ConntrackMax = procInt("/proc/sys/net/nf_conntrack_max")
 	}
-	if out, err := runCmdTimeoutOut(3*time.Second, "iptables-save", "-t", "mangle"); err == nil {
+	if out, err := infra.RunCmdTimeoutOut(3*time.Second, "iptables-save", "-t", "mangle"); err == nil {
 		ns.MSSRule = mssRuleFrom(string(out))
 	}
 	return ns

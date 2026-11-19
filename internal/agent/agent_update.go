@@ -14,7 +14,7 @@ package agent
 //   3. The downloaded binary must self-report the requested version.
 //   4. Architecture: the artifact URL must name this agent's GOARCH.
 //
-// Enrollment identity and tunnel desired state live in configDir and are
+// Enrollment identity and tunnel desired state live in infra.ConfigDir and are
 // never touched by a swap.
 
 import (
@@ -40,6 +40,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Test seams and small file helpers for the update runner.
@@ -318,7 +320,7 @@ type agentUpdateMarker struct {
 	StartedAt int64  `json:"started_at"`
 }
 
-func agentUpdateMarkerPath() string { return filepath.Join(configDir, "agent-update.json") }
+func agentUpdateMarkerPath() string { return filepath.Join(infra.ConfigDir, "agent-update.json") }
 
 func agentUpdateMarkerLoad() (*agentUpdateMarker, bool) {
 	b, err := os.ReadFile(agentUpdateMarkerPath())

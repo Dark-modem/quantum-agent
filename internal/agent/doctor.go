@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 type doctorReport struct {
@@ -234,9 +236,9 @@ func collectDoctorInputs() doctorInputs {
 	if st.Gre.Inner != "" {
 		in.innerPeer = grePeerInner(st.Gre.Inner)
 	}
-	in.publicPeer = normHost(st.Gre.PeerIP)
+	in.publicPeer = infra.NormHost(st.Gre.PeerIP)
 	if in.publicPeer == "" {
-		in.publicPeer = normHost(st.RemotePub)
+		in.publicPeer = infra.NormHost(st.RemotePub)
 	}
 	in.extra = doctorConfigFindings(st)
 	in.kernel = executeKernelAudit()
@@ -284,7 +286,7 @@ func doctorConfigFindings(st tunnelStatus) []doctorFinding {
 	var out []doctorFinding
 	// stale config without its engine binary: role is reported unknown
 	for _, c := range staleConfigCandidates() {
-		if fileExists(c.path) && !engineBinaryPresent(c.engine) {
+		if infra.FileExists(c.path) && !engineBinaryPresent(c.engine) {
 			out = append(out, newFinding("warning", "config", 10, false,
 				"Stale {0} config found ({1}) but the {2} binary is not installed — role is reported as unknown",
 				"Remove the stale config or reinstall the engine (Setup tab)",
@@ -721,7 +723,7 @@ func executeKernelAudit() kernelAudit {
 
 	// 3. MSS clamp: any TCPMSS rule in the mangle table (quantum.sh adds
 	// --set-mss 1340 in POSTROUTING and per GRE interface in FORWARD)
-	if out, err := runCmdTimeoutOut(3*time.Second, "iptables-save", "-t", "mangle"); err == nil {
+	if out, err := infra.RunCmdTimeoutOut(3*time.Second, "iptables-save", "-t", "mangle"); err == nil {
 		res.MSSRule = mssRuleFrom(string(out))
 		res.MSSClamping = res.MSSRule != ""
 	}
@@ -780,7 +782,7 @@ func mssRuleFrom(save string) string {
 // engineNOFILE returns the soft "Max open files" of the first running engine.
 func engineNOFILE() int {
 	for _, svc := range []string{"frps", "frpc", "backhaul-server", "backhaul-client"} {
-		out, err := runCmdTimeoutOut(3*time.Second, "systemctl", "show", "-p", "MainPID", "--value", svc)
+		out, err := infra.RunCmdTimeoutOut(3*time.Second, "systemctl", "show", "-p", "MainPID", "--value", svc)
 		pid := strings.TrimSpace(string(out))
 		if err != nil || pid == "" || pid == "0" {
 			continue
@@ -891,8 +893,8 @@ func startIperfServer() (string, error) {
 	// Ensure iperf3 is installed
 	if _, err := exec.LookPath("iperf3"); err != nil {
 		// Attempt automatic installation on Debian/Ubuntu
-		_, _ = runCmdTimeout(90*time.Second, "apt-get", "update", "-qq")
-		_, _ = runCmdTimeout(120*time.Second, "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "-qq", "iperf3")
+		_, _ = infra.RunCmdTimeout(90*time.Second, "apt-get", "update", "-qq")
+		_, _ = infra.RunCmdTimeout(120*time.Second, "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "-qq", "iperf3")
 		if _, err := exec.LookPath("iperf3"); err != nil {
 			return "", fmt.Errorf("iperf3 is not installed on this server. Run 'apt update && apt install -y iperf3'")
 		}
@@ -978,7 +980,7 @@ func applyDoctorFixes() map[string]any {
 	// 6. A stopped engine service is started again. It carries no session
 	// while it is down, so this cannot drop live traffic.
 	if fst.FrpSvc != "" && !fst.FrpUp {
-		if _, err := runCmdTimeout(20*time.Second, "systemctl", "restart", fst.FrpSvc); err == nil {
+		if _, err := infra.RunCmdTimeout(20*time.Second, "systemctl", "restart", fst.FrpSvc); err == nil {
 			fixes = append(fixes, "Restarted the stopped "+fst.FrpSvc+" service")
 		} else {
 			fixes = append(fixes, fst.FrpSvc+" did not start: see Logs")
@@ -1000,7 +1002,7 @@ func greExpected(st tunnelStatus) bool {
 	if st.Engine == "backhaul" {
 		return false
 	}
-	_, err := os.Stat(filepath.Join(engineUnitDir, "gre-tunnel.service"))
+	_, err := os.Stat(filepath.Join(infra.EngineUnitDir, "gre-tunnel.service"))
 	return err == nil
 }
 
@@ -1073,7 +1075,7 @@ func backhaulDoctorIssue(st tunnelStatus) (issue, recommendation string) {
 	if !strings.HasPrefix(st.FrpSvc, "backhaul") {
 		return "", ""
 	}
-	out, err := runCmdTimeoutOut(5*time.Second, "journalctl", "-u", st.FrpSvc, "-n", "80", "--no-pager")
+	out, err := infra.RunCmdTimeoutOut(5*time.Second, "journalctl", "-u", st.FrpSvc, "-n", "80", "--no-pager")
 	if err != nil {
 		return "", ""
 	}

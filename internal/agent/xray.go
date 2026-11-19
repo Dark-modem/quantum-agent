@@ -34,6 +34,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 var xrayMu sync.Mutex
@@ -47,7 +49,7 @@ type xrayState struct {
 	PublicIP string `json:"public_ip,omitempty"`
 }
 
-func xrayStatePath() string { return filepath.Join(configDir, "xray.json") }
+func xrayStatePath() string { return filepath.Join(infra.ConfigDir, "xray.json") }
 func xrayTag(id int) string { return fmt.Sprintf("xray-%d", id) }
 
 func loadXrayState() xrayState {
@@ -97,12 +99,12 @@ func xrayCarrierEnds() []carrierEnd {
 			continue
 		}
 		udp := l.Profile.Transport == "kcp"
-		ip := carrierIP(xrayDialAddress(l))
+		ip := infra.CarrierIP(xrayDialAddress(l))
 		if l.serverEnd() {
 			// listening: count only the other server, when its address is known
 			from := ""
 			if l.Remote != "" && !l.Profile.CDN { // through a CDN they come from its addresses
-				from = carrierIP(l.Remote)
+				from = infra.CarrierIP(l.Remote)
 			}
 			ends = append(ends, carrierEnd{Port: l.TunnelPort, From: from, UDP: udp, Tag: xrayTag(l.ID)})
 		} else if ip != "" {
@@ -131,7 +133,7 @@ func xrayVersion() string {
 	if st.ModTime().Equal(xrayVersionCache.mod) && xrayVersionCache.v != "" {
 		return xrayVersionCache.v
 	}
-	out, err := runCmdTimeoutOut(10*time.Second, xrayBinPath, "version")
+	out, err := infra.RunCmdTimeoutOut(10*time.Second, xrayBinPath, "version")
 	if err != nil {
 		return ""
 	}
@@ -170,7 +172,7 @@ func startXrayInstall() bool {
 			out = out[len(out)-4000:]
 		}
 		xrayInstall.Running, xrayInstall.Done, xrayInstall.Log = false, true, out
-		xrayInstall.OK = err == nil && fileExists(xrayBinPath)
+		xrayInstall.OK = err == nil && infra.FileExists(xrayBinPath)
 		if err != nil && out == "" {
 			xrayInstall.Log = err.Error()
 		}
@@ -221,11 +223,11 @@ var xrayConns = func(l XrayLink) int {
 	if !l.serverEnd() {
 		// only to the other server: other programs dial port 443 too
 		filter = fmt.Sprintf("( dport = :%d )", l.TunnelPort)
-		if ip := carrierIP(xrayDialAddress(l)); ip != "" {
-			filter = fmt.Sprintf("( dport = :%d and dst %s )", l.TunnelPort, urlHost(ip))
+		if ip := infra.CarrierIP(xrayDialAddress(l)); ip != "" {
+			filter = fmt.Sprintf("( dport = :%d and dst %s )", l.TunnelPort, infra.URLHost(ip))
 		}
 	}
-	out, err := runCmdTimeoutOut(3*time.Second, "ss", "-Htn", "state", "established", filter)
+	out, err := infra.RunCmdTimeoutOut(3*time.Second, "ss", "-Htn", "state", "established", filter)
 	if err != nil {
 		return 0
 	}

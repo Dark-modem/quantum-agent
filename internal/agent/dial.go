@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Dial route (foreign side): the client may reach the Iran hub over the GRE
@@ -22,12 +24,12 @@ func runQuantumDial(args ...string) (string, error) {
 	var cmd *exec.Cmd
 	if script, err := greScriptPath(); err == nil {
 		cmd = exec.CommandContext(ctx, "bash", append([]string{script, "dial"}, args...)...)
-	} else if fileExists("/usr/local/bin/quantum") {
+	} else if infra.FileExists("/usr/local/bin/quantum") {
 		cmd = exec.CommandContext(ctx, "/usr/local/bin/quantum", append([]string{"dial"}, args...)...)
 	} else {
 		return "", fmt.Errorf("quantum script not found")
 	}
-	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(stripANSI(string(out))), err
 }

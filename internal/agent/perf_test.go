@@ -10,13 +10,15 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestPerfDefaultsAndLoadSave(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	// 1. Missing file: default values must match requirements
 	def := loadPerfConfig()
@@ -77,9 +79,9 @@ func TestPerfDefaultsAndLoadSave(t *testing.T) {
 
 func TestPerfLegacyKeysIgnoredAndDropped(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	legacy := `{"proxy_encryption": true, "force_tls": true, "chaff_profile": "mid", "dpi_enabled": true,
 		"dpi_rate": "5/sec", "dpi_burst": 9, "auto_tune": true, "tuning_profile": "x", "tcp_mux": true,
@@ -114,9 +116,9 @@ func TestPerfLegacyKeysIgnoredAndDropped(t *testing.T) {
 
 func TestEffectivePoolValues(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 	t.Setenv("QUANTUM_SCRIPT", filepath.Join(tmpDir, "missing.sh")) // force the file-based fallback
 
 	// auto, no state yet
@@ -149,9 +151,9 @@ func TestEffectivePoolValues(t *testing.T) {
 
 func TestPerfEnvOverrides(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	if err := savePerfConfig(defaultPerfConfig()); err != nil {
 		t.Fatal(err)
@@ -170,9 +172,9 @@ func TestPerfEnvOverrides(t *testing.T) {
 
 func TestAutoPoolStatePersistence(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	st := autoPoolState{
 		Pool:         5,
@@ -196,9 +198,9 @@ func TestAutoPoolStatePersistence(t *testing.T) {
 // Out-of-range pool sizes are refused instead of silently ignored.
 // GET reports which engine the FRP settings apply to.
 func TestPerfEngineFromConfigs(t *testing.T) {
-	oldFrp, oldBh, oldCfg := frpDir, backhaulDir, configDir
-	frpDir, backhaulDir, configDir = t.TempDir(), t.TempDir(), t.TempDir()
-	defer func() { frpDir, backhaulDir, configDir = oldFrp, oldBh, oldCfg }()
+	oldFrp, oldBh, oldCfg := frpDir, backhaulDir, infra.ConfigDir
+	frpDir, backhaulDir, infra.ConfigDir = t.TempDir(), t.TempDir(), t.TempDir()
+	defer func() { frpDir, backhaulDir, infra.ConfigDir = oldFrp, oldBh, oldCfg }()
 
 	if e := perfEngine(); e != "" {
 		t.Fatalf("no configs: want \"\", got %q", e)
@@ -232,9 +234,9 @@ func TestPerfAPIEndpoints(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	// 1. GET /api/perf
 	req := httptest.NewRequest("GET", "/api/perf", nil)
@@ -287,9 +289,9 @@ func TestPerfAPIEndpoints(t *testing.T) {
 // Out-of-range pool sizes are refused instead of silently ignored.
 func TestPerfRejectsBadPoolValues(t *testing.T) {
 	withTempConfig(t)
-	oldConfigDir := configDir
-	configDir = t.TempDir()
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	for _, body := range []string{
 		`{"action":"set-tuning","frp_pool_count":1}`,
@@ -319,9 +321,9 @@ func TestPerfRejectsBadPoolValues(t *testing.T) {
 func TestBackhaulPool(t *testing.T) {
 	withTempConfig(t)
 	calls := recordSystemctl(t, "")
-	oldFrp, oldBh, oldCfg := frpDir, backhaulDir, configDir
-	frpDir, backhaulDir, configDir = t.TempDir(), t.TempDir(), t.TempDir()
-	defer func() { frpDir, backhaulDir, configDir = oldFrp, oldBh, oldCfg }()
+	oldFrp, oldBh, oldCfg := frpDir, backhaulDir, infra.ConfigDir
+	frpDir, backhaulDir, infra.ConfigDir = t.TempDir(), t.TempDir(), t.TempDir()
+	defer func() { frpDir, backhaulDir, infra.ConfigDir = oldFrp, oldBh, oldCfg }()
 	post := func(body string) *httptest.ResponseRecorder {
 		rr := httptest.NewRecorder()
 		handlePerfPost(rr, httptest.NewRequest("POST", "/api/perf", strings.NewReader(body)))

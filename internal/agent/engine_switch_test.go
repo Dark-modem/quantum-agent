@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // engineLab fakes installed engine binaries and (optionally) the Backhaul
@@ -23,9 +25,9 @@ func engineLab(t *testing.T, bins []string, units []string) {
 			t.Fatal(err)
 		}
 	}
-	oldDirs, oldExtra, oldUnit := engineBinDirs, backhaulExtraBins, engineUnitDir
-	engineBinDirs, backhaulExtraBins, engineUnitDir = []string{binDir}, nil, unitDir
-	t.Cleanup(func() { engineBinDirs, backhaulExtraBins, engineUnitDir = oldDirs, oldExtra, oldUnit })
+	oldDirs, oldExtra, oldUnit := engineBinDirs, backhaulExtraBins, infra.EngineUnitDir
+	engineBinDirs, backhaulExtraBins, infra.EngineUnitDir = []string{binDir}, nil, unitDir
+	t.Cleanup(func() { engineBinDirs, backhaulExtraBins, infra.EngineUnitDir = oldDirs, oldExtra, oldUnit })
 }
 
 func recordSystemctl(t *testing.T, failOn string) *[]string {

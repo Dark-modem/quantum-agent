@@ -45,7 +45,8 @@ import (
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 	"github.com/Dark-modem/quantum-agent/internal/hardening"
-	"github.com/Dark-modem/quantum-protocol"
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+	protocol "github.com/Dark-modem/quantum-protocol"
 	"github.com/gorilla/websocket"
 )
 
@@ -532,12 +533,12 @@ func TestRenderForwardChainRefusesNonIPDirectCall(t *testing.T) {
 
 func TestHostileCommandsRefusedBeforeExecution(t *testing.T) {
 	var calls int
-	oldRunner := runner
-	runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	oldRunner := infra.Runner
+	infra.Runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls++
 		return nil, nil
 	}
-	t.Cleanup(func() { runner = oldRunner })
+	t.Cleanup(func() { infra.Runner = oldRunner })
 
 	run := func(op string, params map[string]string) agentCommandResult {
 		return agentRunCommand(agentCommand{ID: "h", Op: op, Params: params})
@@ -606,7 +607,7 @@ func TestHostileCommandsRefusedBeforeExecution(t *testing.T) {
 	}
 
 	// 3e. agent.update with a hostile request: validated BEFORE the
-	// background runner starts; nothing downloads. (A cross-origin URL
+	// background infra.Runner starts; nothing downloads. (A cross-origin URL
 	// that PASSES the request shape is refused later at the DOWNLOAD by
 	// the same-origin rule — asserted in
 	// TestHostileUpdateRequestAndArtifactVerify.)
@@ -825,7 +826,7 @@ func TestHostileDesiredV2FailsSafe(t *testing.T) {
 
 	// Hostile SELF stamps (R6): a whitespace Self.Name trims to "" at the
 	// apply layer, and the role resolution FAILS CLOSED on an empty self
-	// (isolated configDir = no enrollment identity → error, never a
+	// (isolated infra.ConfigDir = no enrollment identity → error, never a
 	// guessed role).
 	withTmpConfig(t)
 	role, rerr := frpResolveRole(frpTestParams(), "  ")

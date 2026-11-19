@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // rlLoopbackScript renders a script that DNATs to loopback.

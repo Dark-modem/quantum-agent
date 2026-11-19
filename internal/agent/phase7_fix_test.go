@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func writeServedCert(t *testing.T, cn string) {
@@ -43,16 +45,16 @@ func servedCN(t *testing.T, port int) string {
 // M7: a certificate renewed by certbot's own timer is copied in and served.
 // M11: no GRE interface is only a problem where GRE is used.
 func TestGreExpected(t *testing.T) {
-	old := engineUnitDir
-	engineUnitDir = t.TempDir()
-	t.Cleanup(func() { engineUnitDir = old })
+	old := infra.EngineUnitDir
+	infra.EngineUnitDir = t.TempDir()
+	t.Cleanup(func() { infra.EngineUnitDir = old })
 	if greExpected(tunnelStatus{Engine: "backhaul"}) {
 		t.Error("standalone Backhaul does not use GRE")
 	}
 	if greExpected(tunnelStatus{}) {
 		t.Error("no GRE unit installed: GRE not expected")
 	}
-	_ = os.WriteFile(filepath.Join(engineUnitDir, "gre-tunnel.service"), []byte("[Service]\n"), 0644)
+	_ = os.WriteFile(filepath.Join(infra.EngineUnitDir, "gre-tunnel.service"), []byte("[Service]\n"), 0644)
 	if !greExpected(tunnelStatus{Engine: "frp"}) {
 		t.Error("FRP over GRE with a gre-tunnel unit expects GRE")
 	}
@@ -66,14 +68,14 @@ func TestGreExpected(t *testing.T) {
 // M6: the backup key is only released with the panel password.
 // M9: without Bagher, the snapshot status runs nothing and creates no key.
 func TestBagherSnapshotStatusWithoutConfig(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = old })
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = old })
 	st := getSSHFwdSnapshotStatus()
 	if st["has_config"] != false || st["is_active"] != false {
 		t.Fatalf("got %+v", st)
 	}
-	if _, err := os.Stat(defaultSSHFwdKeyPath()); err == nil && strings.HasPrefix(defaultSSHFwdKeyPath(), configDir) {
+	if _, err := os.Stat(defaultSSHFwdKeyPath()); err == nil && strings.HasPrefix(defaultSSHFwdKeyPath(), infra.ConfigDir) {
 		t.Fatal("snapshot status generated an SSH key")
 	}
 }

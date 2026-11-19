@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // ssSession is one ESTABLISHED TCP session from `ss -Htin`.
@@ -56,7 +58,7 @@ func parseSS(out string) []ssSession {
 			continue
 		}
 		rport, _ := strconv.Atoi(rp)
-		res = append(res, ssSession{LPort: p, RHost: normHost(rh), RPort: rport, RTTms: -1})
+		res = append(res, ssSession{LPort: p, RHost: infra.NormHost(rh), RPort: rport, RTTms: -1})
 	}
 	return res
 }
@@ -87,7 +89,7 @@ func sessionsOn(all []ssSession, ports []int, remotes ...string) []ssSession {
 }
 
 func ssEstablished() string {
-	out, err := runCmdTimeoutOut(5*time.Second, "ss", "-Htin", "state", "established")
+	out, err := infra.RunCmdTimeoutOut(5*time.Second, "ss", "-Htin", "state", "established")
 	if err != nil {
 		return ""
 	}
@@ -103,22 +105,6 @@ func minRTT(ss []ssSession) float64 {
 		}
 	}
 	return best
-}
-
-// normHost canonicalises an address for comparison: brackets and zone ids are
-// dropped and IPv4-mapped IPv6 ("[::ffff:1.2.3.4]") becomes plain IPv4.
-func normHost(h string) string {
-	h = strings.TrimSpace(strings.Trim(h, "[]"))
-	if i := strings.IndexByte(h, '%'); i >= 0 {
-		h = h[:i]
-	}
-	if ip := net.ParseIP(h); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			return v4.String()
-		}
-		return ip.String()
-	}
-	return h
 }
 
 // controlPorts is the local port set a peer's clients may use: the control
@@ -209,7 +195,7 @@ func controlSessionIn(all []ssSession, q ctrlQuery, owners map[int]int) ctrlResu
 	}
 	known := map[string]bool{}
 	for _, r := range append([]string{q.RemotePub, q.PeerGre, cachedRemote(q.ID)}, q.Extra...) {
-		if r = normHost(r); r != "" {
+		if r = infra.NormHost(r); r != "" {
 			known[r] = true
 		}
 	}

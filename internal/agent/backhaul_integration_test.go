@@ -38,6 +38,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -215,15 +217,15 @@ func TestBackhaulIntegration(t *testing.T) {
 	artURL := fmt.Sprintf("http://127.0.0.1:%d", artLn.Addr().(*net.TCPAddr).Port)
 
 	cfg := t.TempDir()
-	origConfigDir := configDir
-	configDir = cfg
-	t.Cleanup(func() { configDir = origConfigDir })
+	origConfigDir := infra.ConfigDir
+	infra.ConfigDir = cfg
+	t.Cleanup(func() { infra.ConfigDir = origConfigDir })
 	origKey := engineArtifactPubKeyB64
 	engineArtifactPubKeyB64 = pubB64
 	t.Cleanup(func() { engineArtifactPubKeyB64 = origKey })
-	origRunner := runner
-	runner = execRunner // real host commands (iptables wire accounting)
-	t.Cleanup(func() { runner = origRunner })
+	origRunner := infra.Runner
+	infra.Runner = infra.ExecRunner // real host commands (iptables wire accounting)
+	t.Cleanup(func() { infra.Runner = origRunner })
 
 	// One DRIVER per end (the production shape: two agents, each with its
 	// own identity; the server end's identity name matches server_side).
@@ -287,7 +289,7 @@ func TestBackhaulIntegration(t *testing.T) {
 		return agentIdentity{Server: artURL, BasePath: "", Name: "germany"}, true
 	}
 	serverInst := engine.Instance{TunnelID: "bh-int-s", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(serverParams)}
+		Params: infra.MustJSON(serverParams)}
 	if err := dServer.Start(context.Background(), serverInst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -299,7 +301,7 @@ func TestBackhaulIntegration(t *testing.T) {
 	serveIn = bhNSB
 	serveLogTag = "client"
 	clientInst := engine.Instance{TunnelID: "bh-int-c", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(clientParams)}
+		Params: infra.MustJSON(clientParams)}
 	if err := dClient.Start(context.Background(), clientInst); err != nil {
 		t.Fatalf("client Start: %v", err)
 	}

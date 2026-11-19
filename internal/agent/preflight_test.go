@@ -3,7 +3,7 @@ package agent
 // Phase14 ports TASK 1: the apply-path preflight tests. All hermetic —
 // the ss listing, the ephemeral range and the registry path are seams;
 // the "held port" is a real net.Listen socket in the test process whose
-// ss line is synthesized (the runner seam never touches the host).
+// ss line is synthesized (the infra.Runner seam never touches the host).
 
 import (
 	"encoding/json"
@@ -14,8 +14,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+	protocol "github.com/Dark-modem/quantum-protocol"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
-	"github.com/Dark-modem/quantum-protocol"
 )
 
 // pfPortSeams installs a synthetic ss listing + ephemeral range and
@@ -25,7 +27,7 @@ func pfPortSeams(t *testing.T, lines string, ephLo, ephHi int) {
 	oldSS, oldEph, oldReg := portSSRun, portEphemeralRange, portRegPath
 	portSSRun = func() (string, error) { return lines, nil }
 	portEphemeralRange = func() (int, int) { return ephLo, ephHi }
-	portRegPath = filepath.Join(configDir, "port_registry.json")
+	portRegPath = filepath.Join(infra.ConfigDir, "port_registry.json")
 	t.Cleanup(func() { portSSRun, portEphemeralRange, portRegPath = oldSS, oldEph, oldReg })
 }
 

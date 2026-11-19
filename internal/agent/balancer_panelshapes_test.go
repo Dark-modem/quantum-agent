@@ -30,7 +30,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // panelShapeRules builds the rule set exactly as the panel compiler does:

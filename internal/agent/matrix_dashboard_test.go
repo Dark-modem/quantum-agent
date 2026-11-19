@@ -5,21 +5,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func matrixDashboardFixture(t *testing.T, role string, service, connected bool) (*hostView, matrixState) {
 	t.Helper()
-	oldConfig, oldFRP, oldBH := configDir, frpDir, backhaulDir
+	oldConfig, oldFRP, oldBH := infra.ConfigDir, frpDir, backhaulDir
 	dir := t.TempDir()
-	configDir, frpDir, backhaulDir = dir, filepath.Join(dir, "frp"), filepath.Join(dir, "backhaul")
-	t.Cleanup(func() { configDir, frpDir, backhaulDir = oldConfig, oldFRP, oldBH })
+	infra.ConfigDir, frpDir, backhaulDir = dir, filepath.Join(dir, "frp"), filepath.Join(dir, "backhaul")
+	t.Cleanup(func() { infra.ConfigDir, frpDir, backhaulDir = oldConfig, oldFRP, oldBH })
 	st := matrixState{Enabled: true, Network: matrixNetname, Role: role, Family: "ipv6", Port: 2097, Addr: "2001:db8::1", IP: matrixHubIP, Ports: []int{443, 8080}}
 	if role == "hub" {
 		st.Peers = []matrixPeer{{Name: "foreign", Addr: "2001:db8::2", IP: matrixFirstPeer}}
 	} else {
 		st.IP = matrixFirstPeer
 	}
-	if err := os.WriteFile(matrixStatePath(), mustJSON(st), 0600); err != nil {
+	if err := os.WriteFile(matrixStatePath(), infra.MustJSON(st), 0600); err != nil {
 		t.Fatal(err)
 	}
 	v := &hostView{inner: map[string]string{matrixIfaceName: st.IP + "/30"}, active: map[string]bool{matrixUnit: service}, dev: map[string]devCounters{matrixIfaceName: {1000, 2000}}, icmp: func(target string) icmpResult {

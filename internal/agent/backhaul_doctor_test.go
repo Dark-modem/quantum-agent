@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestMatchLogCodeBackhaul(t *testing.T) {
@@ -50,7 +52,7 @@ func TestClassifyBackhaulLogNewestWins(t *testing.T) {
 
 func TestBackhaulDoctorIssue(t *testing.T) {
 	st := tunnelStatus{FrpSvc: "backhaul-client"}
-	runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	infra.Runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name == "journalctl" && len(args) > 1 && args[1] == "backhaul-client" {
 			return []byte("[ERROR] failed to receive control channel response: EOF\n"), nil
 		}

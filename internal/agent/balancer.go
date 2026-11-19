@@ -29,8 +29,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // applyNFTScript feeds one rendered transaction to nft -f through a
@@ -50,7 +52,7 @@ func applyNFTScript(script string) error {
 		return err
 	}
 	_ = os.Chmod(name, 0600)
-	_, err = runCmdTimeout(15*time.Second, "nft", "-f", name)
+	_, err = infra.RunCmdTimeout(15*time.Second, "nft", "-f", name)
 	os.Remove(name)
 	return err
 }
@@ -102,7 +104,7 @@ type balTargetDiag struct {
 // balancerStatusPath is where the balancer persists its last pass for
 // `quantum-agent balancer status` (0600; best-effort — never fatal).
 func balancerStatusPath() string {
-	return filepath.Join(configDir, "balancer-status.json")
+	return filepath.Join(infra.ConfigDir, "balancer-status.json")
 }
 
 // balTickReport is one health+apply pass, for tests and the report.

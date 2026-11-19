@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // matrixLifecycleExec is a recording matrixExec: iptables -S reports a
@@ -84,14 +86,14 @@ func (m *matrixLifecycleExec) run(name string, args ...string) (string, error) {
 func matrixLifecycleLab(t *testing.T) *matrixLifecycleExec {
 	t.Helper()
 	m := &matrixLifecycleExec{chainsUp: map[string]bool{}}
-	oldDir, oldUnit, oldTinc, oldExec := configDir, matrixUnitDir, matrixTincPath, matrixExec
-	configDir = t.TempDir()
+	oldDir, oldUnit, oldTinc, oldExec := infra.ConfigDir, matrixUnitDir, matrixTincPath, matrixExec
+	infra.ConfigDir = t.TempDir()
 	matrixUnitDir = t.TempDir()
 	matrixTincPath = func() (string, error) { return "/usr/sbin/tincd", nil }
 	matrixExec = m.run
 	t.Cleanup(func() {
 		AgentOpsWait()
-		configDir, matrixUnitDir, matrixTincPath, matrixExec = oldDir, oldUnit, oldTinc, oldExec
+		infra.ConfigDir, matrixUnitDir, matrixTincPath, matrixExec = oldDir, oldUnit, oldTinc, oldExec
 	})
 	return m
 }

@@ -11,17 +11,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestBackhaulCarrierEnd(t *testing.T) {
-	oldLookup := carrierLookup
-	carrierLookup = func(h string) string {
+	oldLookup := infra.CarrierLookup
+	infra.CarrierLookup = func(h string) string {
 		if h == "hub.example" {
 			return "198.51.100.7"
 		}
 		return ""
 	}
-	t.Cleanup(func() { carrierLookup = oldLookup })
+	t.Cleanup(func() { infra.CarrierLookup = oldLookup })
 
 	cases := []struct {
 		name string
@@ -132,12 +134,12 @@ func TestParseAcctSave(t *testing.T) {
 // The first reading builds the chains; later readings return their counters;
 // a reboot (chains gone) builds them again.
 func TestReadCarrierCounters(t *testing.T) {
-	oldDir, oldRunner := backhaulDir, runner
+	oldDir, oldRunner := backhaulDir, infra.Runner
 	backhaulDir = t.TempDir()
 	_ = os.WriteFile(filepath.Join(backhaulDir, "server.toml"), []byte("[server]\nbind_addr = \"0.0.0.0:3080\"\n"), 0o600)
 	save := "*filter\nCOMMIT\n"
 	var calls []string
-	runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	infra.Runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		switch name {
 		case "iptables-save":
@@ -155,7 +157,7 @@ func TestReadCarrierCounters(t *testing.T) {
 		carrierState.Unlock()
 	}
 	t.Cleanup(func() {
-		backhaulDir, runner = oldDir, oldRunner
+		backhaulDir, infra.Runner = oldDir, oldRunner
 		carrierState.Lock()
 		carrierState.sig, carrierState.at, carrierState.lastFailed = "", time.Time{}, time.Time{}
 		carrierState.Unlock()
@@ -171,7 +173,7 @@ func TestReadCarrierCounters(t *testing.T) {
 			t.Fatalf("missing %q in:\n%s", want, joined)
 		}
 	}
-	rules, _ := os.ReadFile(filepath.Join(configDir, "carrier-acct.v4"))
+	rules, _ := os.ReadFile(filepath.Join(infra.ConfigDir, "carrier-acct.v4"))
 	if !strings.Contains(string(rules), "--dport 3080") {
 		t.Fatalf("rules file:\n%s", rules)
 	}
@@ -204,7 +206,7 @@ func TestReadCarrierCounters(t *testing.T) {
 	}
 
 	// No iptables: no counters, and no retry on every tick.
-	runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	infra.Runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls = append(calls, name)
 		return nil, errors.New("not found")
 	}
@@ -225,15 +227,15 @@ func TestReadCarrierCounters(t *testing.T) {
 // and not the whole main NIC.
 // When the last tunnel goes, the chains and their jumps go too.
 func TestCarrierChainsRemovedWithTunnels(t *testing.T) {
-	oldDir, oldRunner := backhaulDir, runner
+	oldDir, oldRunner := backhaulDir, infra.Runner
 	backhaulDir = t.TempDir()
 	var calls []string
-	runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	infra.Runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}
 	t.Cleanup(func() {
-		backhaulDir, runner = oldDir, oldRunner
+		backhaulDir, infra.Runner = oldDir, oldRunner
 		carrierState.Lock()
 		carrierState.sig, carrierState.at = "", time.Time{}
 		carrierState.Unlock()
@@ -275,8 +277,8 @@ func TestCarrierLab(t *testing.T) {
 		t.Skip("set CARRIER_LAB_DIR to run the carrier traffic lab")
 	}
 	minBytes, _ := strconv.ParseUint(os.Getenv("CARRIER_LAB_MIN"), 10, 64)
-	oldDir, oldRunner := backhaulDir, runner
-	backhaulDir, runner = dir, execRunner
+	oldDir, oldRunner := backhaulDir, infra.Runner
+	backhaulDir, infra.Runner = dir, infra.ExecRunner
 	fresh := func() {
 		carrierState.Lock()
 		carrierState.at, carrierState.lastFailed = time.Time{}, time.Time{}
@@ -284,7 +286,7 @@ func TestCarrierLab(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		carrierDrop()
-		backhaulDir, runner = oldDir, oldRunner
+		backhaulDir, infra.Runner = oldDir, oldRunner
 		carrierState.Lock()
 		carrierState.sig, carrierState.at, carrierState.lastFailed = "", time.Time{}, time.Time{}
 		carrierState.Unlock()
@@ -352,11 +354,11 @@ func TestCarrierRulesIPv6(t *testing.T) {
 
 // A host that never counted IPv6 has no chains to drop: no failing calls.
 func TestCarrierDropSkipsMissingChains(t *testing.T) {
-	oldRunner := runner
-	t.Cleanup(func() { runner = oldRunner })
+	oldRunner := infra.Runner
+	t.Cleanup(func() { infra.Runner = oldRunner })
 	var calls []string
 	save := "*filter\n:INPUT ACCEPT [0:0]\nCOMMIT\n"
-	runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	infra.Runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		if strings.HasSuffix(name, "-save") {
 			return []byte(save), nil

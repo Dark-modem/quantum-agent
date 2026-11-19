@@ -27,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -49,8 +51,8 @@ func frpTestParams() frpParams {
 // frpTestInstances builds the two ends of one tunnel: the compiler sets
 // LocalServer to the receiving agent's own server name.
 func frpTestInstances(p frpParams) (serverInst, clientInst engine.Instance) {
-	return engine.Instance{TunnelID: "t1", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(p)},
-		engine.Instance{TunnelID: "t1", LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(p)}
+	return engine.Instance{TunnelID: "t1", LocalServer: "germany", RemoteServer: "iran", Params: infra.MustJSON(p)},
+		engine.Instance{TunnelID: "t1", LocalServer: "iran", RemoteServer: "germany", Params: infra.MustJSON(p)}
 }
 
 func TestFRPDriverImplementsEngineDriver(t *testing.T) {
@@ -75,33 +77,33 @@ func TestFRPValidateParams(t *testing.T) {
 
 	bad := frpTestParams()
 	bad.ServerSide = ""
-	if err := d.Validate(mustJSON(bad)); err == nil {
+	if err := d.Validate(infra.MustJSON(bad)); err == nil {
 		t.Fatal("params without server_side accepted")
 	}
 	bad = frpTestParams()
 	bad.SHA256Amd = "short"
-	if err := d.Validate(mustJSON(bad)); err == nil {
+	if err := d.Validate(infra.MustJSON(bad)); err == nil {
 		t.Fatal("bad amd64 sha256 accepted")
 	}
 	bad = frpTestParams()
 	bad.SHA256Arm = "short"
-	if err := d.Validate(mustJSON(bad)); err == nil {
+	if err := d.Validate(infra.MustJSON(bad)); err == nil {
 		t.Fatal("bad arm64 sha256 accepted")
 	}
 	bad = frpTestParams()
 	bad.Token = `has "quote"`
-	if err := d.Validate(mustJSON(bad)); err == nil {
+	if err := d.Validate(infra.MustJSON(bad)); err == nil {
 		t.Fatal("token with quote accepted")
 	}
 	bad = frpTestParams()
 	bad.AllowMin = 10
 	bad.AllowMax = 5
-	if err := d.Validate(mustJSON(bad)); err == nil {
+	if err := d.Validate(infra.MustJSON(bad)); err == nil {
 		t.Fatal("inverted port range accepted")
 	}
 	badC := frpTestParams()
 	badC.RemotePort = 0
-	if err := d.Validate(mustJSON(badC)); err == nil {
+	if err := d.Validate(infra.MustJSON(badC)); err == nil {
 		t.Fatal("params without remote_port accepted")
 	}
 }
@@ -200,13 +202,13 @@ func frpSetTestEnv(t *testing.T) (fetchCalls *int, shaHex, sigB64 string) {
 	frpTestPins.arm = shaHex
 	frpTestPins.sigAmd = sigB64
 	frpTestPins.sigArm = sigB64
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	t.Cleanup(func() {
 		engineArtifactPubKeyB64 = origKey
 		frpLoadIdentity = origIdent
 		frpFetchArtifact = origFetch
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return fetchCalls, shaHex, sigB64
 }
@@ -219,7 +221,7 @@ func TestFRPEnsureBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureBinary: %v", err)
 	}
-	if !fileExists(filepath.Join(dir, "frps")) || !fileExists(filepath.Join(dir, "frpc")) {
+	if !infra.FileExists(filepath.Join(dir, "frps")) || !infra.FileExists(filepath.Join(dir, "frpc")) {
 		t.Fatal("binaries not installed")
 	}
 	// Phase 5: the manifest flow costs TWO calls on a miss (manifest GET
@@ -308,7 +310,7 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 		t.Fatalf("spawned=%d fetch=%v", spawned, *fetchCalls)
 	}
 	cfgPath := frpConfigPath("t1")
-	if !fileExists(cfgPath) {
+	if !infra.FileExists(cfgPath) {
 		t.Fatal("config file missing while running")
 	}
 
@@ -342,10 +344,10 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 		t.Fatalf("spawned after change = %d, want 2", spawned)
 	}
 	// reload with equal params → nil; with changed params → ErrRestartRequired
-	if err := d.Reload(engine.Instance{TunnelID: "t1", Params: mustJSON(p2)}); err != nil {
+	if err := d.Reload(engine.Instance{TunnelID: "t1", Params: infra.MustJSON(p2)}); err != nil {
 		t.Fatalf("reload equal: %v", err)
 	}
-	if err := d.Reload(engine.Instance{TunnelID: "t1", Params: mustJSON(p)}); err != engine.ErrRestartRequired {
+	if err := d.Reload(engine.Instance{TunnelID: "t1", Params: infra.MustJSON(p)}); err != engine.ErrRestartRequired {
 		t.Fatalf("reload changed = %v", err)
 	}
 
@@ -357,7 +359,7 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 	if killed != 2 || deleted != 4 {
 		t.Fatalf("killed=%d deleted=%d", killed, deleted)
 	}
-	if fileExists(cfgPath) {
+	if infra.FileExists(cfgPath) {
 		t.Fatal("config file left behind after Stop")
 	}
 	if h := d.Health(inst); h.OK {
@@ -418,7 +420,7 @@ func TestFRPManagerReconcile(t *testing.T) {
 	mgr := engine.NewManager(reg)
 	res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "frp", Enabled: true}},
-		[]engine.TunnelSpec{{ID: "mt1", Engine: "frp", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(p), Enabled: true}})
+		[]engine.TunnelSpec{{ID: "mt1", Engine: "frp", LocalServer: "germany", RemoteServer: "iran", Params: infra.MustJSON(p), Enabled: true}})
 	if len(res.Errors) > 0 {
 		t.Fatalf("reconcile errors: %v", res.Errors)
 	}

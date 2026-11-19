@@ -27,17 +27,19 @@ import (
 	"log"
 	"os"
 	"strings"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // netCliStart initializes the CLI without the full-panel requirement:
-// GRE_PANEL_DIR overrides configDir; the installation role comes from the
+// GRE_PANEL_DIR overrides infra.ConfigDir; the installation role comes from the
 // files on disk. Unlike cliStart it NEVER calls loadOrInit in agent mode
 // (loadOrInit would create a default panel.json — the fake file Session 6's
 // QA flagged). Read-only ops work on an uninstalled box; mutating ops are
 // refused later by netRequireWritableInstall.
 func netCliStart() bool {
 	if v := os.Getenv("GRE_PANEL_DIR"); v != "" {
-		configDir = v
+		infra.ConfigDir = v
 	}
 	cliMode = true
 	log.SetOutput(io.Discard)

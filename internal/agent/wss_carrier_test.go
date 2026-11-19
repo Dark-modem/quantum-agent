@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestWSSConfigDefaultsAndLoadSave(t *testing.T) {
@@ -18,9 +20,9 @@ func TestWSSConfigDefaultsAndLoadSave(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	cfg := defaultWSSConfig()
 	if cfg.ListenPort != 8443 {
@@ -88,11 +90,11 @@ func TestCarrierWSSIntegration(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
-	// set_mode below starts the WSS server goroutine, which reads configDir;
-	// stop it before configDir is restored (defers run last-in first-out).
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
+	// set_mode below starts the WSS server goroutine, which reads infra.ConfigDir;
+	// stop it before infra.ConfigDir is restored (defers run last-in first-out).
 	defer func() { _ = stopWSSCarrier() }()
 
 	cfg := defaultCarrierConfig()
@@ -152,9 +154,9 @@ func TestWSSOriginPolicy(t *testing.T) {
 // Changing the WSS port keeps the carrier names on the new port, and an empty
 // SNI clears the old one.
 func TestCarrierSetWSSPortAndSNI(t *testing.T) {
-	oldConfigDir := configDir
-	configDir = t.TempDir()
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	defer func() { infra.ConfigDir = oldConfigDir }()
 	defer func() { _ = stopWSSCarrier() }()
 
 	post := func(body string) *httptest.ResponseRecorder {
@@ -191,9 +193,9 @@ func TestCarrierSetWSSPortAndSNI(t *testing.T) {
 // The other server's WSS address can be IPv6 (WSS over IPv6) or a name; it is
 // kept bracketed with the WSS port, and junk is refused.
 func TestCarrierSetWSSRemoteIPv6(t *testing.T) {
-	oldConfigDir := configDir
-	configDir = t.TempDir()
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	defer func() { infra.ConfigDir = oldConfigDir }()
 	defer func() { _ = stopWSSCarrier() }()
 
 	post := func(body string) *httptest.ResponseRecorder {

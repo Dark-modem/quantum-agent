@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestMatrixValidation(t *testing.T) {
@@ -64,11 +66,11 @@ func TestMatrixBundlePinsKeyAndRejectsBadPayloads(t *testing.T) {
 	}
 }
 func TestMatrixNamespacedConfigAndRoutes(t *testing.T) {
-	oldDir, oldUnit, oldTinc := configDir, matrixUnitDir, matrixTincPath
-	configDir = t.TempDir()
+	oldDir, oldUnit, oldTinc := infra.ConfigDir, matrixUnitDir, matrixTincPath
+	infra.ConfigDir = t.TempDir()
 	matrixUnitDir = t.TempDir()
 	matrixTincPath = func() (string, error) { return "/usr/sbin/tincd", nil }
-	t.Cleanup(func() { configDir, matrixUnitDir, matrixTincPath = oldDir, oldUnit, oldTinc })
+	t.Cleanup(func() { infra.ConfigDir, matrixUnitDir, matrixTincPath = oldDir, oldUnit, oldTinc })
 	st := matrixState{Role: "node", Name: "node123", Family: "ipv6", Port: 21097, IP: matrixFirstPeer, Network: matrixNetname}
 	in := matrixLegacyInstance()
 	if e := matrixWriteConfig(in, st, "public host file"); e != nil {
@@ -132,9 +134,9 @@ func TestMatrixRefusesUnownedRemoval(t *testing.T) {
 	}
 }
 func TestMatrixRegistrationUnauthenticatedDenied(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = old })
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = old })
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/matrix/register", strings.NewReader(`{"token":"wrong","name":"node"}`))
 	handleMatrixRegister(rr, req)

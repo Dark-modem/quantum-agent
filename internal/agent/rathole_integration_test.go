@@ -40,6 +40,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -216,20 +218,20 @@ func TestRatholeIntegration(t *testing.T) {
 	defer artSrv.Close()
 	artURL := fmt.Sprintf("http://127.0.0.1:%d", artLn.Addr().(*net.TCPAddr).Port)
 
-	// Two AGENTS' worth of state: each end has its OWN configDir (in
+	// Two AGENTS' worth of state: each end has its OWN infra.ConfigDir (in
 	// production the agents live on different hosts — sharing one dir
 	// would make the client's Start overwrite the server's config file:
 	// both processes auto-detect their role from the SAME path).
 	dirA, dirB := filepath.Join(dir, "agent-a"), filepath.Join(dir, "agent-b")
-	origConfigDir := configDir
-	configDir = dirA
-	t.Cleanup(func() { configDir = origConfigDir })
+	origConfigDir := infra.ConfigDir
+	infra.ConfigDir = dirA
+	t.Cleanup(func() { infra.ConfigDir = origConfigDir })
 	origKey := engineArtifactPubKeyB64
 	engineArtifactPubKeyB64 = pubB64
 	t.Cleanup(func() { engineArtifactPubKeyB64 = origKey })
-	origRunner := runner
-	runner = execRunner
-	t.Cleanup(func() { runner = origRunner })
+	origRunner := infra.Runner
+	infra.Runner = execRunner
+	t.Cleanup(func() { infra.Runner = origRunner })
 
 	// Spawn seam: each instance respawns in ITS OWN namespace forever —
 	// keyed by config path (a closure over a mutable serveNS would put a
@@ -313,13 +315,13 @@ func TestRatholeIntegration(t *testing.T) {
 	dServer := NewRatholeDriver()
 	dClient := NewRatholeDriver()
 	serverInst := engine.Instance{TunnelID: "rh-int", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := dServer.Start(context.Background(), serverInst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
 	// The SERVER's noise public key: read from the persisted key state —
 	// in production it rides the ack detail to the panel.
-	ksRaw, err := os.ReadFile(filepath.Join(configDir, "wg", "rathole-rh-int.noise"))
+	ksRaw, err := os.ReadFile(filepath.Join(infra.ConfigDir, "wg", "rathole-rh-int.noise"))
 	if err != nil {
 		t.Fatalf("noise key state: %v", err)
 	}
@@ -332,11 +334,11 @@ func TestRatholeIntegration(t *testing.T) {
 	// closed) — the panel pushes it in the desired revision and the client
 	// starts once with the complete params, in ITS OWN state dir.
 	serveNS = rhNSB
-	configDir = dirB
+	infra.ConfigDir = dirB
 	revP := p
 	revP.NoiseServerPublic = ks.PublicKey
 	clientInst := engine.Instance{TunnelID: "rh-int", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(revP)}
+		Params: infra.MustJSON(revP)}
 	if err := dClient.Start(context.Background(), clientInst); err != nil {
 		t.Fatalf("client Start with the noise key: %v", err)
 	}

@@ -1,7 +1,7 @@
 package agent
 
 // Agent-local persistence: the enrollment identity (agent.json) and the
-// desired-state journal (agent-state.json). Both live in configDir, carry
+// desired-state journal (agent-state.json). Both live in infra.ConfigDir, carry
 // 0600 permissions and are written atomically (temp file + rename), so the
 // agent is self-healing after a crash or reboot: the last received desired
 // state, its progress and the last controller-connection status all survive.
@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
-// agentIdentity is the enrollment record persisted at <configDir>/agent.json.
+// agentIdentity is the enrollment record persisted at <infra.ConfigDir>/agent.json.
 // The key never leaves this file (and is never logged).
 type agentIdentity struct {
 	ID         string `json:"id"`
@@ -26,7 +28,7 @@ type agentIdentity struct {
 	EnrolledAt string `json:"enrolled_at,omitempty"`
 }
 
-func agentIdentityPath() string { return filepath.Join(configDir, "agent.json") }
+func agentIdentityPath() string { return filepath.Join(infra.ConfigDir, "agent.json") }
 
 // agentLoadIdentity reads and validates the enrollment record.
 func agentLoadIdentity() (agentIdentity, bool) {
@@ -55,7 +57,7 @@ type agentWSStatus struct {
 	StartedAt int64  `json:"started_at,omitempty"` // when `agent run` started
 }
 
-// agentPersistedState is the journal at <configDir>/agent-state.json.
+// agentPersistedState is the journal at <infra.ConfigDir>/agent-state.json.
 // DesiredStatus is "pending" (received, apply in flight or deferred),
 // "applied" (acknowledged ok) or "failed" (acknowledged with an error).
 type agentPersistedState struct {
@@ -70,7 +72,7 @@ type agentPersistedState struct {
 	UpdatedAt       int64           `json:"updated_at,omitempty"`
 }
 
-func agentStatePath() string { return filepath.Join(configDir, "agent-state.json") }
+func agentStatePath() string { return filepath.Join(infra.ConfigDir, "agent-state.json") }
 
 // agentStateMu serializes load-modify-save cycles on agent-state.json.
 var agentStateMu sync.Mutex

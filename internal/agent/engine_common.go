@@ -26,6 +26,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -134,7 +136,7 @@ func engineCacheHit(dir, sha256Hex string, want []string) bool {
 		return false
 	}
 	for _, f := range want {
-		if !fileExists(filepath.Join(dir, f)) {
+		if !infra.FileExists(filepath.Join(dir, f)) {
 			return false
 		}
 	}
@@ -180,7 +182,7 @@ func engineSupervise(stop <-chan struct{}, st engineProcState, binPath, cfgPath 
 // engineEngineDir returns the per-engine state dir under the agent
 // config dir (bin cache + instance configs; removed by Uninstall).
 func engineEngineDir(engineID string) string {
-	return filepath.Join(configDir, "engines", engineID)
+	return filepath.Join(infra.ConfigDir, "engines", engineID)
 }
 
 // engineVerifySecretShape guards TOML/JSON-injection for any secret that

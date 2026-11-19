@@ -14,11 +14,11 @@ package agent
 //   - EnsureBinary downloads the pinned frp artifact from the controller's
 //     artifact endpoint (frp_artifact.go), verifies sha256 + ed25519
 //     (fail-closed without a pinned key) and extracts frps/frpc into
-//     <configDir>/engines/frp/<version>/. The cache exists only while the
+//     <infra.ConfigDir>/engines/frp/<version>/. The cache exists only while the
 //     engine has instances: Uninstall (called by the Manager after the
 //     last instance stopped) removes it.
 //   - While an instance runs, the only files are that cache plus one
-//     per-tunnel config at <configDir>/engines/frp/<tunnelID>.toml
+//     per-tunnel config at <infra.ConfigDir>/engines/frp/<tunnelID>.toml
 //     (0600, removed on Stop). No processes or goroutines exist while
 //     the engine has zero instances.
 
@@ -36,6 +36,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
@@ -323,7 +325,7 @@ func frpParseParams(raw json.RawMessage) (frpParams, error) {
 
 // frpConfigPath is the per-tunnel config file (exists only while running).
 func frpConfigPath(tunnelID string) string {
-	return filepath.Join(configDir, "engines", "frp", tunnelID+".toml")
+	return filepath.Join(infra.ConfigDir, "engines", "frp", tunnelID+".toml")
 }
 
 // frpBinDir is the per-version binary cache (exists only while installed).

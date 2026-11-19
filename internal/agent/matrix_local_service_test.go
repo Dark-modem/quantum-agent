@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestMatrixLocalBridgeCopiesBytesUnchanged(t *testing.T) {
@@ -51,9 +53,9 @@ func TestMatrixLocalBridgeCopiesBytesUnchanged(t *testing.T) {
 	}
 }
 func TestMatrixLocalBridgeRejectsWrongRoleAndProtectedPorts(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = old })
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = old })
 	st := matrixState{Enabled: true, Network: matrixNetname, Role: "hub", Ports: []int{443}}
 	if e := saveMatrix(st); e != nil {
 		t.Fatal(e)
@@ -74,15 +76,15 @@ func TestMatrixLocalBridgeRejectsWrongRoleAndProtectedPorts(t *testing.T) {
 	}
 }
 func TestMatrixLocalBridgeStateAndExactRemoval(t *testing.T) {
-	oldDir, oldUnits, oldExec := configDir, matrixUnitDir, matrixExec
-	configDir = t.TempDir()
+	oldDir, oldUnits, oldExec := infra.ConfigDir, matrixUnitDir, matrixExec
+	infra.ConfigDir = t.TempDir()
 	matrixUnitDir = t.TempDir()
 	var calls []string
 	matrixExec = func(n string, args ...string) (string, error) {
 		calls = append(calls, n+" "+strings.Join(args, " "))
 		return "", nil
 	}
-	t.Cleanup(func() { configDir, matrixUnitDir, matrixExec = oldDir, oldUnits, oldExec })
+	t.Cleanup(func() { infra.ConfigDir, matrixUnitDir, matrixExec = oldDir, oldUnits, oldExec })
 	inst := matrixLegacyInstance()
 	if e := saveMatrixLocalServices(inst, []matrixLocalService{{443, 443}}); e != nil {
 		t.Fatal(e)

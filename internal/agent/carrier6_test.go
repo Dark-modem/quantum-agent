@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // fakeWorker is the other server over the Peer Link: it records the carriers
@@ -76,12 +78,12 @@ func TestSwitchCarrier4in6NeedsAddresses(t *testing.T) {
 // On 6to4 / 4in6 the device is ip6gre, which `ip tunnel show` does not list:
 // the status reads the other server from gre6/IF.env instead.
 func TestLocalStatusIP6GRE(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	defer func() { configDir = old }()
-	_ = os.MkdirAll(filepath.Join(configDir, "gre6"), 0700)
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	defer func() { infra.ConfigDir = old }()
+	_ = os.MkdirAll(filepath.Join(infra.ConfigDir, "gre6"), 0700)
 	env := "REMOTE4=198.51.100.2\nLOCAL4=198.51.100.1\nREMOTE6=2001:db8::2\nLOCAL6=2001:db8::1\n"
-	if err := os.WriteFile(filepath.Join(configDir, "gre6", "gre-tunnel.env"), []byte(env), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(infra.ConfigDir, "gre6", "gre-tunnel.env"), []byte(env), 0600); err != nil {
 		t.Fatal(err)
 	}
 	v := &hostView{tunnelOK: true, tunnelShow: "gre0: gre/ip remote any local any ttl inherit nopmtudisc\n",

@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -51,9 +53,9 @@ func TestWgIntegration(t *testing.T) {
 	wgIntSkip(t)
 
 	// Persisted key state must survive the restart phase within this run.
-	origCfg := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = origCfg })
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = origCfg })
 
 	// kernel capability probe: the wireguard module must be loadable.
 	if out, err := exec.Command("sudo", "ip", "link", "add", "wg-probe0", "type", "wireguard").CombinedOutput(); err != nil {
@@ -147,7 +149,7 @@ func TestWgIntegration(t *testing.T) {
 	d := NewWgDriver()
 	p := wgParams{ServerSide: "germany", CarrierIP: wgIPA, CarrierPort: wgCarrier, MTU: 0}
 	instA := engine.Instance{TunnelID: "twga", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), instA); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -166,7 +168,7 @@ func TestWgIntegration(t *testing.T) {
 
 	serveNS = wgNSB
 	instB := engine.Instance{TunnelID: "twgb", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), instB); err != nil {
 		t.Fatalf("client Start: %v", err)
 	}
@@ -188,11 +190,11 @@ func TestWgIntegration(t *testing.T) {
 	revB := p
 	revB.PeerPublic = pubA
 	serveNS = wgNSA
-	if err := d.Reload(engine.Instance{TunnelID: "twga", Params: mustJSON(revA)}); err != nil {
+	if err := d.Reload(engine.Instance{TunnelID: "twga", Params: infra.MustJSON(revA)}); err != nil {
 		t.Fatalf("server peer_public revision must apply live: %v", err)
 	}
 	serveNS = wgNSB
-	if err := d.Reload(engine.Instance{TunnelID: "twgb", Params: mustJSON(revB)}); err != nil {
+	if err := d.Reload(engine.Instance{TunnelID: "twgb", Params: infra.MustJSON(revB)}); err != nil {
 		t.Fatalf("client peer_public revision must apply live: %v", err)
 	}
 
@@ -256,7 +258,7 @@ func TestWgIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { frpLoadIdentity = origIdent2 })
 	if err := d2.Start(context.Background(), engine.Instance{TunnelID: "twgb",
-		LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(revB)}); err != nil {
+		LocalServer: "iran", RemoteServer: "germany", Params: infra.MustJSON(revB)}); err != nil {
 		t.Fatalf("client restart Start: %v", err)
 	}
 	d2.mu.Lock()
@@ -287,7 +289,7 @@ func TestWgIntegration(t *testing.T) {
 		t.Fatalf("server Stop: %v", err)
 	}
 	serveNS = wgNSB
-	if err := d2.Stop(engine.Instance{TunnelID: "twgb", Params: mustJSON(revB)}); err != nil {
+	if err := d2.Stop(engine.Instance{TunnelID: "twgb", Params: infra.MustJSON(revB)}); err != nil {
 		t.Fatalf("client Stop: %v", err)
 	}
 	for _, x := range []struct{ ns, iface string }{{wgNSA, ifaceA}, {wgNSB, ifaceB2}} {

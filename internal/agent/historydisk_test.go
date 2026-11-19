@@ -1,7 +1,5 @@
 package agent
 
-import ()
-
 func itoa(n int64) string {
 	b := []byte{}
 	neg := n < 0

@@ -35,6 +35,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -179,9 +181,9 @@ func TestFRPIntegration(t *testing.T) {
 
 	// Driver config dir + identity pointing at the artifact server.
 	cfg := t.TempDir()
-	origConfigDir := configDir
-	configDir = cfg
-	t.Cleanup(func() { configDir = origConfigDir })
+	origConfigDir := infra.ConfigDir
+	infra.ConfigDir = cfg
+	t.Cleanup(func() { infra.ConfigDir = origConfigDir })
 	origIdent := frpLoadIdentity
 	// The identity's Name is the role resolver's self-identifier: it must
 	// equal params.server_side on the frps end ("germany") and differ on
@@ -220,11 +222,11 @@ func TestFRPIntegration(t *testing.T) {
 		return &frpExecProcess{cmd: cmd, done: done}, nil
 	}
 	t.Cleanup(func() { frpSpawn = origSpawn })
-	// The hermetic TestMain stubs the runner seam; the integration test
+	// The hermetic TestMain stubs the infra.Runner seam; the integration test
 	// needs REAL host commands (iptables counters, config probes).
-	origRunner := runner
-	runner = execRunner
-	t.Cleanup(func() { runner = origRunner })
+	origRunner := infra.Runner
+	infra.Runner = execRunner
+	t.Cleanup(func() { infra.Runner = origRunner })
 
 	// Ports.
 	// Probe ports BELOW the ephemeral range (Linux default 32768-60999):
@@ -273,9 +275,9 @@ func TestFRPIntegration(t *testing.T) {
 	// resolves from the enrollment identity, not from these fields. The
 	// identity seam below is swapped between the two Starts accordingly.
 	srvInst := engine.Instance{TunnelID: "t-int-srv", LocalServer: "iran",
-		RemoteServer: "germany", Params: mustJSON(p)}
+		RemoteServer: "germany", Params: infra.MustJSON(p)}
 	cliInst := engine.Instance{TunnelID: "t-int-cli", LocalServer: "iran",
-		RemoteServer: "germany", Params: mustJSON(p)}
+		RemoteServer: "germany", Params: infra.MustJSON(p)}
 
 	// In production each agent host runs its own driver instance; the two
 	// ends of a tunnel never share one runs map. Mirror that here.

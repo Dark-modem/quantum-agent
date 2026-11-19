@@ -24,6 +24,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // netProfileName identifies one of the three profiles.
@@ -219,7 +221,7 @@ func netReservedPortsValue() string {
 			}
 		}
 	}
-	if b, err := netReadFile(filepath.Join(configDir, "panel.json")); err == nil {
+	if b, err := netReadFile(filepath.Join(infra.ConfigDir, "panel.json")); err == nil {
 		s := string(b)
 		for _, key := range []string{`"port"`, `"tls_port"`} {
 			if i := strings.Index(s, key); i >= 0 {
@@ -227,7 +229,7 @@ func netReservedPortsValue() string {
 			}
 		}
 	}
-	for _, dir := range []string{configDir, filepath.Join(configDir, "backhaul")} {
+	for _, dir := range []string{infra.ConfigDir, filepath.Join(infra.ConfigDir, "backhaul")} {
 		entries, err := netReadDir(dir)
 		if err != nil {
 			continue
@@ -235,7 +237,7 @@ func netReservedPortsValue() string {
 		for _, e := range entries {
 			name := e.Name()
 			isFRP := strings.HasPrefix(name, "frps") && strings.HasSuffix(name, ".toml")
-			isBH := dir != configDir && strings.HasSuffix(name, ".toml")
+			isBH := dir != infra.ConfigDir && strings.HasSuffix(name, ".toml")
 			if !isFRP && !isBH {
 				continue
 			}
@@ -250,7 +252,7 @@ func netReservedPortsValue() string {
 			}
 		}
 	}
-	if b, err := netReadFile(filepath.Join(configDir, "agent_tunnels.json")); err == nil {
+	if b, err := netReadFile(filepath.Join(infra.ConfigDir, "agent_tunnels.json")); err == nil {
 		add(string(b))
 	}
 	ports := make([]string, 0, len(set))

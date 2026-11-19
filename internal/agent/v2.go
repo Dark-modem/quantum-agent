@@ -20,7 +20,7 @@ import (
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 	"github.com/Dark-modem/quantum-agent/internal/hardening"
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // agentNegotiateOrV1 clamps the controller-declared session version.
@@ -65,7 +65,7 @@ var agentV2 agentV2Runtime
 
 // agentV2AppliedRevision is the in-memory fencing floor for v2 desired
 // state. The process's authority (disk is only the boot backup): tests
-// run without a writable configDir, and fencing must not depend on it.
+// run without a writable infra.ConfigDir, and fencing must not depend on it.
 var agentV2AppliedRevision string
 
 // agentV2FenceAccepts reports whether revision is strictly newer than

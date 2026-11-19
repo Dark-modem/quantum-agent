@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 func testCtx() context.Context { return context.Background() }

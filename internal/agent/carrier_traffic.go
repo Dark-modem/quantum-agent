@@ -19,7 +19,6 @@ package agent
 // interface, which /proc/net/dev already counts. IPv4 only.
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"os"
@@ -27,8 +26,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // carrierKey is the pseudo interface the counters are filed under in the
@@ -80,7 +79,7 @@ func carrierConfigs() []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(p string) {
-		if !seen[p] && fileExists(p) {
+		if !seen[p] && infra.FileExists(p) {
 			seen[p] = true
 			out = append(out, p)
 		}
@@ -98,62 +97,6 @@ func carrierConfigs() []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// carrierLookup resolves a dialled host name; swappable for tests.
-var carrierLookup = func(host string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
-	if err != nil || len(ips) == 0 {
-		return ""
-	}
-	return ips[0].String()
-}
-
-var carrierDNS = struct {
-	sync.Mutex
-	m map[string]carrierDNSEntry
-}{m: map[string]carrierDNSEntry{}}
-
-type carrierDNSEntry struct {
-	ip string
-	at time.Time
-}
-
-// carrierIP is host as an IP address: an IPv6 literal stays IPv6, a name is
-// resolved like carrierIPv4.
-func carrierIP(host string) string {
-	if h := normHost(host); isV6(h) {
-		return net.ParseIP(h).String()
-	}
-	return carrierIPv4(host)
-}
-
-// carrierIPv4 is host as an IPv4 address ("" for IPv6 or a name that does not
-// resolve). Names are looked up at most every 10 minutes.
-func carrierIPv4(host string) string {
-	host = normHost(host)
-	if ip := net.ParseIP(host); ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			return v4.String()
-		}
-		return ""
-	}
-	if host == "" {
-		return ""
-	}
-	carrierDNS.Lock()
-	e, ok := carrierDNS.m[host]
-	carrierDNS.Unlock()
-	if ok && time.Since(e.at) < 10*time.Minute {
-		return e.ip
-	}
-	ip := carrierLookup(host)
-	carrierDNS.Lock()
-	carrierDNS.m[host] = carrierDNSEntry{ip, time.Now()}
-	carrierDNS.Unlock()
-	return ip
 }
 
 // carrierEnds reads every Backhaul config, the Bagher config and the Xray links.
@@ -193,13 +136,13 @@ func bagherCarrierEnds(cfg SSHFwdConfig) []carrierEnd {
 		return 22
 	}
 	if cfg.Role == "foreign" || cfg.Role == "server" {
-		if ip := carrierIP(cfg.RemoteHost); ip != "" {
+		if ip := infra.CarrierIP(cfg.RemoteHost); ip != "" {
 			return []carrierEnd{{Port: port(cfg.RemoteSSHPort), From: ip, Tag: "bagher-1"}}
 		}
 		return nil
 	}
 	var ends []carrierEnd
-	if ip := carrierIP(cfg.RemoteHost); ip != "" {
+	if ip := infra.CarrierIP(cfg.RemoteHost); ip != "" {
 		ends = append(ends, carrierEnd{Port: port(cfg.RemoteSSHPort), Remote: ip, Tag: "bagher-1"})
 	}
 	for _, l := range cfg.Links {
@@ -207,7 +150,7 @@ func bagherCarrierEnds(cfg SSHFwdConfig) []carrierEnd {
 		if p <= 0 {
 			p = cfg.RemoteSSHPort
 		}
-		if ip := carrierIP(l.RemoteHost); ip != "" {
+		if ip := infra.CarrierIP(l.RemoteHost); ip != "" {
 			ends = append(ends, carrierEnd{Port: port(p), Remote: ip, Tag: fmt.Sprintf("bagher-%d", l.ID)})
 		}
 	}
@@ -227,7 +170,7 @@ func backhaulCarrierEnd(c backhaulConf) []carrierEnd {
 	if c.RemoteAddr != "" {
 		if h, p, err := net.SplitHostPort(c.RemoteAddr); err == nil {
 			n, err := strconv.Atoi(p)
-			if ip := carrierIP(h); err == nil && n > 0 && n <= 65535 && ip != "" {
+			if ip := infra.CarrierIP(h); err == nil && n > 0 && n <= 65535 && ip != "" {
 				return []carrierEnd{{Port: n, Remote: ip, UDP: true}}
 			}
 		}

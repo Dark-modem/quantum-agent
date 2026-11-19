@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -67,7 +69,7 @@ var (
 
 type wssCarrierManager struct {
 	cfg            wssConfig
-	tlsCertPath    string // panel cert paths, resolved at start so the server goroutine never reads configDir
+	tlsCertPath    string // panel cert paths, resolved at start so the server goroutine never reads infra.ConfigDir
 	tlsKeyPath     string
 	ctx            context.Context
 	cancel         context.CancelFunc
@@ -89,12 +91,12 @@ type wssCarrierManager struct {
 }
 
 func wssConfigPath() string {
-	return filepath.Join(configDir, "wss_carrier.json")
+	return filepath.Join(infra.ConfigDir, "wss_carrier.json")
 }
 
 func defaultWSSConfig() wssConfig {
 	token := ""
-	data, err := os.ReadFile(filepath.Join(configDir, "setup.json"))
+	data, err := os.ReadFile(filepath.Join(infra.ConfigDir, "setup.json"))
 	if err == nil {
 		var s struct {
 			Token string `json:"token"`
@@ -168,7 +170,7 @@ func saveWSSConfig(cfg wssConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	if err := os.MkdirAll(infra.ConfigDir, 0700); err != nil {
 		return err
 	}
 	tmp := wssConfigPath() + ".tmp"

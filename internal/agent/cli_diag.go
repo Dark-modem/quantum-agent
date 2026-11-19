@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // diagRedactValue redacts one secret string: sha256, first 12 hex chars.
@@ -30,7 +32,7 @@ func diagRedactValue(v string) string {
 // diagCmdOut runs a command and returns its output (or the error text),
 // capped so one noisy command cannot bloat the bundle.
 func diagCmdOut(name string, args ...string) string {
-	out, err := runCmdTimeout(10*time.Second, name, args...)
+	out, err := infra.RunCmdTimeout(10*time.Second, name, args...)
 	if err != nil {
 		return "ERROR: " + err.Error()
 	}
@@ -68,7 +70,7 @@ func diagIdentityShape() map[string]any {
 // private keys).
 func diagConfigFiles() []map[string]any {
 	out := []map[string]any{}
-	_ = filepath.Walk(configDir, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(infra.ConfigDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -78,7 +80,7 @@ func diagConfigFiles() []map[string]any {
 			return nil
 		}
 		out = append(out, map[string]any{
-			"path":   strings.TrimPrefix(path, configDir+"/"),
+			"path":   strings.TrimPrefix(path, infra.ConfigDir+"/"),
 			"bytes":  info.Size(),
 			"sha256": "sha256:" + hex.EncodeToString(sha256SumBytes(b)[:12]),
 		})
@@ -149,7 +151,7 @@ func cliDiag(args []string) int {
 		return 2
 	}
 	if v := os.Getenv("GRE_PANEL_DIR"); v != "" {
-		configDir = v
+		infra.ConfigDir = v
 	}
 	// The balancer view comes from the persisted snapshot (the running
 	// agent wrote it); a cold agent produces what it can. The snapshot

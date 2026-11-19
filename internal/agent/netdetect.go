@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Seams so tests can inject synthetic /proc and /sys content and canned
@@ -31,7 +33,7 @@ var (
 	netStat       = os.Stat
 	netLstat      = os.Readlink
 	netDetectExec = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		return runner(ctx, name, args...)
+		return infra.Runner(ctx, name, args...)
 	}
 )
 

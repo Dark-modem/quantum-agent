@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -30,7 +32,7 @@ func wgCompanionTest() *wgCompanion {
 // exercises the cache-hit path without any fetch.
 func warmUDP2RawCache(t *testing.T) {
 	t.Helper()
-	dir := filepath.Join(configDir, "engines", "udp2raw", "bin", "20230206.0")
+	dir := filepath.Join(infra.ConfigDir, "engines", "udp2raw", "bin", "20230206.0")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +153,7 @@ func TestWgCompanionStartStopShape(t *testing.T) {
 	p := wgTestParams()
 	p.Companion = wgCompanionTest()
 	inst := engine.Instance{TunnelID: "twc1", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("server Start with companion: %v", err)
 	}
@@ -208,7 +210,7 @@ func TestWgCompanionClientEndpointAtStart(t *testing.T) {
 	p.Companion = wgCompanionTest()
 	p.PeerPublic = strings.Repeat("cD", 21) + "=="
 	if err := d.Start(context.Background(), engine.Instance{TunnelID: "twc2",
-		LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(p)}); err != nil {
+		LocalServer: "iran", RemoteServer: "germany", Params: infra.MustJSON(p)}); err != nil {
 		t.Fatal(err)
 	}
 	// The client's peer endpoint goes into the LOCAL udp2raw listener.

@@ -9,12 +9,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func matrixInstanceLab(t *testing.T) {
 	t.Helper()
-	oldDir, oldUnit, oldTinc, oldExec := configDir, matrixUnitDir, matrixTincPath, matrixExec
-	configDir = t.TempDir()
+	oldDir, oldUnit, oldTinc, oldExec := infra.ConfigDir, matrixUnitDir, matrixTincPath, matrixExec
+	infra.ConfigDir = t.TempDir()
 	matrixUnitDir = t.TempDir()
 	matrixTincPath = func() (string, error) { return "/usr/sbin/tincd", nil }
 	matrixExec = func(name string, args ...string) (string, error) {
@@ -31,8 +33,8 @@ func matrixInstanceLab(t *testing.T) {
 		return "", nil
 	}
 	t.Cleanup(func() {
-		AgentOpsWait() // agent runtime goroutines read configDir/matrix seams
-		configDir, matrixUnitDir, matrixTincPath, matrixExec = oldDir, oldUnit, oldTinc, oldExec
+		AgentOpsWait() // agent runtime goroutines read infra.ConfigDir/matrix seams
+		infra.ConfigDir, matrixUnitDir, matrixTincPath, matrixExec = oldDir, oldUnit, oldTinc, oldExec
 	})
 }
 
@@ -113,10 +115,10 @@ func TestMatrixInstanceRegistryScansStateFiles(t *testing.T) {
 	}
 	for _, name := range []string{"matrix.json", "matrix2.json", "matrix-local-services.json", "matrix-tinc", "topologies.json", "matrix10.json"} {
 		if strings.HasSuffix(name, ".json") {
-			if e := os.WriteFile(filepath.Join(configDir, name), []byte("{}"), 0600); e != nil {
+			if e := os.WriteFile(filepath.Join(infra.ConfigDir, name), []byte("{}"), 0600); e != nil {
 				t.Fatal(e)
 			}
-		} else if e := os.MkdirAll(filepath.Join(configDir, name), 0700); e != nil {
+		} else if e := os.MkdirAll(filepath.Join(infra.ConfigDir, name), 0700); e != nil {
 			t.Fatal(e)
 		}
 	}

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -57,8 +59,8 @@ func ratholeSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 	// coverage in the integration test).
 	origKey := engineArtifactPubKeyB64
 	engineArtifactPubKeyB64 = "test-pinned-key"
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	binDir := ratholeBinDir("0.5.0")
 	_ = os.MkdirAll(binDir, 0o700)
 	_ = os.WriteFile(filepath.Join(binDir, "rathole"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
@@ -69,7 +71,7 @@ func ratholeSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 		frpLoadIdentity = origIdent
 		acctIptables = origIpt
 		engineArtifactPubKeyB64 = origKey
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return cmds, spawned
 }
@@ -140,7 +142,7 @@ func TestRatholeStartStopShape(t *testing.T) {
 	d := NewRatholeDriver()
 	p := ratholeTestParams()
 	inst := engine.Instance{TunnelID: "trh1", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -173,7 +175,7 @@ func TestRatholeStartStopShape(t *testing.T) {
 	if err := d.Uninstall(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if fileExists(ratholeEngineDir()) {
+	if infra.FileExists(ratholeEngineDir()) {
 		t.Fatal("engine dir left behind after Uninstall")
 	}
 }
@@ -189,13 +191,13 @@ func TestRatholeClientNeedsNoiseKey(t *testing.T) {
 	// Without noise_server_public: fail closed.
 	p := ratholeTestParams()
 	if err := d.Start(context.Background(), engine.Instance{TunnelID: "trh2",
-		LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(p)}); err == nil {
+		LocalServer: "iran", RemoteServer: "germany", Params: infra.MustJSON(p)}); err == nil {
 		t.Fatal("client Start without the server's noise key accepted")
 	}
 	// With it: starts, and the rendered config carries the key.
 	p.NoiseServerPublic = strings.Repeat("cD", 21) + "=="
 	if err := d.Start(context.Background(), engine.Instance{TunnelID: "trh2",
-		LocalServer: "iran", RemoteServer: "germany", Params: mustJSON(p)}); err != nil {
+		LocalServer: "iran", RemoteServer: "germany", Params: infra.MustJSON(p)}); err != nil {
 		t.Fatalf("client Start: %v", err)
 	}
 	b, err := os.ReadFile(ratholeConfigPath("trh2"))
@@ -219,7 +221,7 @@ func TestRatholeHealthClientRole(t *testing.T) {
 	p := ratholeTestParams()
 	p.NoiseServerPublic = strings.Repeat("cD", 21) + "=="
 	inst := engine.Instance{TunnelID: "trh3", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}

@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func cliBalancer(args []string) int {
 	if v := os.Getenv("GRE_PANEL_DIR"); v != "" {
-		configDir = v // same scoping as the other agent subcommands
+		infra.ConfigDir = v // same scoping as the other agent subcommands
 	}
 	if len(args) == 0 || args[0] != "status" {
 		fmt.Fprintln(os.Stderr, "usage: quantum-agent balancer status")

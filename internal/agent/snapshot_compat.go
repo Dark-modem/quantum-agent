@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // snapPool is the shared bounded worker pool for probe tasks.
@@ -113,7 +115,7 @@ func pingOnce(target string) (bool, float64) {
 	if ip, ok := strings.CutPrefix(target, matrixIfaceName+"|"); ok {
 		args = []string{"-I", matrixIfaceName, "-c", "1", "-W", "2", ip}
 	}
-	if _, err := runCmdTimeout(4*time.Second, "ping", args...); err != nil {
+	if _, err := infra.RunCmdTimeout(4*time.Second, "ping", args...); err != nil {
 		return false, -1
 	}
 	return true, float64(time.Since(start).Microseconds()) / 1000
@@ -207,12 +209,12 @@ func runQuantumCluster(timeout time.Duration, args ...string) (string, error) {
 	var cmd *exec.Cmd
 	if script, err := greScriptPath(); err == nil {
 		cmd = exec.CommandContext(ctx, "bash", append([]string{script}, args...)...)
-	} else if fileExists("/usr/local/bin/quantum") {
+	} else if infra.FileExists("/usr/local/bin/quantum") {
 		cmd = exec.CommandContext(ctx, "/usr/local/bin/quantum", args...)
 	} else {
 		return "", fmt.Errorf("quantum script not found")
 	}
-	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(stripANSI(string(out))), err
 }
@@ -221,24 +223,24 @@ func runQuantumCluster(timeout time.Duration, args ...string) (string, error) {
 func collectHost(recs []peerRecord, prev map[string]devCounters) *hostView {
 	v := &hostView{inner: map[string]string{}, active: map[string]bool{}, flowing: map[string]bool{}}
 	timedStep("ip_tunnel", func() {
-		if out, err := runCmdTimeout(5*time.Second, "ip", "tunnel", "show"); err == nil {
+		if out, err := infra.RunCmdTimeout(5*time.Second, "ip", "tunnel", "show"); err == nil {
 			v.tunnelShow, v.tunnelOK = string(out), true
 		}
 	})
 	timedStep("ip_addr", func() {
-		if out, err := runCmdTimeoutOut(5*time.Second, "ip", "-o", "-4", "addr", "show"); err == nil {
+		if out, err := infra.RunCmdTimeoutOut(5*time.Second, "ip", "-o", "-4", "addr", "show"); err == nil {
 			v.inner = parseAddrShow(string(out))
 		}
 	})
 	timedStep("systemctl", func() {
 		units := unitsFor(recs)
-		out, _ := runCmdTimeoutOut(5*time.Second, "systemctl", append([]string{"is-active"}, units...)...)
+		out, _ := infra.RunCmdTimeoutOut(5*time.Second, "systemctl", append([]string{"is-active"}, units...)...)
 		if m, ok := parseIsActive(units, string(out)); ok {
 			v.active = m
 			return
 		}
 		for _, u := range units { // unexpected output shape: fall back to one call per unit
-			o, _ := runCmdTimeoutOut(5*time.Second, "systemctl", "is-active", u)
+			o, _ := infra.RunCmdTimeoutOut(5*time.Second, "systemctl", "is-active", u)
 			v.active[u] = strings.TrimSpace(string(o)) == "active"
 		}
 	})
@@ -272,7 +274,7 @@ func collectHost(recs []peerRecord, prev map[string]devCounters) *hostView {
 		if filter == "" {
 			return // no tunnel ports: no session can match
 		}
-		if out, err := runCmdTimeoutOut(5*time.Second, "ss", "-Htin", "state", "established", filter); err == nil {
+		if out, err := infra.RunCmdTimeoutOut(5*time.Second, "ss", "-Htin", "state", "established", filter); err == nil {
 			v.sessions = parseSS(string(out))
 		}
 	})

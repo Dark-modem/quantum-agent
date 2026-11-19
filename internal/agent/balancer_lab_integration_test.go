@@ -56,7 +56,8 @@ import (
 	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
-	"github.com/Dark-modem/quantum-protocol"
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 const (
@@ -296,13 +297,13 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 		scriptMu.Unlock()
 		return realApply(s)
 	}
-	// TestMain refuses host commands through the runner seam for every
-	// test; the lab restores the REAL runner for its duration — every
+	// TestMain refuses host commands through the infra.Runner seam for every
+	// test; the lab restores the REAL infra.Runner for its duration — every
 	// command lands INSIDE the router netns (this process's netns), so
 	// the host is still untouched.
-	realRunner := runner
-	runner = execRunner
-	t.Cleanup(func() { bal.Stop(); nftApplyScript = realApply; runner = realRunner })
+	realRunner := infra.Runner
+	infra.Runner = infra.ExecRunner
+	t.Cleanup(func() { bal.Stop(); nftApplyScript = realApply; infra.Runner = realRunner })
 	lastScript := func() string {
 		scriptMu.Lock()
 		defer scriptMu.Unlock()
