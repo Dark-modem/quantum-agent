@@ -14,6 +14,29 @@ import (
 	"github.com/Dark-modem/quantum-agent/internal/hardening"
 )
 
+// hardeningConservativeFixture is the profile hardening.Conservative built
+// before §6.A3 deleted it (deadcode RTA: unreachable from main). The
+// contract tests need a valid sample profile to serialize, so the body
+// lives here verbatim — test fixture, not production code.
+func hardeningConservativeFixture() hardening.Profile {
+	deny := true
+	allowOut := true
+	return hardening.Profile{
+		Version: hardening.ProfileVersion,
+		Name:    "conservative",
+		Firewall: &hardening.FirewallSpec{
+			DefaultDenyIncoming: &deny,
+			AllowOutgoing:       &allowOut,
+			Limits: []hardening.PortRule{{
+				Port: 22, Proto: "tcp", Owner: "service:ssh",
+				Note: "SSH rate-limited",
+			}},
+		},
+		TimeSync: &hardening.TimeSyncSpec{EnsureActive: true},
+		Logging:  &hardening.LoggingSpec{PersistentJournal: true},
+	}
+}
+
 // panelHardeningApplyParams is the EXACT param map the panel builds in
 // meshProfileApply (meshapi2.go) for hardening.apply.
 func panelHardeningApplyParams(profileJSON string, timer int) map[string]string {
@@ -25,7 +48,7 @@ func panelHardeningApplyParams(profileJSON string, timer int) map[string]string 
 }
 
 func TestHardeningContractPanelPayloadSpelling(t *testing.T) {
-	profile := hardening.Conservative(22, nil)
+	profile := hardeningConservativeFixture()
 	profileJSON, err := json.Marshal(profile)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +67,7 @@ func TestHardeningContractPanelPayloadSpelling(t *testing.T) {
 }
 
 func TestHardeningContractDocumentedSpelling(t *testing.T) {
-	profile := hardening.Conservative(22, nil)
+	profile := hardeningConservativeFixture()
 	profileJSON, _ := json.Marshal(profile)
 	req := hardeningRequestFromParams("hardening.apply", map[string]string{
 		"profile":              string(profileJSON), // documented v2 contract spelling
