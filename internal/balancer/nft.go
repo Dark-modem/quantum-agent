@@ -1,4 +1,4 @@
-package agent
+package balancer
 
 // nftables rendering for the local forward balancer. The exact syntax
 // was validated empirically against nftables 1.0.9 (nft -c check mode,
@@ -20,28 +20,28 @@ import (
 	"strings"
 )
 
-// balTarget is one healthy tunnel in a forward rotation.
-type balTarget struct {
+// BalTarget is one healthy tunnel in a forward rotation.
+type BalTarget struct {
 	TunnelID string
 	IP       string
 	Port     int // target port on the foreign side
 	Weight   int
 }
 
-// forwardRender is one rendered forward rule (proto expanded to chains).
-type forwardRender struct {
+// ForwardRender is one rendered forward rule (proto expanded to chains).
+type ForwardRender struct {
 	ID         string
 	ListenPort int
 	TargetPort int    // fixed target port on the foreign side; 0 = unchanged
 	Proto      string // tcp | udp | both
-	Targets    []balTarget
+	Targets    []BalTarget
 }
 
-// renderForwardNFT renders one atomic nft transaction that replaces the
+// RenderForwardNFT renders one atomic nft transaction that replaces the
 // quantum-fwd table with one chain per rule. An empty targets list
 // renders a pass-through chain (all targets down: new connections reach
 // nothing locally and fail fast instead of blackholing).
-func renderForwardNFT(rules []forwardRender) string {
+func RenderForwardNFT(rules []ForwardRender) string {
 	var b strings.Builder
 	b.WriteString("table ip quantum-fwd\n")
 	b.WriteString("delete table ip quantum-fwd\n")
@@ -58,7 +58,7 @@ func renderForwardNFT(rules []forwardRender) string {
 	return b.String()
 }
 
-func chainID(forwardID, proto string) string {
+func ChainID(forwardID, proto string) string {
 	id := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
@@ -70,9 +70,9 @@ func chainID(forwardID, proto string) string {
 	return "fw_" + strings.ToLower(id) + "_" + proto
 }
 
-func renderForwardChain(proto string, r forwardRender) string {
+func renderForwardChain(proto string, r ForwardRender) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, " chain %s {\n", chainID(r.ID, proto))
+	fmt.Fprintf(&b, " chain %s {\n", ChainID(r.ID, proto))
 	fmt.Fprintf(&b, "  type nat hook prerouting priority dstnat; policy accept;\n")
 	if len(r.Targets) == 0 {
 		// All targets down: no NAT statement — new connections are
@@ -105,7 +105,7 @@ func renderForwardChain(proto string, r forwardRender) string {
 	// to write anything but a parsed IPv4 literal as a DNAT target.
 	safeKept := kept[:0]
 	for _, t := range kept {
-		if !forwardTargetIPValid(t.IP) {
+		if !ForwardTargetIPValid(t.IP) {
 			log.Printf("[nft] forward %s: target %s excluded from the %s rotation: %q is not an IPv4 address", r.ID, t.TunnelID, proto, t.IP)
 			continue
 		}
@@ -187,7 +187,7 @@ func renderForwardChain(proto string, r forwardRender) string {
 // forwardTargetPort resolves a target's effective port: the target's own
 // port ALWAYS wins; the rule's TargetPort is only the fallback when a
 // driver gave none (phase-5 rule).
-func forwardTargetPort(t balTarget, targetPort int) int {
+func forwardTargetPort(t BalTarget, targetPort int) int {
 	if t.Port > 0 {
 		return t.Port
 	}
@@ -201,7 +201,7 @@ func forwardTargetPort(t balTarget, targetPort int) int {
 // matrix-shaped group) keeps ALL its targets: it renders the
 // address-only map, which is correct for it. The balancer applies the
 // same split before reporting, so the diag ranges match the rendered map.
-func forwardUsableTargets(r forwardRender) (kept, dropped []balTarget) {
+func forwardUsableTargets(r ForwardRender) (kept, dropped []BalTarget) {
 	anyPort := r.TargetPort > 0
 	for _, t := range r.Targets {
 		if t.Port > 0 {
@@ -210,7 +210,7 @@ func forwardUsableTargets(r forwardRender) (kept, dropped []balTarget) {
 		}
 	}
 	if !anyPort {
-		return append([]balTarget(nil), r.Targets...), nil
+		return append([]BalTarget(nil), r.Targets...), nil
 	}
 	for _, t := range r.Targets {
 		if forwardTargetPort(t, r.TargetPort) > 0 {

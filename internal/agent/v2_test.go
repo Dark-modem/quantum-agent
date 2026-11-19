@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
@@ -179,7 +180,7 @@ func TestHardeningOpRouting(t *testing.T) {
 
 type balHarness struct {
 	fake *engine.FakeEngine
-	bal  *forwardBalancer
+	bal  *balancer.ForwardBalancer
 	mgr  *engine.Manager
 	reg  *engine.Registry
 
@@ -202,10 +203,10 @@ func newBalHarness(t *testing.T) *balHarness {
 	h.mgr = mgr
 	h.now = time.Unix(1796470000, 0)
 	h.healthOK = map[string]bool{"t1": true, "t2": true}
-	h.bal = newForwardBalancer(mgr, h.reg)
-	h.bal.nowFn = func() time.Time { h.mu.Lock(); defer h.mu.Unlock(); return h.now }
-	realApply := nftApplyScript
-	nftApplyScript = func(script string) error {
+	h.bal = New(mgr, h.reg)
+	h.bal.NowFn = func() time.Time { h.mu.Lock(); defer h.mu.Unlock(); return h.now }
+	realApply := balancer.ApplyNFTScript
+	balancer.ApplyNFTScript = func(script string) error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if h.failNft > 0 {
@@ -215,7 +216,11 @@ func newBalHarness(t *testing.T) *balHarness {
 		h.scripts = append(h.scripts, script)
 		return nil
 	}
-	t.Cleanup(func() { nftApplyScript = realApply; h.bal.Stop(); resetV2Runtime() })
+	t.Cleanup(func() {
+		balancer.ApplyNFTScript = realApply
+		h.bal.Stop()
+		// The harness never touches agentV2 — the defensive reset went with it.
+	})
 	return h
 }
 
@@ -282,7 +287,7 @@ func TestBalDebug(t *testing.T) {
 	}
 	h.fake.SetForwardAddress("t1", "10.189.0.2", 8443)
 	h.fake.SetForwardAddress("t2", "10.189.0.3", 8443)
-	rep := h.bal.tick()
+	rep := h.bal.Tick()
 	t.Logf("rep: %+v", rep)
 	t.Logf("lastScript: %q", h.lastScript())
 	t.Logf("running: %d", h.mgr.RunningCount())
@@ -439,8 +444,8 @@ func TestBalancerAllDownAndFlapping(t *testing.T) {
 }
 
 func TestRenderForwardNFTValidationShape(t *testing.T) {
-	script := renderForwardNFT([]forwardRender{
-		{ID: "fw-web", ListenPort: 8443, TargetPort: 8443, Proto: "both", Targets: []balTarget{
+	script := RenderForwardNFT([]ForwardRender{
+		{ID: "fw-web", ListenPort: 8443, TargetPort: 8443, Proto: "both", Targets: []balancer.BalTarget{
 			{TunnelID: "a", IP: "10.189.0.2", Weight: 70},
 			{TunnelID: "b", IP: "10.189.0.3", Weight: 30},
 		}},
@@ -579,10 +584,8 @@ func TestBalancerPortlessTargetMirror(t *testing.T) {
 	// tick() enforces the BALANCER's stored desired state, so seed it
 	// directly (Reconcile would also start the loop goroutine; the direct
 	// tick keeps the assertions synchronous).
-	h.bal.mu.Lock()
-	h.bal.desired = d
-	h.bal.mu.Unlock()
-	rep := h.bal.tick()
+	h.bal.SetDesired(&d)
+	rep := h.bal.Tick()
 	script := h.lastScript()
 	if !strings.Contains(script, "numgen inc mod 30 map { 0-29 : 10.189.0.3 . 5201 }") {
 		t.Fatalf("port-less target must be excluded from the ported map:\n%s", script)

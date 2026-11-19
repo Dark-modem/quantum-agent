@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 	"github.com/Dark-modem/quantum-agent/internal/hardening"
 	protocol "github.com/Dark-modem/quantum-protocol"
@@ -58,7 +59,7 @@ func agentEngineInfos() []protocol.EngineInfo {
 type agentV2Runtime struct {
 	mu       sync.Mutex
 	manager  *engine.Manager
-	balancer *forwardBalancer
+	balancer *balancer.ForwardBalancer
 }
 
 var agentV2 agentV2Runtime
@@ -91,7 +92,7 @@ func agentV2RecordApplied(revision string) {
 }
 
 // agentV2RuntimeRef returns (and lazily builds) the v2 runtime.
-func agentV2RuntimeRef() (*engine.Manager, *forwardBalancer, error) {
+func agentV2RuntimeRef() (*engine.Manager, *balancer.ForwardBalancer, error) {
 	agentV2.mu.Lock()
 	defer agentV2.mu.Unlock()
 	if agentV2.manager == nil {
@@ -100,7 +101,7 @@ func agentV2RuntimeRef() (*engine.Manager, *forwardBalancer, error) {
 			return nil, nil, err
 		}
 		agentV2.manager = engine.NewManager(reg)
-		agentV2.balancer = newForwardBalancer(agentV2.manager, reg)
+		agentV2.balancer = balancer.New(agentV2.manager, reg)
 	}
 	return agentV2.manager, agentV2.balancer, nil
 }

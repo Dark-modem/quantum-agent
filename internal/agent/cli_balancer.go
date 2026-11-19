@@ -12,6 +12,7 @@ import (
 	"os"
 	"text/tabwriter"
 
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
@@ -23,12 +24,12 @@ func cliBalancer(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: quantum-agent balancer status")
 		return 2
 	}
-	b, err := os.ReadFile(balancerStatusPath())
+	b, err := os.ReadFile(balancer.StatusPath())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "no balancer state yet (the balancer writes it on the first pass with forwards):", err)
 		return 1
 	}
-	var rep balTickReport
+	var rep balancer.TickReport
 	if err := json.Unmarshal(b, &rep); err != nil {
 		fmt.Fprintln(os.Stderr, "balancer state unreadable:", err)
 		return 1

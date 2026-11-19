@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
@@ -51,11 +52,11 @@ func TestDiagBundleRedacted(t *testing.T) {
 	// The diag payload with a tunnel/balancer section carrying a token-ish
 	// field name (the redaction is key-based for maps, value-based for the
 	// identity).
-	balancer := []balTargetDiag{{
+	targets := []balancer.TargetDiag{{
 		Forward: "fwd-1", Tunnel: "t-1", Reason: "selected", Health: "up",
 		Weight: 30, Addr: "10.189.0.2:5201", NftRange: "0-29", Total: 60,
 	}}
-	bundle := diagCollect(nil, balancer, false)
+	bundle := diagCollect(nil, targets, false)
 	data, err := json.MarshalIndent(bundle, "", "  ")
 	if err != nil {
 		t.Fatal(err)

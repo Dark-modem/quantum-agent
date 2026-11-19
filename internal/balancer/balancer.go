@@ -1,6 +1,6 @@
-package agent
+package balancer
 
-// forwardBalancer enforces the DesiredV2 service-forward contract on an
+// ForwardBalancer enforces the DesiredV2 service-forward contract on an
 // Iran agent, locally: for every ForwardRule, new connections are
 // distributed across the HEALTHY tunnels of its target group with the
 // configured weights (resolution order tunnel > server pair >
@@ -59,8 +59,8 @@ func applyNFTScript(script string) error {
 
 // Seams (tests swap these; nothing else touches the host or the clock).
 var (
-	// nftApplyScript is the apply seam (tests capture the script).
-	nftApplyScript = applyNFTScript
+	// ApplyNFTScript is the apply seam (tests capture the script).
+	ApplyNFTScript = applyNFTScript
 	// balancerProbeTCP is the tcp health probe.
 	balancerProbeTCP = func(host string, port int, timeout time.Duration) bool {
 		c, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(port)), timeout)
@@ -83,9 +83,9 @@ type balHealthState struct {
 	lastProbe  time.Time
 }
 
-// balTargetDiag is one candidate target's evaluation outcome for one
+// TargetDiag is one candidate target's evaluation outcome for one
 // forward rule (structured diagnostics: the report and the debug log).
-type balTargetDiag struct {
+type TargetDiag struct {
 	Forward string `json:"forward"`
 	Tunnel  string `json:"tunnel"`
 	Reason  string `json:"reason"` // selected | unhealthy | weight-0 | no-forward-address
@@ -101,21 +101,21 @@ type balTargetDiag struct {
 	Total int `json:"total,omitempty"`
 }
 
-// balancerStatusPath is where the balancer persists its last pass for
+// StatusPath is where the balancer persists its last pass for
 // `quantum-agent balancer status` (0600; best-effort — never fatal).
-func balancerStatusPath() string {
+func StatusPath() string {
 	return filepath.Join(infra.ConfigDir, "balancer-status.json")
 }
 
-// balTickReport is one health+apply pass, for tests and the report.
-type balTickReport struct {
+// TickReport is one health+apply pass, for tests and the report.
+type TickReport struct {
 	Evaluated    int
 	Healthy      int
 	Changed      bool
 	DetectedDown []string
 	DetectedUp   []string
 	Errors       []string
-	Targets      []balTargetDiag
+	Targets      []TargetDiag
 	Tunnels      []map[string]any
 	// RouteLocalnet mirrors the balancer-owned dynamic knob (RUNBOOK
 	// ITEM 35): true while the enforced ruleset DNATs to loopback and
@@ -123,7 +123,7 @@ type balTickReport struct {
 	RouteLocalnet bool `json:"route_localnet,omitempty"`
 }
 
-type forwardBalancer struct {
+type ForwardBalancer struct {
 	mgr *engine.Manager
 	reg *engine.Registry
 
@@ -135,7 +135,7 @@ type forwardBalancer struct {
 	lastForwards []protocol.ForwardRuntime
 	stop         chan struct{}
 	running      bool
-	nowFn        func() time.Time
+	NowFn        func() time.Time
 	// Balancer-owned route_localnet state (RUNBOOK ITEM 35, see
 	// routelocalnet.go): rlActive while the enforced ruleset DNATs to
 	// loopback; rlSaved is the CAPTURED previous value (never a guess)
@@ -146,17 +146,17 @@ type forwardBalancer struct {
 	rlSavedIface string
 }
 
-func newForwardBalancer(mgr *engine.Manager, reg *engine.Registry) *forwardBalancer {
-	return &forwardBalancer{
+func New(mgr *engine.Manager, reg *engine.Registry) *ForwardBalancer {
+	return &ForwardBalancer{
 		mgr: mgr, reg: reg,
 		health: map[string]*balHealthState{},
-		nowFn:  balancerNow,
+		NowFn:  balancerNow,
 	}
 }
 
 // Reconcile adopts a v2 desired state's forwarding section. It (re)starts
 // the health loop only when at least one forward rule exists.
-func (b *forwardBalancer) Reconcile(d *protocol.DesiredV2) {
+func (b *ForwardBalancer) Reconcile(d *protocol.DesiredV2) {
 	b.mu.Lock()
 	b.desired = *d
 	start := len(d.Forwards) > 0 && !b.running
@@ -170,11 +170,19 @@ func (b *forwardBalancer) Reconcile(d *protocol.DesiredV2) {
 		go b.loop(stop)
 	}
 	// Immediate pass so a new desired state takes effect at once.
-	b.tick()
+	b.Tick()
+}
+
+// SetDesired sets the desired state without triggering a reconcile pass or
+// starting the loop goroutine — for callers that drive Tick() manually.
+func (b *ForwardBalancer) SetDesired(d *protocol.DesiredV2) {
+	b.mu.Lock()
+	b.desired = *d
+	b.mu.Unlock()
 }
 
 // Stop halts the loop and removes the applied ruleset.
-func (b *forwardBalancer) Stop() {
+func (b *ForwardBalancer) Stop() {
 	b.mu.Lock()
 	if !b.running {
 		b.mu.Unlock()
@@ -185,14 +193,14 @@ func (b *forwardBalancer) Stop() {
 	// Ruleset cleanup under the same lock that guards the route_localnet
 	// state: with no forward rules left, a captured knob value is no
 	// longer ours to hold (applyScriptRL restores it).
-	err := b.applyScriptRL(renderForwardNFT(nil))
+	err := b.applyScriptRL(RenderForwardNFT(nil))
 	b.mu.Unlock()
 	if err != nil {
 		log.Printf("[balancer] ruleset cleanup failed: %v", err)
 	}
 }
 
-func (b *forwardBalancer) loop(stop chan struct{}) {
+func (b *ForwardBalancer) loop(stop chan struct{}) {
 	for {
 		b.mu.Lock()
 		interval := 1
@@ -207,18 +215,18 @@ func (b *forwardBalancer) loop(stop chan struct{}) {
 		case <-stop:
 			return
 		case <-time.After(time.Duration(interval) * time.Second):
-			b.tick()
+			b.Tick()
 		}
 	}
 }
 
 // tick runs one health pass and applies the ruleset if it changed.
-func (b *forwardBalancer) tick() balTickReport {
+func (b *ForwardBalancer) Tick() TickReport {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	rep := balTickReport{}
+	rep := TickReport{}
 	d := b.desired
-	now := b.nowFn()
+	now := b.NowFn()
 	hc := protocol.HealthCheckParams{IntervalS: 1, TimeoutMS: 1000, Probe: "engine", ConsecutiveDown: 1, ConsecutiveUp: 1}
 	if d.Balancing != nil {
 		hc = d.Balancing.HealthCheck
@@ -238,7 +246,7 @@ func (b *forwardBalancer) tick() balTickReport {
 	// diag records one candidate's evaluation for the structured report
 	// (and the change-keyed debug log at the end of the pass).
 	diag := func(forward, tid, reason string, h *balHealthState, fa *forwardAddr, weight int) {
-		entry := balTargetDiag{Forward: forward, Tunnel: tid, Reason: reason, Weight: weight}
+		entry := TargetDiag{Forward: forward, Tunnel: tid, Reason: reason, Weight: weight}
 		if h != nil {
 			if h.healthy {
 				entry.Health = "up"
@@ -286,7 +294,7 @@ func (b *forwardBalancer) tick() balTickReport {
 			// TCP probe hits the forward target through the tunnel
 			// endpoint; the endpoint host doubles as the probe target.
 			if fa, hasAddr := forwardAddressOf(b.mgr, b.reg, st); hasAddr {
-				ok = balancerProbeTCP(fa.host, orDefault(fa.port, 22), time.Duration(hc.TimeoutMS)*time.Millisecond)
+				ok = balancerProbeTCP(fa.host, OrDefault(fa.port, 22), time.Duration(hc.TimeoutMS)*time.Millisecond)
 			}
 		default: // "engine" | "icmp": the driver's own health view
 			ok = st.Health.OK
@@ -322,7 +330,7 @@ func (b *forwardBalancer) tick() balTickReport {
 	}
 
 	// Render + apply when something changed.
-	rules := make([]forwardRender, 0, len(d.Forwards))
+	rules := make([]ForwardRender, 0, len(d.Forwards))
 	forwards := make([]protocol.ForwardRuntime, 0, len(d.Forwards))
 	for _, fr := range d.Forwards {
 		if !fr.IsEnabled() {
@@ -335,12 +343,12 @@ func (b *forwardBalancer) tick() balTickReport {
 			// Static per-server rule (panel ForwardSpec form, no
 			// balancing group): rendered unconditionally — availability
 			// is the panel's responsibility here.
-			host, port, perr := splitForwardTarget(fr.Target, fr.TargetPort)
+			host, port, perr := SplitForwardTarget(fr.Target, fr.TargetPort)
 			if perr != nil {
 				rep.Errors = append(rep.Errors, fmt.Sprintf("forward %s: %v", fr.ID, perr))
 				continue
 			}
-			if !forwardTargetIPValid(host) {
+			if !ForwardTargetIPValid(host) {
 				// Hostile/typo target: the nft transaction is applied as
 				// root and must never carry a string the panel controls
 				// (a crafted non-IP value could close the map braces and
@@ -348,8 +356,8 @@ func (b *forwardBalancer) tick() balTickReport {
 				rep.Errors = append(rep.Errors, fmt.Sprintf("forward %s: target %q is not an IPv4 address; refusing", fr.ID, fr.Target))
 				continue
 			}
-			rules = append(rules, forwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto,
-				Targets: []balTarget{{TunnelID: "static:" + fr.ID, IP: host, Port: port, Weight: 1}}})
+			rules = append(rules, ForwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto,
+				Targets: []BalTarget{{TunnelID: "static:" + fr.ID, IP: host, Port: port, Weight: 1}}})
 			runtime.Targets = append(runtime.Targets, "static:"+fr.ID)
 			runtime.Weights = append(runtime.Weights, 1)
 			forwards = append(forwards, runtime)
@@ -360,7 +368,7 @@ func (b *forwardBalancer) tick() balTickReport {
 			rep.Errors = append(rep.Errors, fmt.Sprintf("forward %s: unknown target group %q", fr.ID, fr.TargetGroup))
 			continue
 		}
-		targets := []balTarget{}
+		targets := []BalTarget{}
 		for _, tid := range ids {
 			st := byID[tid]
 			if st.TopologyID != g.TopologyID {
@@ -374,7 +382,7 @@ func (b *forwardBalancer) tick() balTickReport {
 				diag(fr.ID, tid, "unhealthy", b.health[tid], nil, 0)
 				continue
 			}
-			w, okW := resolveWeight(d.Balancing.Weights, st.TopologyID, st.LocalServer, st.RemoteServer, tid)
+			w, okW := ResolveWeight(d.Balancing.Weights, st.TopologyID, st.LocalServer, st.RemoteServer, tid)
 			if !okW || w <= 0 {
 				diag(fr.ID, tid, "weight-0", h, nil, w)
 				continue // weight 0 = excluded from balancing
@@ -384,7 +392,7 @@ func (b *forwardBalancer) tick() balTickReport {
 				diag(fr.ID, tid, "no-forward-address", h, nil, w)
 				continue
 			}
-			if !forwardTargetIPValid(fa.host) {
+			if !ForwardTargetIPValid(fa.host) {
 				// The driver's forward address comes from engine_params
 				// (panel-delivered). Only an IPv4 literal may reach the nft
 				// renderer (table ip DNAT target); anything else is skipped
@@ -393,7 +401,7 @@ func (b *forwardBalancer) tick() balTickReport {
 				continue
 			}
 			diag(fr.ID, tid, "selected", h, &fa, w)
-			targets = append(targets, balTarget{TunnelID: tid, IP: fa.host, Port: fa.port, Weight: w})
+			targets = append(targets, BalTarget{TunnelID: tid, IP: fa.host, Port: fa.port, Weight: w})
 		}
 		// RUNBOOK ITEM 36 mirror: the nft renderer drops port-less targets
 		// that cannot join a per-target-port map (`addr . 0` — the kernel
@@ -401,7 +409,7 @@ func (b *forwardBalancer) tick() balTickReport {
 		// must describe the rotation AS RENDERED, so the same split
 		// applies before reporting; a dropped target's "selected" diag
 		// entry becomes "portless-target".
-		keptTargets, portless := forwardUsableTargets(forwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto, Targets: targets})
+		keptTargets, portless := forwardUsableTargets(ForwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto, Targets: targets})
 		for _, t := range portless {
 			for i := range rep.Targets {
 				if rep.Targets[i].Forward == fr.ID && rep.Targets[i].Tunnel == t.TunnelID && rep.Targets[i].Reason == "selected" {
@@ -414,11 +422,11 @@ func (b *forwardBalancer) tick() balTickReport {
 			runtime.Targets = append(runtime.Targets, t.TunnelID)
 			runtime.Weights = append(runtime.Weights, t.Weight)
 		}
-		rules = append(rules, forwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto, Targets: targets})
+		rules = append(rules, ForwardRender{ID: fr.ID, ListenPort: fr.ListenPort, TargetPort: fr.TargetPort, Proto: fr.Proto, Targets: targets})
 		// Per-target nft range (phase-9 diagnostic): the same deterministic
 		// order + range math the nft renderer uses, surfaced so the
 		// operator sees "tunnel X got 0-29 of mod 60" without parsing nft.
-		sorted := append([]balTarget(nil), targets...)
+		sorted := append([]BalTarget(nil), targets...)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].TunnelID < sorted[j].TunnelID })
 		total := 0
 		for _, t := range sorted {
@@ -445,7 +453,7 @@ func (b *forwardBalancer) tick() balTickReport {
 		forwards = append(forwards, runtime)
 	}
 
-	script := renderForwardNFT(rules)
+	script := RenderForwardNFT(rules)
 	if script != b.lastRule {
 		listenPorts := make([]int, 0, len(rules))
 		for _, r := range rules {
@@ -476,14 +484,14 @@ func (b *forwardBalancer) tick() balTickReport {
 	// Persist the last pass for `quantum-agent balancer status` (0600,
 	// best-effort — the diag must never break balancing).
 	if out, err := json.MarshalIndent(rep, "", "  "); err == nil {
-		_ = os.WriteFile(balancerStatusPath(), out, 0o600)
+		_ = os.WriteFile(StatusPath(), out, 0o600)
 	}
 	return rep
 }
 
 // ForwardRuntimeSnapshot returns the last enforced forwarding state for
 // the v2 heartbeat.
-func (b *forwardBalancer) ForwardRuntimeSnapshot() []protocol.ForwardRuntime {
+func (b *ForwardBalancer) ForwardRuntimeSnapshot() []protocol.ForwardRuntime {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]protocol.ForwardRuntime(nil), b.lastForwards...)
@@ -493,7 +501,7 @@ func (b *forwardBalancer) ForwardRuntimeSnapshot() []protocol.ForwardRuntime {
 // Mirrors the panel store's resolution: tunnel rule > (local, remote)
 // pair rule > topology rule; ties break toward the smaller weight;
 // no rule = 1. Returns ok=false for weight 0 (excluded).
-func resolveWeight(rules []protocol.WeightRule, topologyID, localServer, remoteServer, tunnelID string) (int, bool) {
+func ResolveWeight(rules []protocol.WeightRule, topologyID, localServer, remoteServer, tunnelID string) (int, bool) {
 	found := false
 	bestRank, bestW := 0, 0
 	for _, r := range rules {
@@ -558,9 +566,9 @@ func forwardAddressOf(mgr *engine.Manager, reg *engine.Registry, st engine.Tunne
 	return forwardAddr{host: host, port: port}, true
 }
 
-// splitForwardTarget parses "addr" or "addr:port" (port defaulting to
+// SplitForwardTarget parses "addr" or "addr:port" (port defaulting to
 // the rule's target_port).
-func splitForwardTarget(target string, defaultPort int) (string, int, error) {
+func SplitForwardTarget(target string, defaultPort int) (string, int, error) {
 	host, portStr, err := net.SplitHostPort(strings.TrimSpace(target))
 	if err != nil {
 		if strings.Contains(target, ":") && !strings.HasPrefix(target, "[") {
@@ -575,26 +583,26 @@ func splitForwardTarget(target string, defaultPort int) (string, int, error) {
 	return strings.Trim(host, "[]"), port, nil
 }
 
-func orDefault(v, def int) int {
+func OrDefault(v, def int) int {
 	if v > 0 {
 		return v
 	}
 	return def
 }
 
-// forwardTargetIPValid reports whether host may appear as a DNAT target
+// ForwardTargetIPValid reports whether host may appear as a DNAT target
 // in the nft transaction: the ruleset is `table ip`, so only an IPv4
 // literal is ever valid — and requiring a parsed literal guarantees no
 // panel-controlled string (spaces, semicolons, braces, quotes) can reach
 // the rendered script. Hostnames were never usable as dnat targets in
 // table ip; refusing them is fail-closed, not a behavior change.
-func forwardTargetIPValid(host string) bool {
+func ForwardTargetIPValid(host string) bool {
 	ip := net.ParseIP(strings.TrimSpace(host))
 	return ip != nil && ip.To4() != nil
 }
 
-// writeTempFile is a small helper (0600, agent temp dir).
-func writeTempFile(pattern, content string) (string, error) {
+// WriteTempFile is a small helper (0600, agent temp dir).
+func WriteTempFile(pattern, content string) (string, error) {
 	f, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return "", err

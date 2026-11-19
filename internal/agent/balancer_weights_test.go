@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
@@ -145,8 +146,8 @@ func TestBalancerWeightedDistribution7030(t *testing.T) {
 	}
 
 	// Structured diagnostics must select both targets with their weights.
-	sel := map[string]balTargetDiag{}
-	for _, td := range h.bal.tick().Targets {
+	sel := map[string]balancer.TargetDiag{}
+	for _, td := range h.bal.Tick().Targets {
 		if td.Reason == "selected" {
 			sel[td.Tunnel] = td
 		}
@@ -211,8 +212,8 @@ func TestBalancerUnhealthyTargetExcludedAndRecovers(t *testing.T) {
 
 	// t1 (hz-fra-1) dies: detection = ConsecutiveDown=2 ticks.
 	h.fake.SetHealth("t1", engine.Health{OK: false})
-	h.bal.tick()
-	rep := h.bal.tick()
+	h.bal.Tick()
+	rep := h.bal.Tick()
 	if len(rep.DetectedDown) != 1 || rep.DetectedDown[0] != "t1" {
 		t.Fatalf("detection: %+v", rep.DetectedDown)
 	}
@@ -224,7 +225,7 @@ func TestBalancerUnhealthyTargetExcludedAndRecovers(t *testing.T) {
 	// Recovery: ConsecutiveUp=1 tick re-admits t1 (failback, sticky-away
 	// is disabled).
 	h.fake.SetHealth("t1", engine.Health{OK: true})
-	rep = h.bal.tick()
+	rep = h.bal.Tick()
 	if len(rep.DetectedUp) != 1 || rep.DetectedUp[0] != "t1" {
 		t.Fatalf("recovery: %+v", rep.DetectedUp)
 	}
@@ -252,8 +253,8 @@ func TestBalancerWholeServerDownAndAllDown(t *testing.T) {
 	// Whole foreign server hz-fra-1 dies: t1 AND t3 down together.
 	h.fake.SetHealth("t1", engine.Health{OK: false})
 	h.fake.SetHealth("t3", engine.Health{OK: false})
-	h.bal.tick()
-	h.bal.tick()
+	h.bal.Tick()
+	h.bal.Tick()
 	dist := numgenDistribution(t, h.lastScript())
 	if len(dist) != 1 || dist["10.189.0.3"] != 10000 {
 		t.Fatalf("whole-server failover: %v", dist)
@@ -261,8 +262,8 @@ func TestBalancerWholeServerDownAndAllDown(t *testing.T) {
 
 	// Every target unavailable: pass-through chain, no dnat statement.
 	h.fake.SetHealth("t2", engine.Health{OK: false})
-	h.bal.tick()
-	h.bal.tick()
+	h.bal.Tick()
+	h.bal.Tick()
 	script := h.lastScript()
 	if !strings.Contains(script, "counter return") || strings.Contains(script, "dnat") {
 		t.Fatalf("all-down must render the fail-fast pass-through chain:\n%s", script)
@@ -281,7 +282,7 @@ func TestBalancerNoNftChurnOnRepeatedReconcile(t *testing.T) {
 	// the ruleset must not be re-applied.
 	for i := 0; i < 5; i++ {
 		h.bal.Reconcile(&d)
-		h.bal.tick()
+		h.bal.Tick()
 	}
 	if got := len(h.scripts); got != 1 {
 		t.Fatalf("no-op reconciles re-applied nft %d times", got)
@@ -428,8 +429,8 @@ func TestRenderForwardUDPNftCheck(t *testing.T) {
 	if _, err := exec.LookPath("nft"); err != nil {
 		t.Skip("nft not installed")
 	}
-	script := renderForwardNFT([]forwardRender{{ID: "fw-udp-check", ListenPort: 8443, Proto: "both", TargetPort: 8443,
-		Targets: []balTarget{
+	script := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fw-udp-check", ListenPort: 8443, Proto: "both", TargetPort: 8443,
+		Targets: []balancer.BalTarget{
 			{TunnelID: "t1", IP: "10.200.0.21", Port: 8443, Weight: 70},
 			{TunnelID: "t2", IP: "10.200.0.22", Port: 8444, Weight: 30},
 		}}})
@@ -438,7 +439,7 @@ func TestRenderForwardUDPNftCheck(t *testing.T) {
 			t.Fatalf("render missing the %s chain:\n%s", chain, script)
 		}
 	}
-	name, err := writeTempFile("quantum-nftcheck-*.nft", script)
+	name, err := balancer.WriteTempFile("quantum-nftcheck-*.nft", script)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,8 +463,8 @@ func TestBalancerSwitchBackStickyAway(t *testing.T) {
 
 	// t1 dies and is excluded.
 	h.fake.SetHealth("t1", engine.Health{OK: false})
-	h.bal.tick()
-	h.bal.tick()
+	h.bal.Tick()
+	h.bal.Tick()
 	if dist := numgenDistribution(t, h.lastScript()); len(dist) != 1 || dist["10.189.0.3"] != 10000 {
 		t.Fatalf("exclusion: %v", dist)
 	}
@@ -474,7 +475,7 @@ func TestBalancerSwitchBackStickyAway(t *testing.T) {
 		h.mu.Lock()
 		h.now = h.now.Add(60 * time.Second) // 3 minutes: still inside the 300s window
 		h.mu.Unlock()
-		h.bal.tick()
+		h.bal.Tick()
 	}
 	if dist := numgenDistribution(t, h.lastScript()); len(dist) != 1 || dist["10.189.0.3"] != 10000 {
 		t.Fatalf("sticky-away must keep the target out for 300s: %v", dist)
@@ -484,7 +485,7 @@ func TestBalancerSwitchBackStickyAway(t *testing.T) {
 	h.mu.Lock()
 	h.now = h.now.Add(200 * time.Second)
 	h.mu.Unlock()
-	rep := h.bal.tick()
+	rep := h.bal.Tick()
 	if len(rep.DetectedUp) != 1 || rep.DetectedUp[0] != "t1" {
 		t.Fatalf("post-window re-admission: %+v", rep.DetectedUp)
 	}

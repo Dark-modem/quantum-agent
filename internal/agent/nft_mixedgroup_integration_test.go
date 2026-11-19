@@ -42,15 +42,15 @@ func TestNFTMixedGroupRender(t *testing.T) {
 	//    the rule's target_port) + a ported target with its own port.
 	// 2. The pure port-less group: address-only map.
 	// 3. A loopback DNAT (route_localnet shape).
-	script := renderForwardNFT([]forwardRender{
-		{ID: "fw-mixed", ListenPort: 8443, Proto: "both", TargetPort: 443, Targets: []balTarget{
+	script := RenderForwardNFT([]ForwardRender{
+		{ID: "fw-mixed", ListenPort: 8443, Proto: "both", TargetPort: 443, Targets: []BalTarget{
 			{TunnelID: "frp-1", IP: "10.189.0.3", Port: 5201, Weight: 7},
 			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 3},
 		}},
-		{ID: "fw-matrix", ListenPort: 8444, Proto: "tcp", Targets: []balTarget{
+		{ID: "fw-matrix", ListenPort: 8444, Proto: "tcp", Targets: []BalTarget{
 			{TunnelID: "mx-2", IP: "10.189.0.4", Port: 0, Weight: 1},
 		}},
-		{ID: "fw-loopback", ListenPort: 18443, Proto: "tcp", TargetPort: 18080, Targets: []balTarget{
+		{ID: "fw-loopback", ListenPort: 18443, Proto: "tcp", TargetPort: 18080, Targets: []BalTarget{
 			{TunnelID: "static:fw-loopback", IP: "127.0.0.1", Port: 18080, Weight: 1},
 		}},
 	})

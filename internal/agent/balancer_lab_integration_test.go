@@ -20,7 +20,7 @@
 //	qdev19-a     10.208.0.2/30  (sink A, UDP :15901)
 //	qdev19-b     10.208.0.6/30  (sink B, UDP :15902)
 //
-// The REAL forwardBalancer (fake engine for tunnel status, REAL nft apply —
+// The REAL ForwardBalancer (fake engine for tunnel status, REAL nft apply —
 // the seam is wrapped pass-through, never stubbed) renders the UDP forward:
 //
 //	udp dport 15900 dnat to jhash ip saddr mod 3 map { 0-1 : <A> . 15901, 2 : <B> . 15902 }
@@ -287,11 +287,11 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 		t.Fatal(err)
 	}
 	mgr := engine.NewManager(reg)
-	bal := newForwardBalancer(mgr, reg)
+	bal := New(mgr, reg)
 	var scriptMu sync.Mutex
 	var scripts []string
-	realApply := nftApplyScript
-	nftApplyScript = func(s string) error {
+	realApply := ApplyNFTScript
+	ApplyNFTScript = func(s string) error {
 		scriptMu.Lock()
 		scripts = append(scripts, s)
 		scriptMu.Unlock()
@@ -303,7 +303,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	// the host is still untouched.
 	realRunner := infra.Runner
 	infra.Runner = infra.ExecRunner
-	t.Cleanup(func() { bal.Stop(); nftApplyScript = realApply; infra.Runner = realRunner })
+	t.Cleanup(func() { bal.Stop(); ApplyNFTScript = realApply; infra.Runner = realRunner })
 	lastScript := func() string {
 		scriptMu.Lock()
 		defer scriptMu.Unlock()
@@ -422,7 +422,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	// and STAYS on B (no flapping across two volleys).
 	sinkA.Process.Kill()
 	fake.SetHealth("t1", engine.Health{OK: false})
-	var downRep balTickReport
+	var downRep TickReport
 	for i := 0; i < 5; i++ {
 		time.Sleep(time.Second)
 		downRep = bal.tick()
@@ -493,7 +493,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	// one-shot DetectedUp is consumed there — the OBSERVABLE evidence is
 	// the restored weighted map in the kernel-applied script plus real
 	// packets reaching A again.
-	var upRep balTickReport
+	var upRep TickReport
 	for i := 0; i < 10; i++ {
 		upRep = bal.tick()
 		if strings.Contains(strings.TrimSpace(lastScript()), wantMap) {
@@ -557,7 +557,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 		scriptMu.Unlock()
 		for _, s := range applied {
 			// Injection payloads must never appear. ("evil" DOES appear —
-			// inside the chain name derived from the rule ID by chainID's
+			// inside the chain name derived from the rule ID by ChainID's
 			// sanitizing map; an ID is never a DNAT target.)
 			for _, bad := range []string{"flush", "touch", "db8"} {
 				if strings.Contains(s, bad) {
