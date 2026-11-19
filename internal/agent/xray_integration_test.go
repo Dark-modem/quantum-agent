@@ -28,6 +28,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -397,6 +398,47 @@ while True:
 		return fmt.Errorf("probe: %q %v", out, err)
 	}
 	t.Cleanup(func() { xrayProbeFn = origProbeFn })
+	// The driver's stats gate and Counters run `xray api statsquery`
+	// against the api-in listener — which lives INSIDE xrNSA (the server
+	// end's netns). From the test process (host netns) that loopback dial
+	// can never answer, so route the SAME production query through the
+	// server netns, exactly the way xrayProbeFn routes the warmup probe
+	// (both exercise the real listener; in production the agent and its
+	// drivers share one netns, so the un-routed dial is correct there).
+	// Discovered 2026-11-19: this leg failed identically at the A1 tip
+	// (4452c88) and the pre-A1 base (f78d2e3) — a test-harness topology
+	// gap, not a driver regression.
+	origStats := execCommandJSON
+	execCommandJSON = func(apiPort int, prefix string) (uint64, uint64, bool) {
+		out, err := runNS(xrNSA, realBin, "api", "statsquery",
+			fmt.Sprintf("--server=127.0.0.1:%d", apiPort))
+		if err != nil {
+			return 0, 0, false
+		}
+		var parsed struct {
+			Stats []struct {
+				Name  string `json:"name"`
+				Value int64  `json:"value"`
+			} `json:"stats"`
+		}
+		if json.Unmarshal([]byte(out), &parsed) != nil {
+			return 0, 0, false
+		}
+		var up, down uint64
+		for _, s := range parsed.Stats {
+			if !strings.HasPrefix(s.Name, prefix) {
+				continue
+			}
+			switch {
+			case strings.HasSuffix(s.Name, ">>>uplink"):
+				up = uint64(s.Value)
+			case strings.HasSuffix(s.Name, ">>>downlink"):
+				down = uint64(s.Value)
+			}
+		}
+		return up, down, true
+	}
+	t.Cleanup(func() { execCommandJSON = origStats })
 	// EARLY in the warmup the tunnel must NOT be reported healthy: the
 	// balancer must not route to a tunnel whose channel pool is not up.
 	if h := dServer.Health(serverInst); h.OK {
