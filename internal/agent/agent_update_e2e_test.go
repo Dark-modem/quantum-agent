@@ -44,7 +44,7 @@ import (
 
 	"github.com/Dark-modem/quantum-agent/internal/infra"
 
-	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 )
 
 const updateE2EOld = "v10.0.0"
@@ -134,7 +134,7 @@ func TestAgentUpdateE2E(t *testing.T) {
 	if err := os.WriteFile(tunnelState, tunnelBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_ = engine.NewFakeEngine("fake") // the engine framework stays registered
+	_ = faketest.NewFakeEngine("fake") // the engine framework stays registered
 
 	// Seams: the "running" binary is the installed copy; the restart op is
 	// RECORDED (no systemd in the lab — the boot-rollback is driven by

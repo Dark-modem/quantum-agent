@@ -1,11 +1,12 @@
 package agent
 
-// lab_engine.go — the lab FakeEngine registration (QUANTUM_ENGINES_LAB).
+// lab_engine.go — the lab fake-driver registration (QUANTUM_ENGINES_LAB).
 //
 // Integration/e2e runs need the REAL agent binary to drive more than the
 // matrix engine without host-coupled daemons: setting
-// QUANTUM_ENGINES_LAB=fake registers a scripted FakeEngine driver under
-// the id "fake". It is env-gated so production agents never carry it.
+// QUANTUM_ENGINES_LAB=fake registers this file's own labFakeDriver under
+// the id "fake" — not internal/engine/faketest.FakeEngine, which is
+// test-only. It is env-gated so production agents never carry it.
 //
 // Behavior (lab contract):
 //   - Start() opens a TCP sink listener on lab_port (from engine_params)

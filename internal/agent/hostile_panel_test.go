@@ -45,6 +45,7 @@ import (
 
 	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 	"github.com/Dark-modem/quantum-agent/internal/hardening"
 	"github.com/Dark-modem/quantum-agent/internal/infra"
 	protocol "github.com/Dark-modem/quantum-protocol"
@@ -407,7 +408,7 @@ func TestValidateRejectsWrongTypedParams(t *testing.T) {
 // tunnel in topology "topo", plus the apply seam recording every script.
 func balHostileFixture(t *testing.T, forwardHost string) (*balancer.ForwardBalancer, *[]string) {
 	t.Helper()
-	fake := engine.NewFakeEngine("fake")
+	fake := faketest.NewFakeEngine("fake")
 	fake.SetForwardAddress("t1", forwardHost, 15901)
 	reg := engine.NewRegistry()
 	if err := reg.Register(fake); err != nil {

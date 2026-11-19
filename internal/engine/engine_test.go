@@ -1,4 +1,4 @@
-package engine
+package engine_test
 
 // Hermetic tests: only the FakeEngine runs here; nothing touches the
 // host, the network or the filesystem.
@@ -16,6 +16,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 )
 
 func mustJSON(t *testing.T, v any) json.RawMessage {
@@ -28,17 +31,17 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 }
 
 func TestRegistryRejectsNilEmptyAndDuplicates(t *testing.T) {
-	reg := NewRegistry()
+	reg := engine.NewRegistry()
 	if err := reg.Register(nil); err == nil {
 		t.Fatal("nil driver accepted")
 	}
-	if err := reg.Register(NewFakeEngine("")); err == nil {
+	if err := reg.Register(faketest.NewFakeEngine("")); err == nil {
 		t.Fatal("empty-ID driver accepted")
 	}
-	if err := reg.Register(NewFakeEngine("fake")); err != nil {
+	if err := reg.Register(faketest.NewFakeEngine("fake")); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
-	if err := reg.Register(NewFakeEngine("fake")); err == nil {
+	if err := reg.Register(faketest.NewFakeEngine("fake")); err == nil {
 		t.Fatal("duplicate ID accepted — injection vector")
 	}
 	if _, ok := reg.Driver("nope"); ok {
@@ -50,17 +53,17 @@ func TestRegistryRejectsNilEmptyAndDuplicates(t *testing.T) {
 }
 
 func TestManagerStartsEnabledAndStopsRemoved(t *testing.T) {
-	reg := NewRegistry()
-	fake := NewFakeEngine("fake")
+	reg := engine.NewRegistry()
+	fake := faketest.NewFakeEngine("fake")
 	if err := reg.Register(fake); err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(reg)
+	m := engine.NewManager(reg)
 	ctx := context.Background()
 
 	res := m.Reconcile(ctx,
-		[]EngineSpec{{ID: "fake", Enabled: true}},
-		[]TunnelSpec{
+		[]engine.EngineSpec{{ID: "fake", Enabled: true}},
+		[]engine.TunnelSpec{
 			{ID: "t1", TopologyID: "topo-drak-hetzner", LocalServer: "ir-drak-1", RemoteServer: "hz-fra-1", Engine: "fake", Params: mustJSON(t, map[string]string{"k": "v"}), Enabled: true},
 			{ID: "t2", Engine: "fake", Enabled: false},
 		})
@@ -75,8 +78,8 @@ func TestManagerStartsEnabledAndStopsRemoved(t *testing.T) {
 	}
 
 	// Idempotent: same desired state again changes nothing.
-	res = m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}},
-		[]TunnelSpec{{ID: "t1", Engine: "fake", Params: mustJSON(t, map[string]string{"k": "v"}), Enabled: true}})
+	res = m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}},
+		[]engine.TunnelSpec{{ID: "t1", Engine: "fake", Params: mustJSON(t, map[string]string{"k": "v"}), Enabled: true}})
 	if len(res.Started)+len(res.Stopped)+len(res.Reloaded)+len(res.Restarted) != 0 {
 		t.Fatalf("second reconcile did work: %+v", res)
 	}
@@ -84,7 +87,7 @@ func TestManagerStartsEnabledAndStopsRemoved(t *testing.T) {
 	// Tunnel removed -> stopped. Phase 11: the engine is still
 	// DESIRED-ENABLED, so it STAYS installed (install on first enable;
 	// the binary is ready for the next tunnel).
-	res = m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, nil)
+	res = m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, nil)
 	if len(res.Stopped) != 1 || res.Stopped[0] != "t1" {
 		t.Fatalf("stopped = %v", res.Stopped)
 	}
@@ -101,7 +104,7 @@ func TestManagerStartsEnabledAndStopsRemoved(t *testing.T) {
 
 	// Disabling the engine (or dropping it from desired) uninstalls the
 	// now-idle engine.
-	res = m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: false}}, nil)
+	res = m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: false}}, nil)
 	if len(res.Uninstalled) != 1 || res.Uninstalled[0] != "fake" {
 		t.Fatalf("uninstalled = %v — a disabled idle engine must uninstall", res.Uninstalled)
 	}
@@ -111,19 +114,19 @@ func TestManagerStartsEnabledAndStopsRemoved(t *testing.T) {
 }
 
 func TestManagerDisableEngineStopsItsTunnels(t *testing.T) {
-	reg := NewRegistry()
-	fake := NewFakeEngine("fake")
+	reg := engine.NewRegistry()
+	fake := faketest.NewFakeEngine("fake")
 	_ = reg.Register(fake)
-	m := NewManager(reg)
+	m := engine.NewManager(reg)
 	ctx := context.Background()
 
-	spec := []TunnelSpec{{ID: "t1", Engine: "fake", Enabled: true}}
-	m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, spec)
+	spec := []engine.TunnelSpec{{ID: "t1", Engine: "fake", Enabled: true}}
+	m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, spec)
 	if m.RunningCount() != 1 {
 		t.Fatal("tunnel not started")
 	}
 	// Engine disabled while the tunnel spec is still enabled: must stop.
-	res := m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: false}}, spec)
+	res := m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: false}}, spec)
 	if len(res.Stopped) != 1 || len(res.Errors) != 0 {
 		t.Fatalf("res = %+v", res)
 	}
@@ -133,11 +136,11 @@ func TestManagerDisableEngineStopsItsTunnels(t *testing.T) {
 }
 
 func TestManagerUnknownEngineSurfacesAsError(t *testing.T) {
-	reg := NewRegistry()
-	m := NewManager(reg)
+	reg := engine.NewRegistry()
+	m := engine.NewManager(reg)
 	res := m.Reconcile(context.Background(),
-		[]EngineSpec{{ID: "ghost", Enabled: true}},
-		[]TunnelSpec{{ID: "t1", Engine: "ghost", Enabled: true}})
+		[]engine.EngineSpec{{ID: "ghost", Enabled: true}},
+		[]engine.TunnelSpec{{ID: "t1", Engine: "ghost", Enabled: true}})
 	if len(res.Started) != 0 || m.RunningCount() != 0 {
 		t.Fatal("unknown engine must not start anything")
 	}
@@ -148,29 +151,29 @@ func TestManagerUnknownEngineSurfacesAsError(t *testing.T) {
 }
 
 func TestManagerReloadAndRestartOnParamChange(t *testing.T) {
-	reg := NewRegistry()
-	fake := NewFakeEngine("fake")
+	reg := engine.NewRegistry()
+	fake := faketest.NewFakeEngine("fake")
 	_ = reg.Register(fake)
-	m := NewManager(reg)
+	m := engine.NewManager(reg)
 	ctx := context.Background()
 
 	p1 := mustJSON(t, map[string]string{"port": "1"})
 	p2 := mustJSON(t, map[string]string{"port": "2"})
-	spec := func(p json.RawMessage) []TunnelSpec {
-		return []TunnelSpec{{ID: "t1", Engine: "fake", Params: p, Enabled: true}}
+	spec := func(p json.RawMessage) []engine.TunnelSpec {
+		return []engine.TunnelSpec{{ID: "t1", Engine: "fake", Params: p, Enabled: true}}
 	}
-	m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, spec(p1))
+	m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, spec(p1))
 
 	// Live reload when the driver can apply it.
-	res := m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, spec(p2))
+	res := m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, spec(p2))
 	if len(res.Reloaded) != 1 || len(res.Restarted) != 0 {
 		t.Fatalf("reload res = %+v", res)
 	}
 
 	// Driver refuses live reload -> manager restarts (stop+start).
-	fake.FailReload("t1", ErrRestartRequired)
+	fake.FailReload("t1", engine.ErrRestartRequired)
 	p3 := mustJSON(t, map[string]string{"port": "3"})
-	res = m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, spec(p3))
+	res = m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, spec(p3))
 	if len(res.Restarted) != 1 || res.Restarted[0] != "t1" {
 		t.Fatalf("restart res = %+v", res)
 	}
@@ -179,11 +182,11 @@ func TestManagerReloadAndRestartOnParamChange(t *testing.T) {
 		t.Fatalf("calls after restart: started=%v stopped=%v", started, stopped)
 	}
 
-	// Reload failure that is NOT ErrRestartRequired surfaces as an error
+	// Reload failure that is NOT engine.ErrRestartRequired surfaces as an error
 	// and leaves the instance running with the OLD params.
 	fake.FailReload("t1", errors.New("boom"))
 	p4 := mustJSON(t, map[string]string{"port": "4"})
-	res = m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, spec(p4))
+	res = m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, spec(p4))
 	if len(res.Errors) != 1 || m.RunningCount() != 1 {
 		t.Fatalf("res = %+v running=%d", res, m.RunningCount())
 	}
@@ -196,19 +199,19 @@ func TestManagerReloadAndRestartOnParamChange(t *testing.T) {
 }
 
 func TestManagerEngineSwapRestartsOnNewDriver(t *testing.T) {
-	reg := NewRegistry()
-	a := NewFakeEngine("engine-a")
-	b := NewFakeEngine("engine-b")
+	reg := engine.NewRegistry()
+	a := faketest.NewFakeEngine("engine-a")
+	b := faketest.NewFakeEngine("engine-b")
 	_ = reg.Register(a)
 	_ = reg.Register(b)
-	m := NewManager(reg)
+	m := engine.NewManager(reg)
 	ctx := context.Background()
 
-	m.Reconcile(ctx, []EngineSpec{{ID: "engine-a", Enabled: true}},
-		[]TunnelSpec{{ID: "t1", Engine: "engine-a", Enabled: true}})
+	m.Reconcile(ctx, []engine.EngineSpec{{ID: "engine-a", Enabled: true}},
+		[]engine.TunnelSpec{{ID: "t1", Engine: "engine-a", Enabled: true}})
 	res := m.Reconcile(ctx,
-		[]EngineSpec{{ID: "engine-a", Enabled: false}, {ID: "engine-b", Enabled: true}},
-		[]TunnelSpec{{ID: "t1", Engine: "engine-b", Enabled: true}})
+		[]engine.EngineSpec{{ID: "engine-a", Enabled: false}, {ID: "engine-b", Enabled: true}},
+		[]engine.TunnelSpec{{ID: "t1", Engine: "engine-b", Enabled: true}})
 	if len(res.Stopped) != 1 || len(res.Started) != 1 || len(res.Uninstalled) != 1 || res.Uninstalled[0] != "engine-a" {
 		t.Fatalf("swap res = %+v", res)
 	}
@@ -218,15 +221,15 @@ func TestManagerEngineSwapRestartsOnNewDriver(t *testing.T) {
 }
 
 func TestManagerStartFailureKeepsStateClean(t *testing.T) {
-	reg := NewRegistry()
-	fake := NewFakeEngine("fake")
+	reg := engine.NewRegistry()
+	fake := faketest.NewFakeEngine("fake")
 	_ = reg.Register(fake)
 	fake.FailStart("t1", errors.New("port taken"))
-	m := NewManager(reg)
+	m := engine.NewManager(reg)
 
 	res := m.Reconcile(context.Background(),
-		[]EngineSpec{{ID: "fake", Enabled: true}},
-		[]TunnelSpec{{ID: "t1", Engine: "fake", Enabled: true}})
+		[]engine.EngineSpec{{ID: "fake", Enabled: true}},
+		[]engine.TunnelSpec{{ID: "t1", Engine: "fake", Enabled: true}})
 	if len(res.Errors) != 1 || !strings.Contains(res.Errors[0], "port taken") {
 		t.Fatalf("res = %+v", res)
 	}
@@ -236,24 +239,24 @@ func TestManagerStartFailureKeepsStateClean(t *testing.T) {
 	// A later reconcile may retry and succeed.
 	fake.FailStart("t1", nil)
 	res = m.Reconcile(context.Background(),
-		[]EngineSpec{{ID: "fake", Enabled: true}},
-		[]TunnelSpec{{ID: "t1", Engine: "fake", Enabled: true}})
+		[]engine.EngineSpec{{ID: "fake", Enabled: true}},
+		[]engine.TunnelSpec{{ID: "t1", Engine: "fake", Enabled: true}})
 	if len(res.Started) != 1 {
 		t.Fatalf("retry res = %+v", res)
 	}
 }
 
 func TestManagerStopFailureRetriesNextReconcile(t *testing.T) {
-	reg := NewRegistry()
-	fake := NewFakeEngine("fake")
+	reg := engine.NewRegistry()
+	fake := faketest.NewFakeEngine("fake")
 	_ = reg.Register(fake)
-	m := NewManager(reg)
+	m := engine.NewManager(reg)
 	ctx := context.Background()
-	spec := []TunnelSpec{{ID: "t1", Engine: "fake", Enabled: true}}
-	m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, spec)
+	spec := []engine.TunnelSpec{{ID: "t1", Engine: "fake", Enabled: true}}
+	m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, spec)
 
 	fake.FailStop("t1", errors.New("unit stuck"))
-	res := m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, nil)
+	res := m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, nil)
 	if len(res.Errors) != 1 || m.RunningCount() != 1 {
 		t.Fatalf("res = %+v", res)
 	}
@@ -263,23 +266,23 @@ func TestManagerStopFailureRetriesNextReconcile(t *testing.T) {
 		t.Fatal("uninstalled an engine whose stop failed")
 	}
 	fake.FailStop("t1", nil) // the transient stop failure clears
-	res = m.Reconcile(ctx, []EngineSpec{{ID: "fake", Enabled: true}}, nil)
+	res = m.Reconcile(ctx, []engine.EngineSpec{{ID: "fake", Enabled: true}}, nil)
 	if len(res.Stopped) != 1 || len(res.Errors) != 0 {
 		t.Fatalf("retry res = %+v", res)
 	}
 }
 
 func TestManagerStatusCarriesHealthAndCounters(t *testing.T) {
-	reg := NewRegistry()
-	fake := NewFakeEngine("matrix-fake")
+	reg := engine.NewRegistry()
+	fake := faketest.NewFakeEngine("matrix-fake")
 	_ = reg.Register(fake)
-	m := NewManager(reg)
-	fake.SetCounters("t1", Counters{WireRx: 105, WireTx: 21, WireKnown: true, PayloadRx: 100, PayloadTx: 20, PayloadKnown: true})
-	fake.SetHealth("t1", Health{OK: true, LatencyMs: 12.5})
+	m := engine.NewManager(reg)
+	fake.SetCounters("t1", engine.Counters{WireRx: 105, WireTx: 21, WireKnown: true, PayloadRx: 100, PayloadTx: 20, PayloadKnown: true})
+	fake.SetHealth("t1", engine.Health{OK: true, LatencyMs: 12.5})
 
 	m.Reconcile(context.Background(),
-		[]EngineSpec{{ID: "matrix-fake", Enabled: true}},
-		[]TunnelSpec{{ID: "t1", Engine: "matrix-fake", Enabled: true}})
+		[]engine.EngineSpec{{ID: "matrix-fake", Enabled: true}},
+		[]engine.TunnelSpec{{ID: "t1", Engine: "matrix-fake", Enabled: true}})
 	st := m.Status()
 	if len(st) != 1 {
 		t.Fatalf("status = %+v", st)
@@ -304,30 +307,30 @@ func TestVerifyArtifact(t *testing.T) {
 	sumHex := hex.EncodeToString(sum[:])
 	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, artifact))
 
-	if err := VerifyArtifact(artifact, sumHex, sig, pemKey); err != nil {
+	if err := engine.VerifyArtifact(artifact, sumHex, sig, pemKey); err != nil {
 		t.Fatalf("valid artifact rejected: %v", err)
 	}
-	if err := VerifyArtifact([]byte("tampered"), sumHex, sig, pemKey); err == nil ||
+	if err := engine.VerifyArtifact([]byte("tampered"), sumHex, sig, pemKey); err == nil ||
 		!strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("tampered: %v", err)
 	}
-	if err := VerifyArtifact(artifact, sumHex, sig, ""); err == nil ||
+	if err := engine.VerifyArtifact(artifact, sumHex, sig, ""); err == nil ||
 		!strings.Contains(err.Error(), "no engine artifact signing key pinned") {
 		t.Fatalf("no key must fail closed: %v", err)
 	}
 	wrong := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte("other")))
-	if err := VerifyArtifact(artifact, sumHex, wrong, pemKey); err == nil ||
+	if err := engine.VerifyArtifact(artifact, sumHex, wrong, pemKey); err == nil ||
 		!strings.Contains(err.Error(), "FAILED") {
 		t.Fatalf("wrong signature: %v", err)
 	}
 	// Base64-DER key form (ldflags -X cannot carry newlines).
-	if err := VerifyArtifact(artifact, sumHex, sig, base64.StdEncoding.EncodeToString(der)); err != nil {
+	if err := engine.VerifyArtifact(artifact, sumHex, sig, base64.StdEncoding.EncodeToString(der)); err != nil {
 		t.Fatalf("base64-DER key rejected: %v", err)
 	}
 }
 
 func TestFakeEngineValidateScripting(t *testing.T) {
-	f := NewFakeEngine("fake")
+	f := faketest.NewFakeEngine("fake")
 	if err := f.Validate(mustJSON(t, map[string]string{"a": "1"})); err != nil {
 		t.Fatal(err)
 	}
@@ -344,13 +347,13 @@ func TestFakeEngineValidateScripting(t *testing.T) {
 // runs each ENABLED spec's driver Validate, aligned with the spec list;
 // disabled specs and unknown engines are nil (Reconcile owns that error).
 func TestManagerValidateAll(t *testing.T) {
-	reg := NewRegistry()
-	fake := NewFakeEngine("fake")
+	reg := engine.NewRegistry()
+	fake := faketest.NewFakeEngine("fake")
 	if err := reg.Register(fake); err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(reg)
-	specs := []TunnelSpec{
+	m := engine.NewManager(reg)
+	specs := []engine.TunnelSpec{
 		{ID: "t-ok", Engine: "fake", Params: mustJSON(t, map[string]string{"k": "v"}), Enabled: true},
 		{ID: "t-bad", Engine: "fake", Params: mustJSON(t, map[string]string{"x": "BAD-thing"}), Enabled: true},
 		{ID: "t-off", Engine: "fake", Params: mustJSON(t, map[string]string{"x": "BAD-thing"}), Enabled: false},

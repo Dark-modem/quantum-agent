@@ -58,6 +58,7 @@ import (
 	"github.com/Dark-modem/quantum-agent/internal/balancer"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 	"github.com/Dark-modem/quantum-agent/internal/infra"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
@@ -283,13 +284,13 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	// the apply seam is wrapped PASS-THROUGH (record + forward), never
 	// stubbed, so every asserted script was actually applied to the kernel
 	// INSIDE THE ROUTER netns.
-	fake := engine.NewFakeEngine("fake")
+	fake := faketest.NewFakeEngine("fake")
 	reg := engine.NewRegistry()
 	if err := reg.Register(fake); err != nil {
 		t.Fatal(err)
 	}
 	mgr := engine.NewManager(reg)
-	bal := New(mgr, reg)
+	bal := balancer.New(mgr, reg)
 	var scriptMu sync.Mutex
 	var scripts []string
 	realApply := balancer.ApplyNFTScript
@@ -353,7 +354,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	}
 	t.Logf("PASS setup: nft ranges exact (weights 2:1): %s", wantMap)
 
-	rep := bal.tick() // one healthy pass: the diag ranges must agree
+	rep := bal.Tick() // one healthy pass: the diag ranges must agree
 	var gotA, gotB string
 	total := 0
 	for _, td := range rep.Targets {
@@ -424,10 +425,10 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	// and STAYS on B (no flapping across two volleys).
 	sinkA.Process.Kill()
 	fake.SetHealth("t1", engine.Health{OK: false})
-	var downRep TickReport
+	var downRep balancer.TickReport
 	for i := 0; i < 5; i++ {
 		time.Sleep(time.Second)
-		downRep = bal.tick()
+		downRep = bal.Tick()
 		if len(downRep.DetectedDown) == 1 && downRep.DetectedDown[0] == "t1" {
 			break
 		}
@@ -469,7 +470,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	time.Sleep(400 * time.Millisecond)
 	fake.SetHealth("t1", engine.Health{OK: true}) // running again, healthy
 
-	inside := bal.tick() // ConsecutiveUp=1 satisfied → gated by the window only
+	inside := bal.Tick() // ConsecutiveUp=1 satisfied → gated by the window only
 	for _, td := range inside.Targets {
 		if td.Tunnel == "t1" && td.Reason == "selected" {
 			t.Fatalf("A re-admitted %v after failover — switch_back_s=%d not honored (sticky-away broken)",
@@ -495,9 +496,9 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	// one-shot DetectedUp is consumed there — the OBSERVABLE evidence is
 	// the restored weighted map in the kernel-applied script plus real
 	// packets reaching A again.
-	var upRep TickReport
+	var upRep balancer.TickReport
 	for i := 0; i < 10; i++ {
-		upRep = bal.tick()
+		upRep = bal.Tick()
 		if strings.Contains(strings.TrimSpace(lastScript()), wantMap) {
 			break
 		}
@@ -553,7 +554,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 			},
 		}
 		bal.Reconcile(&hostileDoc)
-		rep := bal.tick()
+		rep := bal.Tick()
 		scriptMu.Lock()
 		applied := append([]string(nil), scripts[n0:]...)
 		scriptMu.Unlock()

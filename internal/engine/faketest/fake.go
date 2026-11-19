@@ -1,4 +1,10 @@
-package engine
+// Package faketest holds FakeEngine, the scripted in-memory engine.Driver
+// used ONLY by tests — internal/engine's own suites and internal/agent's.
+// It is a separate package rather than a _test.go file because one
+// package's test files are invisible to another package's tests, and both
+// consumers need it (the httptest pattern). It is never linked into the
+// production binary.
+package faketest
 
 import (
 	"context"
@@ -7,17 +13,19 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
-// FakeEngine is a scripted in-memory Driver for tests and the lab. It
-// records every call, keeps no processes, and lets tests decide
-// validation outcomes, health and counters. It never touches the host.
+// FakeEngine is a scripted in-memory Driver for tests. It records every
+// call, keeps no processes, and lets tests decide validation outcomes,
+// health and counters. It never touches the host.
 type FakeEngine struct {
 	mu           sync.Mutex
 	id           string
 	validateErr  map[string]error // params-key -> error (empty key: default)
 	startErr     map[string]error // tunnel -> error
-	reloadErr    map[string]error // tunnel -> error (ErrRestartRequired triggers manager restart)
+	reloadErr    map[string]error // tunnel -> error (engine.ErrRestartRequired triggers manager restart)
 	stopErr      map[string]error // tunnel -> error
 	uninstallErr error
 	ensureErr    error // EnsureBinary failure (Phase 11 status tests)
@@ -27,11 +35,11 @@ type FakeEngine struct {
 	stopCalls      map[string]int
 	reloadCalls    map[string]int
 	uninstallCalls int
-	running        map[string]Instance
+	running        map[string]engine.Instance
 	binaryPath     string
 
-	health   map[string]Health
-	counters map[string]Counters
+	health   map[string]engine.Health
+	counters map[string]engine.Counters
 
 	forwardAddr map[string]string
 	forwardPort map[string]int
@@ -51,9 +59,9 @@ func NewFakeEngine(id string) *FakeEngine {
 		startCalls:  map[string]int{},
 		stopCalls:   map[string]int{},
 		reloadCalls: map[string]int{},
-		running:     map[string]Instance{},
-		health:      map[string]Health{},
-		counters:    map[string]Counters{},
+		running:     map[string]engine.Instance{},
+		health:      map[string]engine.Health{},
+		counters:    map[string]engine.Counters{},
 		forwardAddr: map[string]string{},
 		forwardPort: map[string]int{},
 		binaryPath:  "/nonexistent/" + id,
@@ -79,7 +87,7 @@ func (f *FakeEngine) FailStart(tunnelID string, err error) {
 }
 
 // FailReload scripts Reload to fail for one tunnel (use
-// ErrRestartRequired to exercise the manager's restart path).
+// engine.ErrRestartRequired to exercise the manager's restart path).
 func (f *FakeEngine) FailReload(tunnelID string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -101,14 +109,14 @@ func (f *FakeEngine) FailUninstall(err error) {
 }
 
 // SetHealth scripts Health for one tunnel.
-func (f *FakeEngine) SetHealth(tunnelID string, h Health) {
+func (f *FakeEngine) SetHealth(tunnelID string, h engine.Health) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.health[tunnelID] = h
 }
 
 // SetCounters scripts Counters for one tunnel.
-func (f *FakeEngine) SetCounters(tunnelID string, c Counters) {
+func (f *FakeEngine) SetCounters(tunnelID string, c engine.Counters) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counters[tunnelID] = c
@@ -195,7 +203,7 @@ func (f *FakeEngine) SetStartError(tunnelID string, err error) {
 }
 
 // Start implements Driver.
-func (f *FakeEngine) Start(ctx context.Context, inst Instance) error {
+func (f *FakeEngine) Start(ctx context.Context, inst engine.Instance) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startCalls[inst.TunnelID]++
@@ -207,7 +215,7 @@ func (f *FakeEngine) Start(ctx context.Context, inst Instance) error {
 }
 
 // Stop implements Driver.
-func (f *FakeEngine) Stop(inst Instance) error {
+func (f *FakeEngine) Stop(inst engine.Instance) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopCalls[inst.TunnelID]++
@@ -219,7 +227,7 @@ func (f *FakeEngine) Stop(inst Instance) error {
 }
 
 // Reload implements Driver: success updates the stored params.
-func (f *FakeEngine) Reload(inst Instance) error {
+func (f *FakeEngine) Reload(inst engine.Instance) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reloadCalls[inst.TunnelID]++
@@ -233,18 +241,18 @@ func (f *FakeEngine) Reload(inst Instance) error {
 }
 
 // Health implements Driver.
-func (f *FakeEngine) Health(inst Instance) Health {
+func (f *FakeEngine) Health(inst engine.Instance) engine.Health {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if h, ok := f.health[inst.TunnelID]; ok {
 		return h
 	}
 	_, running := f.running[inst.TunnelID]
-	return Health{OK: running, Detail: fmt.Sprintf("fake engine %s", f.id), LatencyMs: -1}
+	return engine.Health{OK: running, Detail: fmt.Sprintf("fake engine %s", f.id), LatencyMs: -1}
 }
 
 // Counters implements Driver.
-func (f *FakeEngine) Counters(inst Instance) Counters {
+func (f *FakeEngine) Counters(inst engine.Instance) engine.Counters {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.counters[inst.TunnelID]
@@ -260,12 +268,12 @@ func (f *FakeEngine) Uninstall(ctx context.Context) error {
 		f.uninstallErr = nil // one-shot, so tests do not loop on it
 		return err
 	}
-	f.running = map[string]Instance{}
+	f.running = map[string]engine.Instance{}
 	return nil
 }
 
 // Compile-time check that FakeEngine really is a Driver.
-var _ Driver = (*FakeEngine)(nil)
+var _ engine.Driver = (*FakeEngine)(nil)
 
 // SetForwardAddress scripts the ForwardAddresser capability for one
 // tunnel (empty host removes it).
@@ -282,7 +290,7 @@ func (f *FakeEngine) SetForwardAddress(tunnelID, host string, port int) {
 }
 
 // ForwardAddress implements the optional ForwardAddresser capability.
-func (f *FakeEngine) ForwardAddress(inst Instance) (string, int, bool) {
+func (f *FakeEngine) ForwardAddress(inst engine.Instance) (string, int, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	h, ok := f.forwardAddr[inst.TunnelID]
@@ -301,8 +309,8 @@ func (f *FakeEngine) SetDescribe(version string, schema json.RawMessage) {
 }
 
 // Describe implements the optional Describer capability.
-func (f *FakeEngine) Describe() EngineInfo {
+func (f *FakeEngine) Describe() engine.EngineInfo {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return EngineInfo{ID: f.id, Version: f.describeVersion, ParamsSchema: f.describeSchema}
+	return engine.EngineInfo{ID: f.id, Version: f.describeVersion, ParamsSchema: f.describeSchema}
 }
