@@ -7,8 +7,6 @@ import (
 	"os"
 	"testing"
 	"time"
-
-	"github.com/Dark-modem/quantum-agent/internal/balancer"
 )
 
 func TestBalTickBenchmarkRealNFT(t *testing.T) {
@@ -21,7 +19,9 @@ func TestBalTickBenchmarkRealNFT(t *testing.T) {
 	_ = h.mgr.Reconcile(testCtx(), engs, tuns)
 	h.fake.SetForwardAddress("t1", "10.189.0.2", 8443)
 	h.fake.SetForwardAddress("t2", "10.189.0.3", 8443)
-	balancer.ApplyNFTScript = balancer.ApplyNFTScript // real kernel apply
+	// ApplyNFTScript stays at its real default here: every stub in this
+	// package restores the seam via t.Cleanup, so the bench exercises a
+	// genuine `nft -f` apply.
 	start := time.Now()
 	rep := h.bal.Tick()
 	elapsed := time.Since(start)
