@@ -248,7 +248,7 @@ func wgCompanionStart(st *wgInstState, tunnelID string) error {
 	if st.role == engineSideServer {
 		if port := wgCompanionIptablesRule(c); port > 0 {
 			comment := "quantum-wg-" + tunnelID
-			out, err := frpIptables("-I", "INPUT", "-p", "tcp", "--dport", fmt.Sprint(port),
+			out, err := acctIptables("-I", "INPUT", "-p", "tcp", "--dport", fmt.Sprint(port),
 				"--tcp-flags", "SYN,RST", "SYN", "-j", "DROP", "-m", "comment", "--comment", comment)
 			if err != nil {
 				frpProcStop(proc)
@@ -313,7 +313,7 @@ func wgCompanionStop(st *wgInstState, tunnelID string) {
 	if st.role == engineSideServer {
 		if port := wgCompanionIptablesRule(st.comp); port > 0 {
 			comment := "quantum-wg-" + tunnelID
-			_, _ = frpIptables("-D", "INPUT", "-p", "tcp", "--dport", fmt.Sprint(port),
+			_, _ = acctIptables("-D", "INPUT", "-p", "tcp", "--dport", fmt.Sprint(port),
 				"--tcp-flags", "SYN,RST", "SYN", "-j", "DROP", "-m", "comment", "--comment", comment)
 		}
 	}

@@ -365,8 +365,8 @@ func TestCtunnelIntegration(t *testing.T) {
 	// iptables seam: rule-shape routing — nat/FORWARD/chain accounting
 	// belong to the SERVER namespace; the relay's INPUT accept belongs to
 	// the IRAN (client) namespace.
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) {
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		ns := ctNSA
 		if strings.HasPrefix(joined, "-A INPUT -i ") ||
@@ -378,14 +378,14 @@ func TestCtunnelIntegration(t *testing.T) {
 		full := append([]string{"ip", "netns", "exec", ns, "iptables"}, args...)
 		return exec.Command("sudo", full...).CombinedOutput()
 	}
-	t.Cleanup(func() { frpIptables = origIpt })
-	origSave := frpIptablesSave
-	frpIptablesSave = func() ([]byte, error) {
+	t.Cleanup(func() { acctIptables = origIpt })
+	origSave := acctIptablesSave
+	acctIptablesSave = func() ([]byte, error) {
 		out, err := exec.Command("sudo", "ip", "netns", "exec", ctNSA,
 			"iptables-save", "-c", "-t", "filter").CombinedOutput()
 		return out, err
 	}
-	t.Cleanup(func() { frpIptablesSave = origSave })
+	t.Cleanup(func() { acctIptablesSave = origSave })
 
 	// The through-probe seam: connect INSIDE the server namespace and
 	// require a byte echoed back (bash /dev/tcp against the python echo).

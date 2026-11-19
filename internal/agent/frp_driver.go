@@ -451,7 +451,7 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 	// Wire accounting is installed on the server side only (the client's
 	// control port is shared across instances and cannot be attributed).
 	if role == "server" {
-		if err := frpWireRulesAdd(inst.TunnelID, p.AllowMin, p.AllowMax); err != nil {
+		if err := acctWireRulesAdd(acctChainsDriver, inst.TunnelID, p.AllowMin, p.AllowMax); err != nil {
 			// Data plane still runs; counters become Unknown honestly.
 			fmt.Fprintf(os.Stderr, "frp: wire accounting unavailable: %v\n", err)
 		}
@@ -475,7 +475,7 @@ func (d *FRPDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == "server" {
-			_ = frpWireRulesDel(inst.TunnelID, st.params.AllowMin, st.params.AllowMax)
+			_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, st.params.AllowMin, st.params.AllowMax)
 		}
 	})
 	return nil
@@ -530,7 +530,7 @@ func (d *FRPDriver) Counters(inst engine.Instance) engine.Counters {
 		return engine.Counters{}
 	}
 	out := engine.Counters{}
-	if rx, tx, ok := frpWireBytes(inst.TunnelID, st.params.AllowMin, st.params.AllowMax); ok {
+	if rx, tx, ok := acctWireBytes(inst.TunnelID, st.params.AllowMin, st.params.AllowMax); ok {
 		out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 	}
 	if in, outB, ok := frpPayloadBytes(inst.TunnelID, st.params.DashPort, frpDashSecret(inst.TunnelID, st.params)); ok {

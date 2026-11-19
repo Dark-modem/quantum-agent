@@ -270,19 +270,19 @@ func TestFRPStartStopHealthCounters(t *testing.T) {
 
 	// iptables seams
 	deleted := 0
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) {
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "-D" {
 			deleted++
 		}
 		return nil, nil
 	}
-	origSave := frpIptablesSave
-	frpIptablesSave = func() ([]byte, error) {
+	origSave := acctIptablesSave
+	acctIptablesSave = func() ([]byte, error) {
 		return []byte(fmt.Sprintf(`-A FRPDRV_ACCT_IN -p tcp -m tcp --dport 34000:34010 -m comment --comment frpdrv-t1 [ 11:2222 ]
 -A FRPDRV_ACCT_OUT -p tcp -m tcp --sport 34000:34010 -m comment --comment frpdrv-t1 [ 33:4444 ]`)), nil
 	}
-	t.Cleanup(func() { frpIptables = origIpt; frpIptablesSave = origSave })
+	t.Cleanup(func() { acctIptables = origIpt; acctIptablesSave = origSave })
 
 	// dashboard seam
 	origDash := frpDashHTTP
@@ -373,9 +373,9 @@ func TestFRPUninstallRemovesCache(t *testing.T) {
 		return &fakeFRPProcess{}, nil
 	}
 	t.Cleanup(func() { frpSpawn = origSpawn })
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
-	t.Cleanup(func() { frpIptables = origIpt })
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { acctIptables = origIpt })
 
 	d := NewFRPDriver()
 	inst, _ := frpTestInstances(p)
@@ -407,9 +407,9 @@ func TestFRPManagerReconcile(t *testing.T) {
 		return &fakeFRPProcess{}, nil
 	}
 	t.Cleanup(func() { frpSpawn = origSpawn })
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
-	t.Cleanup(func() { frpIptables = origIpt })
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { acctIptables = origIpt })
 
 	reg := engine.NewRegistry()
 	if err := reg.Register(NewFRPDriver()); err != nil {
@@ -499,9 +499,9 @@ func TestFRPSupervisorRespawns(t *testing.T) {
 		return newDyingFRPProcess(), nil
 	}
 	t.Cleanup(func() { frpSpawn = origSpawn })
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
-	t.Cleanup(func() { frpIptables = origIpt })
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { acctIptables = origIpt })
 
 	d := NewFRPDriver()
 	inst, _ := frpTestInstances(p)
@@ -574,9 +574,9 @@ func TestFRPForwardAddress(t *testing.T) {
 		return &fakeFRPProcess{}, nil
 	}
 	t.Cleanup(func() { frpSpawn = origSpawn })
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
-	t.Cleanup(func() { frpIptables = origIpt })
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { acctIptables = origIpt })
 
 	d := NewFRPDriver()
 	srvInst, _ := frpTestInstances(p)

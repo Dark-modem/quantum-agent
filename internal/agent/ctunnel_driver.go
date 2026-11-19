@@ -36,7 +36,7 @@ package agent
 // Port exposure WITHOUT the upstream kernel script: ctunnel forwards
 // public ports with iptables DNAT+SNAT (scripts/ctunnel-kernel.sh). The
 // driver replicates exactly those rules (arg-list exec through the
-// frpIptables seam, comment-tagged ctdrv-<tunnelid> so Del removes
+// acctIptables seam, comment-tagged ctdrv-<tunnelid> so Del removes
 // exactly what Add created) and adds NOTHING else: DNAT public:<port> →
 // <kharej tunnel IP>:<target port>, SNAT → the iran end's tunnel IP (the
 // SNAT is what routes return packets back through the tunnel).
@@ -463,8 +463,8 @@ func ctForwardRulesAdd(tunnelID, iface, proto string, publicPort, targetPort int
 	}
 	for _, add := range ctForwardRuleArgs(tunnelID, proto, publicPort, targetPort, selfTun, peerTun) {
 		chk := append([]string{"-C"}, add[1:]...)
-		if _, err := frpIptables(chk...); err != nil {
-			if _, err := frpIptables(add...); err != nil {
+		if _, err := acctIptables(chk...); err != nil {
+			if _, err := acctIptables(add...); err != nil {
 				return fmt.Errorf("ctunnel: forward rule (%s %s): %w", add[2], add[3], err)
 			}
 		}
@@ -500,7 +500,7 @@ func ctForwardRuleArgs(tunnelID, proto string, publicPort, targetPort int, selfT
 func ctForwardRulesDel(tunnelID, iface, proto string, publicPort, targetPort int, selfTun, peerTun string) {
 	for _, add := range ctForwardRuleArgs(tunnelID, proto, publicPort, targetPort, selfTun, peerTun) {
 		del := append([]string{"-D"}, add[1:]...)
-		_, _ = frpIptables(del...)
+		_, _ = acctIptables(del...)
 	}
 }
 
@@ -522,8 +522,8 @@ func ctRelayInputRuleArgs(tunnelID, iface, proto string, targetPort int) [][]str
 func ctRelayInputRulesAdd(tunnelID, iface, proto string, targetPort int) error {
 	for _, add := range ctRelayInputRuleArgs(tunnelID, iface, proto, targetPort) {
 		chk := append([]string{"-C"}, add[1:]...)
-		if _, err := frpIptables(chk...); err != nil {
-			if _, err := frpIptables(add...); err != nil {
+		if _, err := acctIptables(chk...); err != nil {
+			if _, err := acctIptables(add...); err != nil {
 				return fmt.Errorf("ctunnel: relay INPUT rule: %w", err)
 			}
 		}
@@ -534,7 +534,7 @@ func ctRelayInputRulesAdd(tunnelID, iface, proto string, targetPort int) error {
 func ctRelayInputRulesDel(tunnelID, iface, proto string, targetPort int) {
 	for _, add := range ctRelayInputRuleArgs(tunnelID, iface, proto, targetPort) {
 		del := append([]string{"-D"}, add[1:]...)
-		_, _ = frpIptables(del...)
+		_, _ = acctIptables(del...)
 	}
 }
 
@@ -547,21 +547,21 @@ const (
 )
 
 func ctWireRulesEnsure() error {
-	if _, err := frpIptables("-N", ctAcctIn); err != nil &&
+	if _, err := acctIptables("-N", ctAcctIn); err != nil &&
 		!strings.Contains(err.Error(), "already exists") {
 		return err
 	}
-	if _, err := frpIptables("-N", ctAcctOut); err != nil &&
+	if _, err := acctIptables("-N", ctAcctOut); err != nil &&
 		!strings.Contains(err.Error(), "already exists") {
 		return err
 	}
-	if _, err := frpIptables("-C", "INPUT", "-j", ctAcctIn); err != nil {
-		if _, err := frpIptables("-A", "INPUT", "-j", ctAcctIn); err != nil {
+	if _, err := acctIptables("-C", "INPUT", "-j", ctAcctIn); err != nil {
+		if _, err := acctIptables("-A", "INPUT", "-j", ctAcctIn); err != nil {
 			return err
 		}
 	}
-	if _, err := frpIptables("-C", "OUTPUT", "-j", ctAcctOut); err != nil {
-		if _, err := frpIptables("-A", "OUTPUT", "-j", ctAcctOut); err != nil {
+	if _, err := acctIptables("-C", "OUTPUT", "-j", ctAcctOut); err != nil {
+		if _, err := acctIptables("-A", "OUTPUT", "-j", ctAcctOut); err != nil {
 			return err
 		}
 	}
@@ -574,11 +574,11 @@ func ctWireRulesAdd(tunnelID string, carrierPort int) error {
 	}
 	cmt := ctComment(tunnelID)
 	port := fmt.Sprint(carrierPort)
-	if _, err := frpIptables("-A", ctAcctIn, "-p", "udp", "--dport", port,
+	if _, err := acctIptables("-A", ctAcctIn, "-p", "udp", "--dport", port,
 		"-m", "comment", "--comment", cmt); err != nil {
 		return err
 	}
-	if _, err := frpIptables("-A", ctAcctOut, "-p", "udp", "--sport", port,
+	if _, err := acctIptables("-A", ctAcctOut, "-p", "udp", "--sport", port,
 		"-m", "comment", "--comment", cmt); err != nil {
 		return err
 	}
@@ -588,14 +588,14 @@ func ctWireRulesAdd(tunnelID string, carrierPort int) error {
 func ctWireRulesDel(tunnelID string, carrierPort int) {
 	cmt := ctComment(tunnelID)
 	port := fmt.Sprint(carrierPort)
-	_, _ = frpIptables("-D", ctAcctIn, "-p", "udp", "--dport", port, "-m", "comment", "--comment", cmt)
-	_, _ = frpIptables("-D", ctAcctOut, "-p", "udp", "--sport", port, "-m", "comment", "--comment", cmt)
+	_, _ = acctIptables("-D", ctAcctIn, "-p", "udp", "--dport", port, "-m", "comment", "--comment", cmt)
+	_, _ = acctIptables("-D", ctAcctOut, "-p", "udp", "--sport", port, "-m", "comment", "--comment", cmt)
 }
 
 // ctWireBytes reads the instance's carrier counters (iptables-save -c,
-// exact bytes; same parse shape as frpWireBytes).
+// exact bytes; same parse shape as acctWireBytes).
 func ctWireBytes(tunnelID string, carrierPort int) (rx, tx uint64, ok bool) {
-	out, err := frpIptablesSave()
+	out, err := acctIptablesSave()
 	if err != nil {
 		return 0, 0, false
 	}

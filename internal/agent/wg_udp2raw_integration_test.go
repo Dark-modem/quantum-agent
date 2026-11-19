@@ -202,13 +202,13 @@ func TestWgUdp2rawIntegration(t *testing.T) {
 		return string(out), err
 	}
 	t.Cleanup(func() { wgToolExec = origTool })
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) {
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
 		full := append([]string{"ip", "netns", "exec", serveNS, "iptables"}, args...)
 		out, err := exec.Command("sudo", full...).CombinedOutput()
 		return out, err
 	}
-	t.Cleanup(func() { frpIptables = origIpt })
+	t.Cleanup(func() { acctIptables = origIpt })
 	origCap := osGeteuid
 	osGeteuid = func() int { return 0 }
 	t.Cleanup(func() { osGeteuid = origCap })

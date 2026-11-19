@@ -291,9 +291,9 @@ func TestBackhaulManagerReconcile(t *testing.T) {
 	}
 	mgr := engine.NewManager(reg)
 	// The wire-accounting seam must not touch real iptables in unit env.
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
-	t.Cleanup(func() { frpIptables = origIpt })
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { acctIptables = origIpt })
 	p := backhaulTestParams()
 	if res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "backhaul", Enabled: true}},

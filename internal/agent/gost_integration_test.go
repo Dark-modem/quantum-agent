@@ -273,13 +273,13 @@ func TestGostIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { gostSpawn = origSpawn })
 	// Wire accounting lands in the SERVER namespace.
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) {
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
 		full := append([]string{"ip", "netns", "exec", gstNSA, "iptables"}, args...)
 		out, err := exec.Command("sudo", full...).CombinedOutput()
 		return out, err
 	}
-	t.Cleanup(func() { frpIptables = origIpt })
+	t.Cleanup(func() { acctIptables = origIpt })
 	// The health gate's public-port dial happens INSIDE the server ns.
 	origDial := gostHealthDial
 	gostHealthDial = func(port int) error {

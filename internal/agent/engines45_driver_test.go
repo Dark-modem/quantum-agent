@@ -166,8 +166,8 @@ func wstTestHarness(t *testing.T, role string) (*WstDriver, *int, *strings.Build
 		leaked.WriteString(strings.Join(args, " ") + "\n")
 		return newFakeExitProcess(), nil
 	}
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
 	origCfg := configDir
 	configDir = t.TempDir()
 	t.Cleanup(func() {
@@ -175,7 +175,7 @@ func wstTestHarness(t *testing.T, role string) (*WstDriver, *int, *strings.Build
 		frpLoadIdentity = origIdent
 		frpFetchArtifact = origFetch
 		wstSpawn = origSpawn
-		frpIptables = origIpt
+		acctIptables = origIpt
 		configDir = origCfg
 	})
 	return NewWstDriver(), &spawned, leaked, p
@@ -219,8 +219,8 @@ func chiselTestHarness(t *testing.T, role string) (*ChiselDriver, *int, *strings
 		leaked.WriteString(strings.Join(args, " ") + "\n")
 		return newFakeExitProcess(), nil
 	}
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
 	origCfg := configDir
 	configDir = t.TempDir()
 	t.Cleanup(func() {
@@ -228,7 +228,7 @@ func chiselTestHarness(t *testing.T, role string) (*ChiselDriver, *int, *strings
 		frpLoadIdentity = origIdent
 		frpFetchArtifact = origFetch
 		chiselSpawn = origSpawn
-		frpIptables = origIpt
+		acctIptables = origIpt
 		configDir = origCfg
 	})
 	return NewChiselDriver(), &spawned, leaked, p

@@ -272,13 +272,13 @@ func TestRatholeIntegration(t *testing.T) {
 	}
 	t.Cleanup(func() { ratholeSpawn = origSpawn })
 	// The wire-accounting seam also lands in the SERVER namespace.
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) {
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
 		full := append([]string{"ip", "netns", "exec", serveNS}, args...)
 		out, err := exec.Command("sudo", full...).CombinedOutput()
 		return out, err
 	}
-	t.Cleanup(func() { frpIptables = origIpt })
+	t.Cleanup(func() { acctIptables = origIpt })
 	// The health gate's service-port dial happens INSIDE the server ns.
 	origDial := ratholeHealthDial
 	ratholeHealthDial = func(port int) error {

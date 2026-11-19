@@ -47,8 +47,8 @@ func ratholeSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Server: "http://panel.test", Name: "germany"}, true
 	}
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) {
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
 		*cmds = append(*cmds, strings.Join(args, " "))
 		return nil, nil
 	}
@@ -67,7 +67,7 @@ func ratholeSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 		wgCmd = origCmd
 		ratholeSpawn = origSpawn
 		frpLoadIdentity = origIdent
-		frpIptables = origIpt
+		acctIptables = origIpt
 		engineArtifactPubKeyB64 = origKey
 		configDir = origCfg
 	})
