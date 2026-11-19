@@ -1,10 +1,12 @@
-// Package infra is the leaf package of shared host utilities that both the
-// agent runtime (internal/agent) and the engine drivers (internal/engines)
-// use: external-command execution, the config directory, IP/host helpers,
-// /proc parsing and the public-IP detection family.
+// Package infra is the leaf package of shared host utilities that the agent
+// runtime (internal/agent), the balancer (internal/balancer) and the engine
+// drivers use: external-command execution, the config directory, IP/host
+// helpers, /proc parsing and the public-IP detection family. The drivers
+// still live in internal/agent — the planned internal/engines split was
+// deferred per the REFACTOR-A4 stop-rule.
 //
-// REFACTOR-PLAN-AGENT §6.A4: this package exists so internal/engines never
-// imports internal/agent — the leaf sits below both.
+// REFACTOR-PLAN-AGENT §6.A4: this leaf exists so internal/balancer (and a
+// future internal/engines package) never imports internal/agent.
 //
 // SWAPPABLE SEAMS: Runner (external commands), CarrierLookup (DNS) and the
 // ConfigDir variable are package-level so tests still point them at temp
