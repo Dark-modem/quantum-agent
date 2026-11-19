@@ -211,3 +211,25 @@ func TestEngineManifestFailClosedWithoutKey(t *testing.T) {
 		t.Fatalf("no-key path fetched %d times (must refuse before any fetch)", *calls)
 	}
 }
+
+// TestEngineManifestResolverTieFirst pins the DELEGATED selection rule
+// (S6/A6, plan D5): version ties resolve to the FIRST qualifying entry
+// in manifest order — the shipped strict-`>` walk behavior — and the
+// comparison stays the plain string compare that rode
+// protocol.PickArtifactVersion ("1.9" > "1.10" lexicographically).
+func TestEngineManifestResolverTieFirst(t *testing.T) {
+	entries := []engineManifestEntry{
+		{Engine: "frp", Version: "0.61.2", Goos: "linux", Goarch: "amd64", Artifact: "a.tar.gz", SHA256: "aa", Signature: "s"},
+		{Engine: "frp", Version: "0.61.2", Goos: "linux", Goarch: "amd64", Artifact: "b.tar.gz", SHA256: "bb", Signature: "s"},
+	}
+	if e, ok := engineResolveArtifact(entries, "frp", "amd64"); !ok || e.Artifact != "a.tar.gz" {
+		t.Fatalf("tie must resolve to the first qualifying entry: got %+v ok=%v", e, ok)
+	}
+	quirk := []engineManifestEntry{
+		{Engine: "frp", Version: "1.10", Goos: "linux", Goarch: "amd64", Artifact: "v110.tar.gz", SHA256: "aa", Signature: "s"},
+		{Engine: "frp", Version: "1.9", Goos: "linux", Goarch: "amd64", Artifact: "v19.tar.gz", SHA256: "bb", Signature: "s"},
+	}
+	if e, ok := engineResolveArtifact(quirk, "frp", "amd64"); !ok || e.Artifact != "v19.tar.gz" {
+		t.Fatalf("lexicographic quirk changed: got %+v ok=%v (want v19.tar.gz — shipped string-compare rule)", e, ok)
+	}
+}

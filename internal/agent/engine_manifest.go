@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // engineManifestEntry mirrors the panel's manifest item
@@ -88,14 +90,21 @@ func engineManifestGet(ctx context.Context, ident agentIdentity, engine, goarch 
 // arch from the manifest and returns the (name, sha256, signature) pin
 // triple. Refuses (ok=false) when the manifest has no entry for the
 // engine+arch — the caller falls back to the pinned engine_params path.
+//
+// Version selection delegates to protocol.PickArtifactVersion (REFACTOR
+// S6/A6, plan D5 — the panel's desired-state stamp used to mirror this
+// rule): the qualifying entries below are offered as rows, and the
+// FIRST qualifying entry carrying the winning version is returned — the
+// original strict-`>` walk kept the first entry on version ties, and
+// PickArtifactVersion's first-row-in-order tie rule matches that.
 func engineResolveArtifact(entries []engineManifestEntry, engine, goarch string) (engineManifestEntry, bool) {
 	arch := strings.TrimSpace(goarch)
 	if arch == "" {
 		arch = runtime.GOARCH
 	}
-	var best engineManifestEntry
-	found := false
-	for _, e := range entries {
+	rows := make([]protocol.ArtifactVersionRow, 0, len(entries))
+	qualifying := make([]int, 0, len(entries))
+	for i, e := range entries {
 		if e.Engine != engine || e.Goarch != arch || strings.TrimSpace(e.Goos) == "" {
 			continue
 		}
@@ -105,11 +114,16 @@ func engineResolveArtifact(entries []engineManifestEntry, engine, goarch string)
 		if !frpArtifactNameOK(e.Artifact) {
 			continue
 		}
-		if !found || e.Version > best.Version { // deterministic: highest version wins
-			best, found = e, true
+		rows = append(rows, protocol.ArtifactVersionRow{Engine: e.Engine, Goarch: e.Goarch, Version: e.Version})
+		qualifying = append(qualifying, i)
+	}
+	version := protocol.PickArtifactVersion(rows, engine, arch)
+	for _, i := range qualifying {
+		if entries[i].Version == version {
+			return entries[i], true
 		}
 	}
-	return best, found
+	return engineManifestEntry{}, false
 }
 
 // engineArtifactPin resolves the artifact pin for one engine: the R5
