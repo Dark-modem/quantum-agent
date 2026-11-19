@@ -1,4 +1,6 @@
 github.com/Dark-modem/quantum-protocol v0.0.0-20261115154811-9b9a27ca7eed h1:Ol+Za33AXcs7Y9gnTV3XhbCUwBch6dircGF25Xf85FI=
 github.com/Dark-modem/quantum-protocol v0.0.0-20261115154811-9b9a27ca7eed/go.mod h1:HQhGZms5tAyPOLVfcnaF4+mJf91sIYePXz4jR2zj3L0=
+github.com/Dark-modem/quantum-protocol v0.0.0-20261119230114-b663ea58ca88 h1:dkRixrt/OroCj9+7SH5vyIM4yGzKRMaVI4BQgOl8Amg=
+github.com/Dark-modem/quantum-protocol v0.0.0-20261119230114-b663ea58ca88/go.mod h1:HQhGZms5tAyPOLVfcnaF4+mJf91sIYePXz4jR2zj3L0=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
