@@ -4,4 +4,7 @@
 *.md text eol=lf
 *.yml text eol=lf
 *.sh text eol=lf
+# legacy/grepanel is an extensionless bash script — *.sh never matches it;
+# pinned explicitly (REFACTOR-PLAN-AGENT §3, the BACKEND-27 CRLF-casualty class)
+legacy/grepanel text eol=lf
 *.b64 -text
