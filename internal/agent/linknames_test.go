@@ -56,24 +56,5 @@ func TestLinkNames(t *testing.T) {
 	}
 }
 
-// A rename of the main tunnel through the edit modal (PATCH id 0) stores the
-// name and leaves the tunnel alone.
-func TestPatchMainRenameOnly(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = old })
-
-	rec := httptest.NewRecorder()
-	handlePeersPatch(rec, httptest.NewRequest("PATCH", "/api/peers", strings.NewReader(`{"id":0,"name":" Frankfurt "}`)))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "renamed") {
-		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
-	}
-	if got := linkLabel("main"); got != "Frankfurt" {
-		t.Fatalf("main = %q", got)
-	}
-	rec = httptest.NewRecorder()
-	handlePeersPatch(rec, httptest.NewRequest("PATCH", "/api/peers", strings.NewReader(`{"id":0,"name":"<x>"}`)))
-	if rec.Code == 200 {
-		t.Fatal("bad name accepted")
-	}
-}
+// TestPatchMainRenameOnly went with peers_edit.go in §6.A3 (its
+// handlePeersPatch entry point is deleted dead code).

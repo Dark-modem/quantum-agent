@@ -1,10 +1,6 @@
 package agent
 
 import (
-	"bytes"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,113 +234,8 @@ func TestBackhaulTomlGenerators(t *testing.T) {
 	}
 }
 
-func TestBackhaulPeersPatchWithRangesAndMappings(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "backhaul-patch-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
-
-	// Seed peers.json with a Backhaul peer
-	mockPeer := peerRecord{
-		ID:        2,
-		Name:      "De-Frankfurt-BH",
-		LocalPub:  "1.2.3.4",
-		RemotePub: "5.6.7.8",
-		FrpPort:   3080,
-		Engine:    "backhaul",
-		Transport: "tcpmux",
-		NoGre:     true,
-		Token:     "bh-token-xyz",
-		Ports:     []int{443},
-		RawPorts:  []string{"443"},
-		FrpsSvc:   "backhaul-server-2",
-	}
-	peersJSON, _ := json.MarshalIndent(map[string]any{"peers": []peerRecord{mockPeer}}, "", "  ")
-	if err := os.WriteFile(peersFile(), peersJSON, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Test PATCH /api/peers with raw_ports range and mapping
-	trueVal := true
-	patchReq := peerPatchRequest{
-		ID:             2,
-		Name:           "De-Frankfurt-Renamed",
-		Transport:      "wssmux",
-		RawPorts:       &[]string{"443", "10000-10050", "2083=8443"},
-		ProxyProtocol:  "v2",
-		FRPTransport:   "quic",
-		UseEncryption:  &trueVal,
-		UseCompression: &trueVal,
-	}
-	bodyBytes, _ := json.Marshal(patchReq)
-	req := httptest.NewRequest("PATCH", "/api/peers", bytes.NewReader(bodyBytes))
-	w := httptest.NewRecorder()
-
-	handlePeersPatch(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
-	}
-	if resp["status"] != "ok" {
-		t.Fatalf("expected status=ok, got %+v", resp)
-	}
-
-	// Verify updated peers.json
-	updatedPeers := loadPeers()
-	if len(updatedPeers) != 1 {
-		t.Fatalf("expected 1 peer, got %d", len(updatedPeers))
-	}
-	p := updatedPeers[0]
-	if p.Name != "De-Frankfurt-Renamed" {
-		t.Errorf("expected updated name, got %s", p.Name)
-	}
-	if p.Transport != "wssmux" {
-		t.Errorf("expected updated transport wssmux, got %s", p.Transport)
-	}
-	if p.ProxyProtocol != "v2" {
-		t.Errorf("expected updated proxy_protocol v2, got %s", p.ProxyProtocol)
-	}
-	if p.FRPTransport != "quic" {
-		t.Errorf("expected updated frp_transport quic, got %s", p.FRPTransport)
-	}
-	if !p.UseEncryption {
-		t.Errorf("expected updated use_encryption true")
-	}
-	if !p.UseCompression {
-		t.Errorf("expected updated use_compression true")
-	}
-	if len(p.RawPorts) != 3 || p.RawPorts[1] != "10000-10050" || p.RawPorts[2] != "2083=8443" {
-		t.Errorf("unexpected raw ports in registry: %+v", p.RawPorts)
-	}
-	if len(p.Ports) != 3 || p.Ports[1] != 10000 || p.Ports[2] != 2083 {
-		t.Errorf("unexpected numeric ports in registry: %+v", p.Ports)
-	}
-
-	// Verify returned bundle is a valid bh1_ bundle with updated transport and ports
-	bundleStr, ok := resp["bundle"].(string)
-	if !ok || !strings.HasPrefix(bundleStr, "bh1_") {
-		t.Fatalf("expected returned bundle to start with bh1_, got %v", resp["bundle"])
-	}
-	parsedBundle, err := ParseBackhaulBundle(bundleStr)
-	if err != nil {
-		t.Fatalf("failed to parse returned bundle: %v", err)
-	}
-	if parsedBundle.Transport != "wssmux" {
-		t.Errorf("expected bundle transport wssmux, got %s", parsedBundle.Transport)
-	}
-	if len(parsedBundle.RawPorts) != 3 {
-		t.Errorf("expected 3 raw ports in bundle, got %d", len(parsedBundle.RawPorts))
-	}
-}
+// TestBackhaulPeersPatchWithRangesAndMappings went with peers_edit.go in
+// §6.A3 (its handlePeersPatch entry point is deleted dead code).
 
 func TestParseRawPortsBackhaulForms(t *testing.T) {
 	got := parseRawPorts("10000-10050:443 127.0.0.2:443=1.1.1.1:5201,8080")

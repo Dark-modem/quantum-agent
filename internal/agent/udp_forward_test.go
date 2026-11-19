@@ -1,8 +1,6 @@
 package agent
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,36 +126,6 @@ func TestBackhaulUDPPort(t *testing.T) {
 	}
 }
 
-// Bagher: UDP adds a udp proxy per port next to the tcp one, and the bundle
-// carries the choice to the foreign side.
-func TestBagherUDP(t *testing.T) {
-	without := buildFRPCConfig(55400, 5, []int{443, 8443}, false)
-	if strings.Contains(without, `type = "udp"`) {
-		t.Fatalf("udp proxy without UDP:\n%s", without)
-	}
-	with := buildFRPCConfig(55400, 5, []int{443, 8443}, true)
-	for _, want := range []string{`name = "p443"`, `name = "u443"`, `name = "u8443"`, `type = "udp"`} {
-		if !strings.Contains(with, want) {
-			t.Fatalf("frpc config lacks %s:\n%s", want, with)
-		}
-	}
-	if n := strings.Count(with, "[[proxies]]"); n != 4 {
-		t.Fatalf("want 4 proxies (2 tcp + 2 udp), got %d", n)
-	}
-
-	raw, _ := json.Marshal(BagherBundle{Version: 1, Role: "foreign", IranPub: "203.0.113.5", FRPPort: 55400,
-		Ports: []int{443}, PoolCount: 5, SSHPublicKey: "ssh-ed25519 AAAA", UDP: true})
-	b, err := ParseBagherBundle("BAGHER:" + base64.StdEncoding.EncodeToString(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !b.UDP {
-		t.Fatal("Bagher bundle lost the UDP choice")
-	}
-	cfg := defaultSSHFwdConfig()
-	cfg.Ports = []int{443}
-	cfg.UDP = true
-	if cmd := buildForeignSetupCommand(cfg); !strings.Contains(cmd, `type = "udp"`) {
-		t.Fatalf("foreign setup command lacks the udp proxy:\n%s", cmd)
-	}
-}
+// TestBagherUDP went with sshfwd.go's apply layer in §6.A3 — its entry
+// points (buildFRPCConfig, ParseBagherBundle, buildForeignSetupCommand) are
+// deleted dead code.

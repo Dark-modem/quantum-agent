@@ -21,39 +21,11 @@ func hasItem(t *testing.T, plan *Plan, kind, idSubstr string) PlanItem {
 	return PlanItem{}
 }
 
-func TestPlanConservativeFreshServer(t *testing.T) {
-	h := newFakeHost(t)
-	_ = h
-	setProcValue(t, "net/ipv4/tcp_syncookies", "1") // already satisfied
-	withKeys(t)                                     // no keys
-
-	p := Conservative(22, []PortRule{{Port: 443, Proto: "tcp", Owner: "service:decoy"}})
-	plan, err := PlanProfile(p, Detect(context.Background()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Risky {
-		t.Fatalf("conservative on a fresh ufw-active server must not be risky (no policy change needed: default is already deny; ssh rule re-added = noop), items: %+v", plan.Items)
-	}
-
-	// 443/tcp allow planned; 22 limit is a no-op (present in fake status).
-	hasItem(t, plan, KindFwRuleAdd, "443/tcp")
-	// All conservative sysctls planned except the satisfied one.
-	sys := 0
-	for _, it := range plan.Items {
-		if it.Kind == KindSysctl {
-			sys++
-			if it.ID == "sysctl:net.ipv4.tcp_syncookies" {
-				t.Fatalf("satisfied sysctl must not be planned")
-			}
-		}
-	}
-	if sys == 0 {
-		t.Fatalf("expected unsatisfied conservative sysctls in the plan")
-	}
-	hasItem(t, plan, KindTimeSync, "timesync")
-	hasItem(t, plan, KindJournald, "journald")
-}
+// TestPlanConservativeFreshServer went with hardening.Conservative itself in
+// §6.A3 (deadcode RTA: unreachable from main — the installers' conservative
+// profile is rendered by quantum.sh and the panel forwards operator hardening
+// JSON opaquely; the panel's netProfileConservative is netopt's separate
+// surface, verified against origin/main).
 
 func TestPlanIncomingPolicyChangeIsRisky(t *testing.T) {
 	h := newFakeHost(t)
@@ -258,10 +230,8 @@ func TestValidateProfile(t *testing.T) {
 			t.Fatalf("profile %d must fail validation: %+v", i, p)
 		}
 	}
-	good := Conservative(22, nil)
-	if err := good.Validate(); err != nil {
-		t.Fatalf("conservative profile must validate: %v", err)
-	}
+	// The Conservative positive-validate case went with Conservative itself
+	// in §6.A3 (deadcode RTA: unreachable from main).
 }
 
 func TestParseOurRule(t *testing.T) {

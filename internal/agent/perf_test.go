@@ -144,22 +144,8 @@ func TestEffectivePoolValues(t *testing.T) {
 	}
 }
 
-func TestRescueTomlUsesEffectivePool(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
-	t.Setenv("QUANTUM_SCRIPT", filepath.Join(tmpDir, "missing.sh"))
-	if err := savePerfConfig(perfConfig{AutoPool: false, FRPPoolCount: 64, FRPMaxPool: 200}); err != nil {
-		t.Fatal(err)
-	}
-	if got := rescueOriginFrpcToml(7000, "tok", "sec", nil); !strings.Contains(got, "transport.poolCount = 64\n") {
-		t.Fatalf("origin frpc ignored effective pool:\n%s", got)
-	}
-	if got := rescueFrpsToml(7000, "tok"); !strings.Contains(got, "transport.maxPoolCount = 200\n") {
-		t.Fatalf("rescue frps ignored effective maxPool:\n%s", got)
-	}
-}
+// TestRescueTomlUsesEffectivePool went with the rescue engine in §6.A3
+// (rescueFrpsToml/rescueOriginFrpcToml are deleted dead code).
 
 func TestPerfEnvOverrides(t *testing.T) {
 	tmpDir := t.TempDir()

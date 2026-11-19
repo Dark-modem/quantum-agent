@@ -2,43 +2,15 @@ package agent
 
 import (
 	"encoding/json"
-	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 )
 
-func TestParseCarrierChoice(t *testing.T) {
-	good := map[string]string{
-		"frp":                 "frp:tcp",
-		"FRP:KCP":             "frp:kcp",
-		"frp:ws":              "frp:websocket",
-		"backhaul":            "backhaul:tcpmux",
-		"backhaul:wssmux":     "backhaul:wssmux",
-		"gre-backhaul:udp":    "gre-backhaul:udp",
-		" gre-backhaul:tcp  ": "gre-backhaul:tcp",
-	}
-	for in, want := range good {
-		c, err := parseCarrierChoice(in)
-		if err != nil || c.ID() != want {
-			t.Errorf("parseCarrierChoice(%q) = %q, %v; want %q", in, c.ID(), err, want)
-		}
-	}
-	for _, in := range []string{"", "frp:wss", "frp:tcpmux", "backhaul:kcp", "bagher", "direct", "wss:8443"} {
-		if _, err := parseCarrierChoice(in); err == nil {
-			t.Errorf("parseCarrierChoice(%q) should fail", in)
-		}
-	}
-	if !(carrierChoice{Engine: "frp"}).needsGRE() || !(carrierChoice{Engine: "gre-backhaul"}).needsGRE() || (carrierChoice{Engine: "backhaul"}).needsGRE() {
-		t.Error("needsGRE: frp and gre-backhaul need GRE, backhaul does not")
-	}
-}
-
+// TestParseCarrierChoice, the TestSwap* suite and TestForeignSwapAcceptsThenSwitches
+// went with the legacy peer-swap handlers in §6.A3 (their entry points are
+// deleted dead code).
 func TestPeerCarrierFromRecord(t *testing.T) {
 	cases := []struct {
 		p    peerRecord
@@ -203,196 +175,6 @@ func TestSwitchPeerCarrierRefusesMissingBinary(t *testing.T) {
 }
 
 // swapStubs replaces the network and the local switch with recorders.
-type swapRec struct {
-	mu      sync.Mutex
-	foreign []string // carriers the foreign server was told
-	local   []string // carriers this server switched to
-	linked  map[string]bool
-	callErr error
-}
-
-func (s *swapRec) log(which *[]string, v string) {
-	s.mu.Lock()
-	*which = append(*which, v)
-	s.mu.Unlock()
-}
-
-func swapStubs(t *testing.T) *swapRec {
-	t.Helper()
-	rec := &swapRec{linked: map[string]bool{}}
-	oldCall, oldLocal, oldLinked := swapCall, swapLocalFn, swapLinkedFn
-	oldW, oldR, oldP := swapVerifyWait, swapRevertWait, swapPollEvery
-	swapVerifyWait, swapRevertWait, swapPollEvery = 30*time.Millisecond, 30*time.Millisecond, time.Millisecond
-	swapCall = func(tun swapTunnel, method, path string, payload any, timeout time.Duration) ([]byte, error) {
-		if rec.callErr != nil {
-			return nil, rec.callErr
-		}
-		if req, ok := payload.(peerSwapRequest); ok {
-			rec.log(&rec.foreign, req.Engine+":"+req.Transport)
-		}
-		return []byte(`{"status":"ok"}`), nil
-	}
-	swapLocalFn = func(tun swapTunnel, to carrierChoice) (string, error) {
-		rec.log(&rec.local, to.ID())
-		return "", nil
-	}
-	swapLinkedFn = func(tun swapTunnel, to carrierChoice) bool {
-		rec.mu.Lock()
-		defer rec.mu.Unlock()
-		return rec.linked[to.ID()]
-	}
-	t.Cleanup(func() {
-		swapCall, swapLocalFn, swapLinkedFn = oldCall, oldLocal, oldLinked
-		swapVerifyWait, swapRevertWait, swapPollEvery = oldW, oldR, oldP
-		swapJobsMu.Lock()
-		swapJobs = map[int]*swapJob{}
-		swapJobsMu.Unlock()
-		_ = os.Remove(swapStatePath())
-	})
-	return rec
-}
-
-func waitSwap(t *testing.T, id int) *swapJob {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if j := swapJobView(id); j != nil && j.State != "running" {
-			return j
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatal("swap did not finish")
-	return nil
-}
-
-func testTunnel() swapTunnel {
-	p := peerRecord{ID: 2, Name: "nl", FrpPort: 7001, Token: "tok", LocalPub: "5.5.5.5", LocalGre: "10.80.2.1", PeerGre: "10.80.2.2", Ports: []int{2083}}
-	return swapTunnel{ID: 2, Name: "nl", Current: carrierChoice{Engine: "frp", Transport: "tcp"}, GreOK: true, Port: 7001,
-		Ports: []int{2083}, Raw: []string{"2083"}, LocalPub: "5.5.5.5", LocalGre: "10.80.2.1", PeerGre: "10.80.2.2", Token: "tok", rec: &p}
-}
-
-func TestSwapSucceedsWhenTheTunnelComesBack(t *testing.T) {
-	rec := swapStubs(t)
-	rec.linked["backhaul:wssmux"] = true
-	if _, err := startSwap(testTunnel(), carrierChoice{Engine: "backhaul", Transport: "wssmux"}, false); err != nil {
-		t.Fatal(err)
-	}
-	j := waitSwap(t, 2)
-	if j.State != "ok" {
-		t.Fatalf("state %s (%s), steps %+v", j.State, j.Error, j.Steps)
-	}
-	if strings.Join(rec.foreign, ",") != "backhaul:wssmux" || strings.Join(rec.local, ",") != "backhaul:wssmux" {
-		t.Errorf("foreign %v local %v", rec.foreign, rec.local)
-	}
-	if loadSwapState()[2] != "backhaul:wssmux" {
-		t.Error("the new carrier should be remembered")
-	}
-}
-
-func TestSwapRevertsBothSidesWhenTheTunnelStaysDown(t *testing.T) {
-	rec := swapStubs(t)
-	rec.linked["frp:tcp"] = true // only the old carrier connects
-	if _, err := startSwap(testTunnel(), carrierChoice{Engine: "frp", Transport: "quic"}, false); err != nil {
-		t.Fatal(err)
-	}
-	j := waitSwap(t, 2)
-	if j.State != "reverted" {
-		t.Fatalf("state %s (%s), steps %+v", j.State, j.Error, j.Steps)
-	}
-	if strings.Join(rec.foreign, ",") != "frp:quic,frp:tcp" || strings.Join(rec.local, ",") != "frp:quic,frp:tcp" {
-		t.Errorf("both sides must go to quic and back: foreign %v local %v", rec.foreign, rec.local)
-	}
-	if loadSwapState()[2] != "frp:tcp" {
-		t.Error("the remembered carrier must be the old one again")
-	}
-}
-
-func TestSwapChangesNothingWhenTheForeignServerCannotBeTold(t *testing.T) {
-	rec := swapStubs(t)
-	rec.callErr = errors.New("dial tcp 10.80.2.2:7777: i/o timeout")
-	if _, err := startSwap(testTunnel(), carrierChoice{Engine: "backhaul", Transport: "tcpmux"}, false); err != nil {
-		t.Fatal(err)
-	}
-	j := waitSwap(t, 2)
-	if j.State != "failed" || len(rec.local) != 0 {
-		t.Fatalf("state %s, local switches %v: this server must not switch alone", j.State, rec.local)
-	}
-}
-
-func TestSwapManualSwitchesHereAndHandsOutTheBundle(t *testing.T) {
-	rec := swapStubs(t)
-	rec.callErr = errors.New("unreachable")
-	if _, err := startSwap(testTunnel(), carrierChoice{Engine: "backhaul", Transport: "tcpmux"}, true); err != nil {
-		t.Fatal(err)
-	}
-	j := waitSwap(t, 2)
-	if j.State != "manual" || strings.Join(rec.local, ",") != "backhaul:tcpmux" {
-		t.Fatalf("state %s local %v", j.State, rec.local)
-	}
-	if !strings.Contains(j.Bundle, "tok") || !strings.Contains(j.Bundle, "5.5.5.5") {
-		t.Errorf("manual swap must carry the foreign bundle, got %q", j.Bundle)
-	}
-}
-
-func TestSwapOneAtATime(t *testing.T) {
-	rec := swapStubs(t)
-	swapVerifyWait = 200 * time.Millisecond
-	_ = rec
-	if _, err := startSwap(testTunnel(), carrierChoice{Engine: "backhaul", Transport: "tcpmux"}, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := startSwap(testTunnel(), carrierChoice{Engine: "backhaul", Transport: "ws"}, false); err == nil {
-		t.Error("a second swap must wait for the first")
-	}
-	waitSwap(t, 2)
-}
-
-func TestForeignSwapAcceptsThenSwitches(t *testing.T) {
-	engineLab(t, []string{"frpc"}, nil)
-	var mu sync.Mutex
-	var gotOpts engineOpts
-	var gotEng, gotTr string
-	old := foreignSwitchFn
-	foreignSwitchFn = func(e, tr string, o engineOpts) (string, error) {
-		mu.Lock()
-		gotEng, gotTr, gotOpts = e, tr, o
-		mu.Unlock()
-		return "ok", nil
-	}
-	t.Cleanup(func() { foreignSwitchFn = old })
-
-	body := `{"engine":"frp","transport":"kcp","port":7001,"ports":[2083,8443],"remote":"5.5.5.5","peer_gre":"10.80.2.1","delay_ms":1}`
-	w := httptest.NewRecorder()
-	handlePeerSwapCarrier(w, httptest.NewRequest("POST", "/api/peer/swap-carrier", strings.NewReader(body)))
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "accepted") {
-		t.Fatalf("got %d %s", w.Code, w.Body.String())
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		foreignSwapMu.Lock()
-		st := foreignSwapNow.State
-		foreignSwapMu.Unlock()
-		if st == "ok" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("foreign swap stuck in %q", st)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if gotEng != "frp" || gotTr != "kcp" || gotOpts.Port != 7001 || len(gotOpts.Ports) != 2 || gotOpts.Remote != "5.5.5.5" || gotOpts.PeerGre != "10.80.2.1" {
-		t.Errorf("switch got %s %s %+v", gotEng, gotTr, gotOpts)
-	}
-
-	w = httptest.NewRecorder()
-	handlePeerSwapCarrier(w, httptest.NewRequest("POST", "/api/peer/swap-carrier", strings.NewReader(`{"engine":"frp","transport":"wss"}`)))
-	if w.Code == 200 {
-		t.Error("an unknown transport must be refused")
-	}
-}
-
 func TestForeignFRPSwitchUsesTheGivenPortsAndProtocol(t *testing.T) {
 	engineLab(t, []string{"frpc", "frps", "backhaul"}, []string{"backhaul-server", "backhaul-client"})
 	recordSystemctl(t, "")
@@ -410,41 +192,5 @@ func TestForeignFRPSwitchUsesTheGivenPortsAndProtocol(t *testing.T) {
 	}
 	if strings.Contains(conf, "remotePort = 443\n") {
 		t.Error("the default ports must not replace the given ones")
-	}
-}
-
-func TestTunnelPeerCallUsesTheTokenAndRemembersTheURL(t *testing.T) {
-	swapLab(t)
-	var gotSecret, gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSecret, gotPath = r.Header.Get("X-Peer-Secret"), r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"pong"}`))
-	}))
-	defer srv.Close()
-	updateTunnelLink(2, func(l *tunnelLink) { l.LastURL = srv.URL })
-	tun := peerSwapTunnel(*findPeer(2))
-	tun.PeerGre, tun.RemotePub = "", "" // only the remembered URL can answer
-	if _, err := tunnelPeerCall(tun, "POST", "/api/peer/ping", map[string]string{}, 2*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	if gotSecret != "tok-2" || gotPath != peerRoutePrefix+"/api/peer/ping" {
-		t.Errorf("secret %q path %q", gotSecret, gotPath)
-	}
-}
-
-func TestSwapHandlerRefusesBadRequests(t *testing.T) {
-	swapLab(t)
-	swapStubs(t)
-	for body, want := range map[string]string{
-		`{"id":2,"carrier":"frp:tcp"}`:      "already runs",
-		`{"id":2,"carrier":"frp:nope"}`:     "unknown FRP transport",
-		`{"id":9,"carrier":"backhaul:tcp"}`: "not found",
-	} {
-		w := httptest.NewRecorder()
-		handleSwapPost(w, httptest.NewRequest("POST", "/api/tunnel/swap", strings.NewReader(body)))
-		if w.Code == 200 || !strings.Contains(w.Body.String(), want) {
-			t.Errorf("%s: %d %s (want %q)", body, w.Code, w.Body.String(), want)
-		}
 	}
 }

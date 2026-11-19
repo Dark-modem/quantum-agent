@@ -90,44 +90,10 @@ func TestNoBareHostPort(t *testing.T) {
 	}
 }
 
-func TestPeerPatchIPv6(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	defer func() { configDir = old }()
-	_ = os.WriteFile(peersFile(), []byte(`{"peers":[
-	 {"id":1,"name":"gre","local_pub":"1.2.3.4","remote_pub":"198.51.100.1","frp_port":25000,"local_gre":"10.10.10.2","peer_gre":"10.10.10.1","ports":[80],"token":"t1","gre_if":"gre-t1","frps_svc":"frps"},
-	 {"id":2,"name":"bh","engine":"backhaul","local_pub":"1.2.3.4","remote_pub":"198.51.100.2","frp_port":25001,"ports":[81],"token":"t2","gre_if":"none","frps_svc":"backhaul-server-2"}]}`), 0600)
-	rr := httptest.NewRecorder()
-	handlePeersPatch(rr, httptest.NewRequest("PATCH", "/api/peers", strings.NewReader(`{"id":1,"remote_pub":"2001:db8::9"}`)))
-	if rr.Code != 400 || !strings.Contains(rr.Body.String(), "IPv4") {
-		t.Errorf("GRE peer to IPv6: %d %s", rr.Code, rr.Body.String())
-	}
-	rr = httptest.NewRecorder()
-	handlePeersPatch(rr, httptest.NewRequest("PATCH", "/api/peers", strings.NewReader(`{"id":2,"remote_pub":"2001:db8::9"}`)))
-	if strings.Contains(rr.Body.String(), "E-PEER-07") {
-		t.Errorf("Backhaul peer without GRE to IPv6 rejected: %d %s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestRescueIPv6(t *testing.T) {
-	if ip, err := validRemoteIP(" 2001:DB8::5 "); err != nil || ip != "2001:db8::5" {
-		t.Errorf("IPv6 rescue peer: %q %v", ip, err)
-	}
-	for _, bad := range []string{"fe80::1", "::1", "ff02::1", "::"} {
-		if _, err := validRemoteIP(bad); err == nil {
-			t.Errorf("%s accepted", bad)
-		}
-	}
-	if fw := rescueFwNft(7000, "2001:db8::5"); !strings.Contains(fw, "tcp dport 7000 ip6 saddr != 2001:db8::5 counter drop") {
-		t.Errorf("IPv6 firewall rule:\n%s", fw)
-	}
-	if fw := rescueFwNft(7000, "203.0.113.5"); !strings.Contains(fw, "ip saddr != 203.0.113.5") {
-		t.Errorf("IPv4 firewall rule:\n%s", fw)
-	}
-	if d := rescueDnatNft("2001:db8::5", []int{443}); !strings.Contains(d, "dnat ip6 to 2001:db8::5") || !strings.Contains(d, "ip6 daddr 2001:db8::5") {
-		t.Errorf("IPv6 DNAT:\n%s", d)
-	}
-}
+// TestPeerPatchIPv6 went with peers_edit.go in §6.A3 (its
+// handlePeersPatch entry point is deleted dead code).
+// TestRescueIPv6 went with the rescue engine in §6.A3 (validRemoteIP and
+// the rescue nft builders are deleted dead code).
 
 func TestBundlesAndSetupIPv6(t *testing.T) {
 	// Backhaul without GRE carries either family; the GRE bundles stay IPv4

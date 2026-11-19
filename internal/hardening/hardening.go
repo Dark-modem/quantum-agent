@@ -204,51 +204,8 @@ func (s SSHSpec) validate() error {
 	return nil
 }
 
-// Conservative returns the safe initial profile the installers apply after
-// enrolling a fresh server: firewall default-deny incoming with only the
-// declared ports open (including the SSH port we just verified), rate-
-// limited SSH, basic sysctl hygiene, time sync and a persistent journal.
-// It deliberately does NOT move the SSH port and does NOT enforce key-only
-// (the panel may push that later once it verified a key is present).
-func Conservative(sshPort int, extraOpens []PortRule) Profile {
-	deny := true
-	allowOut := true
-	p := Profile{
-		Version: ProfileVersion,
-		Name:    "conservative",
-		Firewall: &FirewallSpec{
-			DefaultDenyIncoming: &deny,
-			AllowOutgoing:       &allowOut,
-			Allows:              append([]PortRule{}, extraOpens...),
-			Limits: []PortRule{{
-				Port: sshPort, Proto: "tcp", Owner: "service:ssh",
-				Note: "SSH rate-limited",
-			}},
-		},
-		Sysctl:   conservativeSysctl(),
-		TimeSync: &TimeSyncSpec{EnsureActive: true},
-		Logging:  &LoggingSpec{PersistentJournal: true},
-	}
-	return p
-}
-
-// conservativeSysctl is the always-safe subset: SYN-flood guards, anti-
-// spoofing, ICMP hygiene. Performance tuning (bbr, buffers, conntrack
-// sizing) belongs to netopt profiles and is intentionally absent here.
-func conservativeSysctl() []SysctlRule {
-	kv := func(k, v string) SysctlRule { return SysctlRule{Key: k, Value: v} }
-	return []SysctlRule{
-		kv("net.ipv4.tcp_syncookies", "1"),
-		kv("net.ipv4.tcp_max_syn_backlog", "4096"),
-		kv("net.ipv4.conf.all.rp_filter", "1"),
-		kv("net.ipv4.conf.default.rp_filter", "1"),
-		kv("net.ipv4.conf.all.accept_source_route", "0"),
-		kv("net.ipv4.conf.default.accept_source_route", "0"),
-		kv("net.ipv4.conf.all.accept_redirects", "0"),
-		kv("net.ipv4.conf.default.accept_redirects", "0"),
-		kv("net.ipv4.conf.all.send_redirects", "0"),
-		kv("net.ipv4.conf.default.send_redirects", "0"),
-		kv("net.ipv4.icmp_echo_ignore_broadcasts", "1"),
-		kv("net.ipv4.icmp_ignore_bogus_error_responses", "1"),
-	}
-}
+// Conservative went in §6.A3 (deadcode RTA: unreachable from main — the
+// installers' conservative profile is rendered by quantum.sh itself and the
+// panel forwards operator hardening JSON opaquely, so no reachable path
+// builds it here; the panel's own netProfileConservative is netopt's
+// separate surface).

@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -448,11 +447,6 @@ func (m *Manager) ProcessPIDs() map[string][]int {
 		}
 	}
 	return out
-}
-
-// paramsEqual reports whether two opaque param documents are identical.
-func paramsEqual(a, b json.RawMessage) bool {
-	return bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b))
 }
 
 // EngineInstalled reports whether the engine currently has its binary
