@@ -1,18 +1,17 @@
 package agent
 
-// frp_counters.go — the FRP driver's byte accounting:
+// frp_counters.go — the FRP driver's PAYLOAD accounting (the frps web API).
 //
-//   - Wire bytes: per-instance iptables counter chains on the SERVER
-//     side only (FRPDRV_ACCT_IN on INPUT matching the instance's data
-//     port, FRPDRV_ACCT_OUT on OUTPUT matching its sport). The control
-//     port is shared across instances and deliberately not counted —
-//     per-instance attribution would be a lie. The client side reports
-//     Unknown for the same reason. Same pattern as carrier_traffic.go
-//     (QUANTUM_ACCT_*), namespaced so the two never collide.
+// The driver's WIRE accounting (the FRPDRV_ACCT_* iptables chains) lives in
+// acct.go since §6.A2, together with the QUANTUM_ACCT_* carrier machinery —
+// one accounting layer, two namespaces. What remains here is genuinely
+// frp-specific:
+//
 //   - Payload bytes: the frps web API (webServer in the generated
 //     config), proxy-scoped today_traffic_in/out. frp resets those
 //     counters daily — documented semantics, never multiplied, never
 //     fabricated; any parse failure reports Unknown.
+//   - The dashboard status probe Health uses.
 
 import (
 	"context"
@@ -22,22 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-)
-
-// Accounting chain names, namespaced away from the legacy QUANTUM_ACCT_*.
-const (
-	frpAcctIn  = "FRPDRV_ACCT_IN"
-	frpAcctOut = "FRPDRV_ACCT_OUT"
-)
-
-// iptables seams (hermetic tests).
-var (
-	frpIptables = func(args ...string) ([]byte, error) {
-		return runCmdTimeout(10*time.Second, "iptables", args...)
-	}
-	frpIptablesSave = func() ([]byte, error) {
-		return runCmdTimeout(15*time.Second, "iptables-save", "-c", "-t", "filter")
-	}
 )
 
 // frpDashHTTP is the dashboard API client (seam: tests serve httptest).
@@ -63,137 +46,6 @@ var frpDashHTTP = func(ctx context.Context, url, user, pass string) (int, []byte
 		}
 	}
 	return resp.StatusCode, body, nil
-}
-
-// frpWireRulesEnsure makes the accounting chains exist and hooks them.
-// Safe to call repeatedly; failures are reported (counters go Unknown).
-func frpWireRulesEnsure() error {
-	if _, err := frpIptables("-N", frpAcctIn); err != nil &&
-		!strings.Contains(err.Error(), "already exists") {
-		return err
-	}
-	if _, err := frpIptables("-N", frpAcctOut); err != nil &&
-		!strings.Contains(err.Error(), "already exists") {
-		return err
-	}
-	if _, err := frpIptables("-C", "INPUT", "-j", frpAcctIn); err != nil {
-		if _, err := frpIptables("-A", "INPUT", "-j", frpAcctIn); err != nil {
-			return err
-		}
-	}
-	if _, err := frpIptables("-C", "OUTPUT", "-j", frpAcctOut); err != nil {
-		if _, err := frpIptables("-A", "OUTPUT", "-j", frpAcctOut); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func frpAcctComment(tunnelID string) string { return "frpdrv-" + tunnelID }
-
-// frpPortRange renders the iptables port range for the instance's
-// allowed data ports ("n" when min==max, "min:max" otherwise).
-func frpPortRange(min, max int) string {
-	if min == max {
-		return strconv.Itoa(min)
-	}
-	return strconv.Itoa(min) + ":" + strconv.Itoa(max)
-}
-
-// frpWireRulesAdd installs the per-instance counter rules (server side).
-// The range is the instance's allowed data-port window; the panel
-// allocates non-overlapping windows per tunnel.
-func frpWireRulesAdd(tunnelID string, allowMin, allowMax int) error {
-	if err := frpWireRulesEnsure(); err != nil {
-		return err
-	}
-	cmt := frpAcctComment(tunnelID)
-	rng := frpPortRange(allowMin, allowMax)
-	if _, err := frpIptables("-A", frpAcctIn, "-p", "tcp", "--dport", rng,
-		"-m", "comment", "--comment", cmt); err != nil {
-		return err
-	}
-	if _, err := frpIptables("-A", frpAcctOut, "-p", "tcp", "--sport", rng,
-		"-m", "comment", "--comment", cmt); err != nil {
-		return err
-	}
-	return nil
-}
-
-// frpWireRulesDel removes exactly this instance's rules (comment-scoped).
-func frpWireRulesDel(tunnelID string, allowMin, allowMax int) error {
-	cmt := frpAcctComment(tunnelID)
-	rng := frpPortRange(allowMin, allowMax)
-	var firstErr error
-	if _, err := frpIptables("-D", frpAcctIn, "-p", "tcp", "--dport", rng,
-		"-m", "comment", "--comment", cmt); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	if _, err := frpIptables("-D", frpAcctOut, "-p", "tcp", "--sport", rng,
-		"-m", "comment", "--comment", cmt); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
-}
-
-// frpWireBytes reads the instance's counters from iptables-save -c
-// (exact bytes, one read, no table lock churn). Line shape:
-//
-//	-A FRPDRV_ACCT_IN -p tcp -m tcp --dport 34001 -m comment
-//	  --comment frpdrv-t1 [ 11:2222 ]
-//
-// where the bracket holds "pkts:bytes".
-func frpWireBytes(tunnelID string, allowMin, allowMax int) (rx, tx uint64, ok bool) {
-	out, err := frpIptablesSave()
-	if err != nil {
-		return 0, 0, false
-	}
-	cmt := frpAcctComment(tunnelID)
-	rng := frpPortRange(allowMin, allowMax)
-	for _, line := range strings.Split(string(out), "\n") {
-		if !strings.Contains(line, cmt) {
-			continue
-		}
-		var isRx bool
-		switch {
-		case strings.Contains(line, "--dport "+rng+" "):
-			isRx = true
-		case strings.Contains(line, "--sport "+rng+" "):
-			// outbound leg
-		default:
-			continue
-		}
-		i := strings.LastIndex(line, "[")
-		j := strings.LastIndex(line, "]")
-		if i < 0 || j <= i {
-			continue
-		}
-		// iptables-save -c: the bracket holds one "pkts:bytes" token.
-		var v uint64
-		parsed := false
-		for _, tok := range strings.Fields(line[i+1 : j]) {
-			parts := strings.SplitN(tok, ":", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			n, err := strconv.ParseUint(parts[1], 10, 64)
-			if err != nil {
-				continue
-			}
-			v, parsed = n, true
-			break
-		}
-		if !parsed {
-			continue
-		}
-		if isRx {
-			rx += v
-		} else {
-			tx += v
-		}
-		ok = true
-	}
-	return rx, tx, ok
 }
 
 // frpDashStatus probes the frps web API (used by Health). The endpoint is

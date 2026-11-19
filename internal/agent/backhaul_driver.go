@@ -357,7 +357,7 @@ func (d *BackhaulDriver) Start(ctx context.Context, inst engine.Instance) error 
 	// cannot be attributed per instance).
 	if role == "server" {
 		if port := enginePortOf(p.BindAddr); port > 0 {
-			if err := frpWireRulesAdd(inst.TunnelID, port, port); err != nil {
+			if err := acctWireRulesAdd(acctChainsDriver, inst.TunnelID, port, port); err != nil {
 				fmt.Fprintf(os.Stderr, "backhaul: wire accounting unavailable: %v\n", err)
 			}
 		}
@@ -375,7 +375,7 @@ func (d *BackhaulDriver) Stop(inst engine.Instance) error {
 	engineStopInst(&st.engineInst, func() {
 		if st.role == "server" {
 			if port := enginePortOf(st.params.BindAddr); port > 0 {
-				_ = frpWireRulesDel(inst.TunnelID, port, port)
+				_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, port, port)
 			}
 		}
 	})
@@ -456,7 +456,7 @@ func (d *BackhaulDriver) Counters(inst engine.Instance) engine.Counters {
 	}
 	out := engine.Counters{}
 	if port := enginePortOf(st.params.BindAddr); port > 0 {
-		if rx, tx, ok := frpWireBytes(inst.TunnelID, port, port); ok {
+		if rx, tx, ok := acctWireBytes(inst.TunnelID, port, port); ok {
 			out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 		}
 	}

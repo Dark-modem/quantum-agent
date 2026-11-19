@@ -309,7 +309,7 @@ func TestCarrierLab(t *testing.T) {
 		t.Fatalf("counters went back: %d/%d after %d/%d", rx2, tx2, rx, tx)
 	}
 	carrierDrop()
-	if save, _ := exec.Command("iptables-save", "-t", "filter").CombinedOutput(); strings.Contains(string(save), acctIn) || strings.Contains(string(save), acctOut) {
+	if save, _ := exec.Command("iptables-save", "-t", "filter").CombinedOutput(); strings.Contains(string(save), acctCarrierIn) || strings.Contains(string(save), acctCarrierOut) {
 		t.Fatalf("chains left after carrierDrop:\n%s", save)
 	}
 }

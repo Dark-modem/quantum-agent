@@ -299,7 +299,7 @@ func (d *ChiselDriver) Start(ctx context.Context, inst engine.Instance) error {
 		return chiselSpawn(b, args)
 	})
 	if role == engineSideServer {
-		if err := frpWireRulesAdd(inst.TunnelID, p.RemotePort, p.RemotePort); err != nil {
+		if err := acctWireRulesAdd(acctChainsDriver, inst.TunnelID, p.RemotePort, p.RemotePort); err != nil {
 			fmt.Fprintf(os.Stderr, "chisel: wire accounting unavailable: %v\n", err)
 		}
 	}
@@ -315,7 +315,7 @@ func (d *ChiselDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == engineSideServer {
-			_ = frpWireRulesDel(inst.TunnelID, st.params.RemotePort, st.params.RemotePort)
+			_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, st.params.RemotePort, st.params.RemotePort)
 		}
 	})
 	return nil
@@ -382,7 +382,7 @@ func (d *ChiselDriver) Counters(inst engine.Instance) engine.Counters {
 		return engine.Counters{}
 	}
 	out := engine.Counters{}
-	if rx, tx, ok := frpWireBytes(inst.TunnelID, st.params.RemotePort, st.params.RemotePort); ok {
+	if rx, tx, ok := acctWireBytes(inst.TunnelID, st.params.RemotePort, st.params.RemotePort); ok {
 		out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 	}
 	return out

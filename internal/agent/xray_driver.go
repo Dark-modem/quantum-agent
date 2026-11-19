@@ -575,7 +575,7 @@ func (d *XrayDriver) Start(ctx context.Context, inst engine.Instance) error {
 	// Wire accounting on the SERVER end's carrier port (the client's dial
 	// port is shared and cannot be attributed per instance).
 	if role == engineSideServer {
-		if err := frpWireRulesAdd(inst.TunnelID, p.CarrierPort, p.CarrierPort); err != nil {
+		if err := acctWireRulesAdd(acctChainsDriver, inst.TunnelID, p.CarrierPort, p.CarrierPort); err != nil {
 			fmt.Fprintf(os.Stderr, "xray: wire accounting unavailable: %v\n", err)
 		}
 	}
@@ -605,7 +605,7 @@ func (d *XrayDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == engineSideServer {
-			_ = frpWireRulesDel(inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort)
+			_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort)
 		}
 	})
 	return nil
@@ -680,7 +680,7 @@ func (d *XrayDriver) Counters(inst engine.Instance) engine.Counters {
 		return engine.Counters{}
 	}
 	out := engine.Counters{}
-	if rx, tx, ok := frpWireBytes(inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort); ok {
+	if rx, tx, ok := acctWireBytes(inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort); ok {
 		out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 	}
 	up, down, ok := xrayStatTraffic(st.params.APIPort, "inbound>>>vless-in")

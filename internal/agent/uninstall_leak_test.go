@@ -128,8 +128,8 @@ func leakTestEnv(t *testing.T) (restore func()) {
 		leakCounter++
 		return &fakeFRPProcess{}, nil
 	}
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
 	origStats := execCommandJSON
 	execCommandJSON = func(apiPort int, prefix string) (uint64, uint64, bool) { return 1, 2, true }
 	origKey := engineArtifactPubKeyB64
@@ -178,7 +178,7 @@ func leakTestEnv(t *testing.T) (restore func()) {
 		xraySpawn = origXSpawn
 		wstSpawn = origWst
 		chiselSpawn = origCh
-		frpIptables = origIpt
+		acctIptables = origIpt
 		execCommandJSON = origStats
 		engineArtifactPubKeyB64 = origKey
 		frpLoadIdentity = origIdent

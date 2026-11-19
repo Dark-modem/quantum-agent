@@ -37,12 +37,12 @@ func gostSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 		return &fakeFRPProcess{}, nil
 	}
 	t.Cleanup(func() { gostSpawn = origSpawn })
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) {
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
 		*cmds = append(*cmds, strings.Join(args, " "))
 		return nil, nil
 	}
-	t.Cleanup(func() { frpIptables = origIpt })
+	t.Cleanup(func() { acctIptables = origIpt })
 	origIdent := frpLoadIdentity
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Server: "http://panel.test", Name: "germany"}, true

@@ -124,13 +124,13 @@ func TestWgPeerEndpointCompanion(t *testing.T) {
 
 func TestWgCompanionStartStopShape(t *testing.T) {
 	_, _ = wgSetTestEnv(t)
-	origIpt := frpIptables
+	origIpt := acctIptables
 	iptCalls := new([]string)
-	frpIptables = func(args ...string) ([]byte, error) {
+	acctIptables = func(args ...string) ([]byte, error) {
 		*iptCalls = append(*iptCalls, strings.Join(args, " "))
 		return nil, nil
 	}
-	t.Cleanup(func() { frpIptables = origIpt })
+	t.Cleanup(func() { acctIptables = origIpt })
 	origCap := osGeteuid
 	osGeteuid = func() int { return 0 } // the hermetic env is "root"
 	t.Cleanup(func() { osGeteuid = origCap })

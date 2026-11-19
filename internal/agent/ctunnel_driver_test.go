@@ -53,21 +53,21 @@ func ctSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 		return nil
 	}
 	t.Cleanup(func() { ctIPCmd = origIP })
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) {
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
 		*cmds = append(*cmds, strings.Join(args, " "))
 		return nil, nil
 	}
-	t.Cleanup(func() { frpIptables = origIpt })
+	t.Cleanup(func() { acctIptables = origIpt })
 	origSysctl := ctSysctl
 	ctSysctl = func(args ...string) error {
 		*cmds = append(*cmds, "sysctl "+strings.Join(args, " "))
 		return nil
 	}
 	t.Cleanup(func() { ctSysctl = origSysctl })
-	origSave := frpIptablesSave
-	frpIptablesSave = func() ([]byte, error) { return []byte(""), nil }
-	t.Cleanup(func() { frpIptablesSave = origSave })
+	origSave := acctIptablesSave
+	acctIptablesSave = func() ([]byte, error) { return []byte(""), nil }
+	t.Cleanup(func() { acctIptablesSave = origSave })
 	origIdent := frpLoadIdentity
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Server: "http://panel.test", Name: "germany"}, true

@@ -145,8 +145,8 @@ func xraySetTestEnv(t *testing.T) (spawned *int, leaked *strings.Builder) {
 	execCommandJSON = func(apiPort int, prefix string) (uint64, uint64, bool) {
 		return 1111, 2222, true // scripted payload counters
 	}
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
 	// The through-tunnel probe cannot work against the FAKE xray process
 	// (no listener) — stub it healthy; the integration runs the real dial.
 	origProbe := xrayProbeFn
@@ -159,7 +159,7 @@ func xraySetTestEnv(t *testing.T) (spawned *int, leaked *strings.Builder) {
 		frpFetchArtifact = origFetch
 		xraySpawn = origSpawn
 		execCommandJSON = origStats
-		frpIptables = origIpt
+		acctIptables = origIpt
 		xrayProbeFn = origProbe
 		configDir = origCfg
 	})
@@ -401,9 +401,9 @@ func TestXrayManagerReconcile(t *testing.T) {
 		t.Fatal(err)
 	}
 	mgr := engine.NewManager(reg)
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
-	t.Cleanup(func() { frpIptables = origIpt })
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() { acctIptables = origIpt })
 	p := xrayTestParams()
 	res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "xray", Enabled: true}},
@@ -513,8 +513,8 @@ func TestXrayMixedManagerShape(t *testing.T) {
 	xrayTestPins.sigAmd, xrayTestPins.sigArm = xSIG, xSIG
 	backhaulTestPins.amd, backhaulTestPins.arm = bhSHA, bhSHA
 	backhaulTestPins.sigAmd, backhaulTestPins.sigArm = bhSIG, bhSIG
-	origIpt := frpIptables
-	frpIptables = func(args ...string) ([]byte, error) { return nil, nil }
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
 	origSpawn := frpSpawn
 	spawned := new(int)
 	frpSpawn = func(binPath, cfgPath string) (frpProcess, error) {
@@ -548,7 +548,7 @@ func TestXrayMixedManagerShape(t *testing.T) {
 	t.Cleanup(func() {
 		engineArtifactPubKeyB64 = origKey
 		frpFetchArtifact = origFetch
-		frpIptables = origIpt
+		acctIptables = origIpt
 		frpSpawn = origSpawn
 		xraySpawn = origXSpawn
 		frpDashHTTP = origDash

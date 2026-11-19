@@ -311,7 +311,7 @@ func (d *WstDriver) Start(ctx context.Context, inst engine.Instance) error {
 	// Wire accounting on the SERVER end's forwarded port (single port,
 	// not a range — this instance owns it).
 	if role == engineSideServer {
-		if err := frpWireRulesAdd(inst.TunnelID, p.RemotePort, p.RemotePort); err != nil {
+		if err := acctWireRulesAdd(acctChainsDriver, inst.TunnelID, p.RemotePort, p.RemotePort); err != nil {
 			fmt.Fprintf(os.Stderr, "wstunnel: wire accounting unavailable: %v\n", err)
 		}
 	}
@@ -329,7 +329,7 @@ func (d *WstDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == engineSideServer {
-			_ = frpWireRulesDel(inst.TunnelID, st.params.RemotePort, st.params.RemotePort)
+			_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, st.params.RemotePort, st.params.RemotePort)
 		}
 	})
 	return nil
@@ -400,7 +400,7 @@ func (d *WstDriver) Counters(inst engine.Instance) engine.Counters {
 		return engine.Counters{}
 	}
 	out := engine.Counters{}
-	if rx, tx, ok := frpWireBytes(inst.TunnelID, st.params.RemotePort, st.params.RemotePort); ok {
+	if rx, tx, ok := acctWireBytes(inst.TunnelID, st.params.RemotePort, st.params.RemotePort); ok {
 		out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 	}
 	return out
