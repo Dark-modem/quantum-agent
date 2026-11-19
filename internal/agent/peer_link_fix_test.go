@@ -75,11 +75,6 @@ func TestSendToPeerAddressesPeerNotLocalBasePath(t *testing.T) {
 	}
 }
 
-
-
-
-
-
 // M13: a status update must not overwrite settings saved in the meantime.
 func TestPeerStatusUpdateKeepsConcurrentEdits(t *testing.T) {
 	withPeerLink(t, PeerConfig{Role: "master", PeerSecret: "old", AutoPilotExplicit: true})
