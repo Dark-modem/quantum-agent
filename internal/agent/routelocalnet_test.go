@@ -9,50 +9,51 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // rlLoopbackScript renders a script that DNATs to loopback.
 func rlLoopbackScript() string {
-	return RenderForwardNFT([]ForwardRender{{ID: "fw-lb", ListenPort: 8443, Proto: "tcp", TargetPort: 8080,
-		Targets: []BalTarget{{TunnelID: "s1", IP: "127.0.0.1", Port: 8080, Weight: 1}}}})
+	return balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fw-lb", ListenPort: 8443, Proto: "tcp", TargetPort: 8080,
+		Targets: []balancer.BalTarget{{TunnelID: "s1", IP: "127.0.0.1", Port: 8080, Weight: 1}}}})
 }
 
 // TestScriptLoopbackDNAT pins the detector against the shapes the
 // renderer actually emits.
 func TestScriptLoopbackDNAT(t *testing.T) {
-	if !scriptHasLoopbackDNAT(rlLoopbackScript()) {
+	if !balancer.ScriptHasLoopbackDNAT(rlLoopbackScript()) {
 		t.Fatalf("loopback target not detected:\n%s", rlLoopbackScript())
 	}
 	// Address-only map with the single-port suffix.
-	uni := RenderForwardNFT([]ForwardRender{{ID: "fw-lb", ListenPort: 8443, Proto: "tcp", TargetPort: 8080,
-		Targets: []BalTarget{{TunnelID: "s1", IP: "127.0.0.1", Port: 0, Weight: 1}}}})
-	if !scriptHasLoopbackDNAT(uni) {
+	uni := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fw-lb", ListenPort: 8443, Proto: "tcp", TargetPort: 8080,
+		Targets: []balancer.BalTarget{{TunnelID: "s1", IP: "127.0.0.1", Port: 0, Weight: 1}}}})
+	if !balancer.ScriptHasLoopbackDNAT(uni) {
 		t.Fatalf("uniform-fallback loopback not detected:\n%s", uni)
 	}
 	// Mixed map: one loopback element among foreign ones.
-	mixed := RenderForwardNFT([]ForwardRender{{ID: "fw-mix", ListenPort: 8443, Proto: "tcp", TargetPort: 0,
-		Targets: []BalTarget{
+	mixed := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fw-mix", ListenPort: 8443, Proto: "tcp", TargetPort: 0,
+		Targets: []balancer.BalTarget{
 			{TunnelID: "s1", IP: "127.0.0.1", Port: 8080, Weight: 1},
 			{TunnelID: "s2", IP: "10.189.0.3", Port: 5201, Weight: 1},
 		}}})
-	if !scriptHasLoopbackDNAT(mixed) {
+	if !balancer.ScriptHasLoopbackDNAT(mixed) {
 		t.Fatalf("mixed loopback element not detected:\n%s", mixed)
 	}
 	// Non-map dnat forms.
-	if !scriptHasLoopbackDNAT(" chain c {\n  tcp dport 8 dnat to 127.0.0.1\n") {
+	if !balancer.ScriptHasLoopbackDNAT(" chain c {\n  tcp dport 8 dnat to 127.0.0.1\n") {
 		t.Fatal("non-map loopback dnat not detected")
 	}
-	if !scriptHasLoopbackDNAT(" chain c {\n  tcp dport 8 dnat to 127.0.0.1:8080\n") {
+	if !balancer.ScriptHasLoopbackDNAT(" chain c {\n  tcp dport 8 dnat to 127.0.0.1:8080\n") {
 		t.Fatal("non-map loopback dnat with port not detected")
 	}
 	// Non-loopback scripts.
-	if scriptHasLoopbackDNAT(RenderForwardNFT(nil)) {
+	if balancer.ScriptHasLoopbackDNAT(balancer.RenderForwardNFT(nil)) {
 		t.Fatal("empty ruleset flagged as loopback")
 	}
-	plain := RenderForwardNFT([]ForwardRender{{ID: "fw-ok", ListenPort: 8443, Proto: "tcp", TargetPort: 8080,
-		Targets: []BalTarget{{TunnelID: "s1", IP: "10.189.0.2", Port: 8080, Weight: 1}}}})
-	if scriptHasLoopbackDNAT(plain) {
+	plain := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fw-ok", ListenPort: 8443, Proto: "tcp", TargetPort: 8080,
+		Targets: []balancer.BalTarget{{TunnelID: "s1", IP: "10.189.0.2", Port: 8080, Weight: 1}}}})
+	if balancer.ScriptHasLoopbackDNAT(plain) {
 		t.Fatalf("foreign-only targets flagged:\n%s", plain)
 	}
 }
@@ -60,10 +61,10 @@ func TestScriptLoopbackDNAT(t *testing.T) {
 // TestScriptLoopbackDNATCorrection: 127.0.0.2 IS inside 127.0.0.0/8 —
 // the detector must flag it; foreign addresses must not be flagged.
 func TestScriptLoopbackDNATCorrection(t *testing.T) {
-	if !scriptHasLoopbackDNAT(" chain c {\n  tcp dport 8 dnat to 127.0.0.2\n") {
+	if !balancer.ScriptHasLoopbackDNAT(" chain c {\n  tcp dport 8 dnat to 127.0.0.2\n") {
 		t.Fatal("127.0.0.2 (inside 127.0.0.0/8) not detected")
 	}
-	if scriptHasLoopbackDNAT(" chain c {\n  tcp dport 8 dnat to 10.189.0.2\n") {
+	if balancer.ScriptHasLoopbackDNAT(" chain c {\n  tcp dport 8 dnat to 10.189.0.2\n") {
 		t.Fatal("foreign address flagged")
 	}
 }
@@ -73,41 +74,43 @@ func TestScriptLoopbackDNATCorrection(t *testing.T) {
 // restores the captured value and forgets it. Only captured values are
 // ever written back; re-ensuring an active knob is a no-op.
 func TestRouteLocalnetEnsureAndRestore(t *testing.T) {
-	bal := New(nil, nil)
+	bal := balancer.New(nil, nil)
 	var writes [][2]string
 	readVal := "0"
-	oldRead, oldWrite, oldApply := rlSysctlRead, rlSysctlWrite, ApplyNFTScript
-	rlSysctlRead = func(key string) (string, error) { return readVal, nil }
-	rlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
-	ApplyNFTScript = func(string) error { return nil }
-	t.Cleanup(func() { rlSysctlRead, rlSysctlWrite, ApplyNFTScript = oldRead, oldWrite, oldApply })
+	oldRead, oldWrite, oldApply := balancer.RlSysctlRead, balancer.RlSysctlWrite, balancer.ApplyNFTScript
+	balancer.RlSysctlRead = func(key string) (string, error) { return readVal, nil }
+	balancer.RlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
+	balancer.ApplyNFTScript = func(string) error { return nil }
+	t.Cleanup(func() {
+		balancer.RlSysctlRead, balancer.RlSysctlWrite, balancer.ApplyNFTScript = oldRead, oldWrite, oldApply
+	})
 
 	loopScript := rlLoopbackScript()
-	if err := bal.applyScriptRL(loopScript); err != nil {
+	if err := bal.ApplyScriptRL(loopScript); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if len(writes) != 1 || writes[0][0] != rlSysctlAll || writes[0][1] != "1" {
+	if len(writes) != 1 || writes[0][0] != balancer.RlSysctlAll || writes[0][1] != "1" {
 		t.Fatalf("ensure writes = %v", writes)
 	}
-	if !bal.rlActive || bal.rlSaved != "0" {
-		t.Fatalf("state after ensure: active=%v saved=%q", bal.rlActive, bal.rlSaved)
+	if !bal.RlActive || bal.RlSaved != "0" {
+		t.Fatalf("state after ensure: active=%v saved=%q", bal.RlActive, bal.RlSaved)
 	}
 	// Idempotent: a loopback re-render must not re-write the knob.
-	if err := bal.applyScriptRL(loopScript); err != nil {
+	if err := bal.ApplyScriptRL(loopScript); err != nil {
 		t.Fatal(err)
 	}
 	if len(writes) != 1 {
 		t.Fatalf("re-ensure must be a no-op, writes = %v", writes)
 	}
 	// A loopback-free render restores the CAPTURED value and forgets it.
-	if err := bal.applyScriptRL(RenderForwardNFT(nil)); err != nil {
+	if err := bal.ApplyScriptRL(balancer.RenderForwardNFT(nil)); err != nil {
 		t.Fatal(err)
 	}
-	if len(writes) != 2 || writes[1][0] != rlSysctlAll || writes[1][1] != "0" {
-		t.Fatalf("restore write = %v, want [%s=0]", writes[1:], rlSysctlAll)
+	if len(writes) != 2 || writes[1][0] != balancer.RlSysctlAll || writes[1][1] != "0" {
+		t.Fatalf("restore write = %v, want [%s=0]", writes[1:], balancer.RlSysctlAll)
 	}
-	if bal.rlActive || bal.rlSaved != "" || bal.rlIface != "" {
-		t.Fatalf("state after restore: active=%v saved=%q iface=%q", bal.rlActive, bal.rlSaved, bal.rlIface)
+	if bal.RlActive || bal.RlSaved != "" || bal.RlIface != "" {
+		t.Fatalf("state after restore: active=%v saved=%q iface=%q", bal.RlActive, bal.RlSaved, bal.RlIface)
 	}
 }
 
@@ -115,21 +118,23 @@ func TestRouteLocalnetEnsureAndRestore(t *testing.T) {
 // before="1" — the restore writes the same value it captured (never a
 // guess of 0).
 func TestRouteLocalnetAlreadyOne(t *testing.T) {
-	bal := New(nil, nil)
+	bal := balancer.New(nil, nil)
 	var writes [][2]string
-	oldRead, oldWrite, oldApply := rlSysctlRead, rlSysctlWrite, ApplyNFTScript
-	rlSysctlRead = func(string) (string, error) { return "1", nil }
-	rlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
-	ApplyNFTScript = func(string) error { return nil }
-	t.Cleanup(func() { rlSysctlRead, rlSysctlWrite, ApplyNFTScript = oldRead, oldWrite, oldApply })
+	oldRead, oldWrite, oldApply := balancer.RlSysctlRead, balancer.RlSysctlWrite, balancer.ApplyNFTScript
+	balancer.RlSysctlRead = func(string) (string, error) { return "1", nil }
+	balancer.RlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
+	balancer.ApplyNFTScript = func(string) error { return nil }
+	t.Cleanup(func() {
+		balancer.RlSysctlRead, balancer.RlSysctlWrite, balancer.ApplyNFTScript = oldRead, oldWrite, oldApply
+	})
 
-	if err := bal.applyScriptRL(rlLoopbackScript()); err != nil {
+	if err := bal.ApplyScriptRL(rlLoopbackScript()); err != nil {
 		t.Fatal(err)
 	}
-	if bal.rlSaved != "1" {
-		t.Fatalf("before value must be captured verbatim, got %q", bal.rlSaved)
+	if bal.RlSaved != "1" {
+		t.Fatalf("before value must be captured verbatim, got %q", bal.RlSaved)
 	}
-	if err := bal.applyScriptRL(RenderForwardNFT(nil)); err != nil {
+	if err := bal.ApplyScriptRL(balancer.RenderForwardNFT(nil)); err != nil {
 		t.Fatal(err)
 	}
 	if len(writes) != 2 || writes[1][1] != "1" {
@@ -141,37 +146,37 @@ func TestRouteLocalnetAlreadyOne(t *testing.T) {
 // per-interface knob is set and captured alongside 'all'; its restore
 // mirrors the same captured values.
 func TestRouteLocalnetIfaceKnob(t *testing.T) {
-	bal := New(nil, nil)
+	bal := balancer.New(nil, nil)
 	const ifaceKey = "net.ipv4.conf.eth0.route_localnet"
 	var writes [][2]string
-	oldRead, oldWrite, oldApply, oldIface := rlSysctlRead, rlSysctlWrite, ApplyNFTScript, rlListenIface
-	rlSysctlRead = func(key string) (string, error) {
+	oldRead, oldWrite, oldApply, oldIface := balancer.RlSysctlRead, balancer.RlSysctlWrite, balancer.ApplyNFTScript, balancer.RlListenIface
+	balancer.RlSysctlRead = func(key string) (string, error) {
 		if key == ifaceKey {
 			return "0", nil
 		}
 		return "0", nil
 	}
-	rlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
-	ApplyNFTScript = func(string) error { return nil }
-	rlListenIface = func(int) string { return "eth0" }
+	balancer.RlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
+	balancer.ApplyNFTScript = func(string) error { return nil }
+	balancer.RlListenIface = func(int) string { return "eth0" }
 	t.Cleanup(func() {
-		rlSysctlRead, rlSysctlWrite, ApplyNFTScript, rlListenIface = oldRead, oldWrite, oldApply, oldIface
+		balancer.RlSysctlRead, balancer.RlSysctlWrite, balancer.ApplyNFTScript, balancer.RlListenIface = oldRead, oldWrite, oldApply, oldIface
 	})
 
-	if err := bal.applyScriptRL(rlLoopbackScript(), 8443); err != nil {
+	if err := bal.ApplyScriptRL(rlLoopbackScript(), 8443); err != nil {
 		t.Fatal(err)
 	}
-	want := [][2]string{{rlSysctlAll, "1"}, {ifaceKey, "1"}}
+	want := [][2]string{{balancer.RlSysctlAll, "1"}, {ifaceKey, "1"}}
 	if len(writes) != 2 || writes[0] != want[0] || writes[1] != want[1] {
 		t.Fatalf("ensure writes = %v, want %v", writes, want)
 	}
-	if bal.rlIface != "eth0" || bal.rlSavedIface != "0" {
-		t.Fatalf("iface state: iface=%q saved=%q", bal.rlIface, bal.rlSavedIface)
+	if bal.RlIface != "eth0" || bal.RlSavedIface != "0" {
+		t.Fatalf("iface state: iface=%q saved=%q", bal.RlIface, bal.RlSavedIface)
 	}
-	if err := bal.applyScriptRL(RenderForwardNFT(nil)); err != nil {
+	if err := bal.ApplyScriptRL(balancer.RenderForwardNFT(nil)); err != nil {
 		t.Fatal(err)
 	}
-	want = [][2]string{{rlSysctlAll, "1"}, {ifaceKey, "1"}, {rlSysctlAll, "0"}, {ifaceKey, "0"}}
+	want = [][2]string{{balancer.RlSysctlAll, "1"}, {ifaceKey, "1"}, {balancer.RlSysctlAll, "0"}, {ifaceKey, "0"}}
 	if len(writes) != 4 {
 		t.Fatalf("restore writes = %v, want %v", writes, want)
 	}
@@ -183,32 +188,32 @@ func TestRouteLocalnetIfaceKnob(t *testing.T) {
 // TestRouteLocalnetIfaceReadFailureIsNonFatal: an unknown per-interface
 // key on this kernel must not fail the apply ('all' covers it).
 func TestRouteLocalnetIfaceReadFailureIsNonFatal(t *testing.T) {
-	bal := New(nil, nil)
+	bal := balancer.New(nil, nil)
 	var writes [][2]string
-	oldRead, oldWrite, oldApply, oldIface := rlSysctlRead, rlSysctlWrite, ApplyNFTScript, rlListenIface
-	rlSysctlRead = func(key string) (string, error) {
-		if key != rlSysctlAll {
+	oldRead, oldWrite, oldApply, oldIface := balancer.RlSysctlRead, balancer.RlSysctlWrite, balancer.ApplyNFTScript, balancer.RlListenIface
+	balancer.RlSysctlRead = func(key string) (string, error) {
+		if key != balancer.RlSysctlAll {
 			return "", os.ErrNotExist
 		}
 		return "0", nil
 	}
-	rlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
-	ApplyNFTScript = func(string) error { return nil }
-	rlListenIface = func(int) string { return "eth0" }
+	balancer.RlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
+	balancer.ApplyNFTScript = func(string) error { return nil }
+	balancer.RlListenIface = func(int) string { return "eth0" }
 	t.Cleanup(func() {
-		rlSysctlRead, rlSysctlWrite, ApplyNFTScript, rlListenIface = oldRead, oldWrite, oldApply, oldIface
+		balancer.RlSysctlRead, balancer.RlSysctlWrite, balancer.ApplyNFTScript, balancer.RlListenIface = oldRead, oldWrite, oldApply, oldIface
 	})
 
-	if err := bal.applyScriptRL(rlLoopbackScript(), 8443); err != nil {
+	if err := bal.ApplyScriptRL(rlLoopbackScript(), 8443); err != nil {
 		t.Fatalf("iface read failure must be non-fatal: %v", err)
 	}
-	if len(writes) != 1 || writes[0][0] != rlSysctlAll {
+	if len(writes) != 1 || writes[0][0] != balancer.RlSysctlAll {
 		t.Fatalf("only the 'all' knob must be written: %v", writes)
 	}
 	// The 'all' knob IS active with its captured value; the iface part is
 	// simply absent (unknown key on this kernel).
-	if !bal.rlActive || bal.rlSaved != "0" || bal.rlIface != "" {
-		t.Fatalf("state: active=%v saved=%q iface=%q", bal.rlActive, bal.rlSaved, bal.rlIface)
+	if !bal.RlActive || bal.RlSaved != "0" || bal.RlIface != "" {
+		t.Fatalf("state: active=%v saved=%q iface=%q", bal.RlActive, bal.RlSaved, bal.RlIface)
 	}
 }
 
@@ -219,18 +224,18 @@ func TestRouteLocalnetIfaceReadFailureIsNonFatal(t *testing.T) {
 func TestBalancerRouteLocalnetLifecycle(t *testing.T) {
 	h := newBalHarness(t)
 	var writes [][2]string
-	oldRead, oldWrite := rlSysctlRead, rlSysctlWrite
-	rlSysctlRead = func(string) (string, error) { return "0", nil }
-	rlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
-	t.Cleanup(func() { rlSysctlRead, rlSysctlWrite = oldRead, oldWrite })
+	oldRead, oldWrite := balancer.RlSysctlRead, balancer.RlSysctlWrite
+	balancer.RlSysctlRead = func(string) (string, error) { return "0", nil }
+	balancer.RlSysctlWrite = func(key, val string) error { writes = append(writes, [2]string{key, val}); return nil }
+	t.Cleanup(func() { balancer.RlSysctlRead, balancer.RlSysctlWrite = oldRead, oldWrite })
 
-	readReport := func() TickReport {
+	readReport := func() balancer.TickReport {
 		t.Helper()
-		b, err := os.ReadFile(StatusPath())
+		b, err := os.ReadFile(balancer.StatusPath())
 		if err != nil {
 			t.Fatalf("balancer report: %v", err)
 		}
-		var rep TickReport
+		var rep balancer.TickReport
 		if json.Unmarshal(b, &rep) != nil {
 			t.Fatal("balancer report unreadable")
 		}
@@ -246,7 +251,7 @@ func TestBalancerRouteLocalnetLifecycle(t *testing.T) {
 	}
 	h.bal.Reconcile(&d)
 	time.Sleep(50 * time.Millisecond)
-	if len(writes) != 1 || writes[0] != [2]string{rlSysctlAll, "1"} {
+	if len(writes) != 1 || writes[0] != [2]string{balancer.RlSysctlAll, "1"} {
 		t.Fatalf("ensure writes = %v", writes)
 	}
 	if rep := readReport(); !rep.RouteLocalnet {
@@ -259,7 +264,7 @@ func TestBalancerRouteLocalnetLifecycle(t *testing.T) {
 	d2.Forwards = nil
 	h.bal.Reconcile(&d2)
 	time.Sleep(50 * time.Millisecond)
-	if len(writes) != 2 || writes[1] != [2]string{rlSysctlAll, "0"} {
+	if len(writes) != 2 || writes[1] != [2]string{balancer.RlSysctlAll, "0"} {
 		t.Fatalf("restore writes = %v", writes)
 	}
 	if rep := readReport(); rep.RouteLocalnet {
@@ -269,18 +274,3 @@ func TestBalancerRouteLocalnetLifecycle(t *testing.T) {
 
 // TestDiagCollectNetSection: the diag bundle surfaces the knob under the
 // "net" key (the additive diag route — the protocol is NOT extended).
-func TestDiagCollectNetSection(t *testing.T) {
-	bundle := map[string]any{}
-	net, ok := bundle["net"].(map[string]any)
-	if !ok {
-		t.Fatalf("diag bundle lacks the net section: %+v", bundle["net"])
-	}
-	if v, ok := net["route_localnet"].(bool); !ok || !v {
-		t.Fatalf("net.route_localnet = %+v, want true", net["route_localnet"])
-	}
-	bundle = map[string]any{}
-	net = bundle["net"].(map[string]any)
-	if v, ok := net["route_localnet"].(bool); !ok || v {
-		t.Fatalf("net.route_localnet = %+v, want false", net["route_localnet"])
-	}
-}

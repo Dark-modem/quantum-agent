@@ -137,13 +137,13 @@ type ForwardBalancer struct {
 	running      bool
 	NowFn        func() time.Time
 	// Balancer-owned route_localnet state (RUNBOOK ITEM 35, see
-	// routelocalnet.go): rlActive while the enforced ruleset DNATs to
-	// loopback; rlSaved is the CAPTURED previous value (never a guess)
+	// routelocalnet.go): RlActive while the enforced ruleset DNATs to
+	// loopback; RlSaved is the CAPTURED previous value (never a guess)
 	// restored when no loopback target remains. Guarded by mu.
-	rlActive     bool
-	rlSaved      string
-	rlIface      string
-	rlSavedIface string
+	RlActive     bool
+	RlSaved      string
+	RlIface      string
+	RlSavedIface string
 }
 
 func New(mgr *engine.Manager, reg *engine.Registry) *ForwardBalancer {
@@ -193,7 +193,7 @@ func (b *ForwardBalancer) Stop() {
 	// Ruleset cleanup under the same lock that guards the route_localnet
 	// state: with no forward rules left, a captured knob value is no
 	// longer ours to hold (applyScriptRL restores it).
-	err := b.applyScriptRL(RenderForwardNFT(nil))
+	err := b.ApplyScriptRL(RenderForwardNFT(nil))
 	b.mu.Unlock()
 	if err != nil {
 		log.Printf("[balancer] ruleset cleanup failed: %v", err)
@@ -459,7 +459,7 @@ func (b *ForwardBalancer) Tick() TickReport {
 		for _, r := range rules {
 			listenPorts = append(listenPorts, r.ListenPort)
 		}
-		if err := b.applyScriptRL(script, listenPorts...); err != nil {
+		if err := b.ApplyScriptRL(script, listenPorts...); err != nil {
 			rep.Errors = append(rep.Errors, "nft apply: "+err.Error())
 			log.Printf("[balancer] nft apply failed: %v", err)
 		} else {
@@ -468,7 +468,7 @@ func (b *ForwardBalancer) Tick() TickReport {
 		}
 	}
 	b.lastForwards = forwards
-	rep.RouteLocalnet = b.rlActive
+	rep.RouteLocalnet = b.RlActive
 	// Structured diagnostics, logged when the evaluation changes
 	// (reconcile, health flip, weight change) — never every tick.
 	diagKey := ""

@@ -20,7 +20,7 @@
 //	qdev19-a     10.208.0.2/30  (sink A, UDP :15901)
 //	qdev19-b     10.208.0.6/30  (sink B, UDP :15902)
 //
-// The REAL ForwardBalancer (fake engine for tunnel status, REAL nft apply —
+// The REAL balancer.ForwardBalancer (fake engine for tunnel status, REAL nft apply —
 // the seam is wrapped pass-through, never stubbed) renders the UDP forward:
 //
 //	udp dport 15900 dnat to jhash ip saddr mod 3 map { 0-1 : <A> . 15901, 2 : <B> . 15902 }
@@ -54,6 +54,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 	"github.com/Dark-modem/quantum-agent/internal/infra"
@@ -290,8 +292,8 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	bal := New(mgr, reg)
 	var scriptMu sync.Mutex
 	var scripts []string
-	realApply := ApplyNFTScript
-	ApplyNFTScript = func(s string) error {
+	realApply := balancer.ApplyNFTScript
+	balancer.ApplyNFTScript = func(s string) error {
 		scriptMu.Lock()
 		scripts = append(scripts, s)
 		scriptMu.Unlock()
@@ -303,7 +305,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	// the host is still untouched.
 	realRunner := infra.Runner
 	infra.Runner = infra.ExecRunner
-	t.Cleanup(func() { bal.Stop(); ApplyNFTScript = realApply; infra.Runner = realRunner })
+	t.Cleanup(func() { bal.Stop(); balancer.ApplyNFTScript = realApply; infra.Runner = realRunner })
 	lastScript := func() string {
 		scriptMu.Lock()
 		defer scriptMu.Unlock()
@@ -557,7 +559,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 		scriptMu.Unlock()
 		for _, s := range applied {
 			// Injection payloads must never appear. ("evil" DOES appear —
-			// inside the chain name derived from the rule ID by ChainID's
+			// inside the chain name derived from the rule ID by balancer.ChainID's
 			// sanitizing map; an ID is never a DNAT target.)
 			for _, bad := range []string{"flush", "touch", "db8"} {
 				if strings.Contains(s, bad) {

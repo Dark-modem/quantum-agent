@@ -516,7 +516,7 @@ func TestRenderForwardChainRefusesNonIPDirectCall(t *testing.T) {
 			{TunnelID: "good", IP: "10.189.0.2", Port: 15901, Weight: 1},
 			{TunnelID: "evil", IP: "10.189.0.2; flush ruleset", Port: 15901, Weight: 1},
 		}}
-	script := balancer.RenderForwardNFT("tcp", r)
+	script := balancer.RenderForwardChain("tcp", r)
 	if strings.Contains(script, "flush") {
 		t.Fatalf("hostile target leaked into the rendered chain:\n%s", script)
 	}
@@ -524,7 +524,7 @@ func TestRenderForwardChainRefusesNonIPDirectCall(t *testing.T) {
 		t.Fatalf("the legit target must survive:\n%s", script)
 	}
 	r.Targets = []balancer.BalTarget{{TunnelID: "evil", IP: "$(id)", Port: 15901, Weight: 1}}
-	script = renderForwardChain("tcp", r)
+	script = balancer.RenderForwardChain("tcp", r)
 	if strings.Contains(script, "$(id)") || strings.Contains(script, "dnat") {
 		t.Fatalf("all-hostile rule must render the fail-fast pass-through:\n%s", script)
 	}

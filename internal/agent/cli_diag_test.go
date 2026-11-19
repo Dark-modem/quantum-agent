@@ -93,3 +93,19 @@ func TestDiagBundleRedacted(t *testing.T) {
 // origCfgForDiag restores the caller's infra.ConfigDir (named so the cleanup
 // reads naturally).
 func origCfgForDiag(old string) string { return old }
+
+func TestDiagCollectNetSection(t *testing.T) {
+	bundle := diagCollect(nil, nil, true)
+	net, ok := bundle["net"].(map[string]any)
+	if !ok {
+		t.Fatalf("diag bundle lacks the net section: %+v", bundle["net"])
+	}
+	if v, ok := net["route_localnet"].(bool); !ok || !v {
+		t.Fatalf("net.route_localnet = %+v, want true", net["route_localnet"])
+	}
+	bundle = diagCollect(nil, nil, false)
+	net = bundle["net"].(map[string]any)
+	if v, ok := net["route_localnet"].(bool); !ok || v {
+		t.Fatalf("net.route_localnet = %+v, want false", net["route_localnet"])
+	}
+}

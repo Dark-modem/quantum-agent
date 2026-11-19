@@ -203,7 +203,7 @@ func newBalHarness(t *testing.T) *balHarness {
 	h.mgr = mgr
 	h.now = time.Unix(1796470000, 0)
 	h.healthOK = map[string]bool{"t1": true, "t2": true}
-	h.bal = New(mgr, h.reg)
+	h.bal = balancer.New(mgr, h.reg)
 	h.bal.NowFn = func() time.Time { h.mu.Lock(); defer h.mu.Unlock(); return h.now }
 	realApply := balancer.ApplyNFTScript
 	balancer.ApplyNFTScript = func(script string) error {
@@ -444,7 +444,7 @@ func TestBalancerAllDownAndFlapping(t *testing.T) {
 }
 
 func TestRenderForwardNFTValidationShape(t *testing.T) {
-	script := RenderForwardNFT([]ForwardRender{
+	script := balancer.RenderForwardNFT([]balancer.ForwardRender{
 		{ID: "fw-web", ListenPort: 8443, TargetPort: 8443, Proto: "both", Targets: []balancer.BalTarget{
 			{TunnelID: "a", IP: "10.189.0.2", Weight: 70},
 			{TunnelID: "b", IP: "10.189.0.3", Weight: 30},

@@ -48,10 +48,10 @@ func RenderForwardNFT(rules []ForwardRender) string {
 	b.WriteString("table ip quantum-fwd {\n")
 	for _, r := range rules {
 		if r.Proto == "tcp" || r.Proto == "both" {
-			b.WriteString(renderForwardChain("tcp", r))
+			b.WriteString(RenderForwardChain("tcp", r))
 		}
 		if r.Proto == "udp" || r.Proto == "both" {
-			b.WriteString(renderForwardChain("udp", r))
+			b.WriteString(RenderForwardChain("udp", r))
 		}
 	}
 	b.WriteString("}\n")
@@ -70,7 +70,7 @@ func ChainID(forwardID, proto string) string {
 	return "fw_" + strings.ToLower(id) + "_" + proto
 }
 
-func renderForwardChain(proto string, r ForwardRender) string {
+func RenderForwardChain(proto string, r ForwardRender) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, " chain %s {\n", ChainID(r.ID, proto))
 	fmt.Fprintf(&b, "  type nat hook prerouting priority dstnat; policy accept;\n")
@@ -226,7 +226,7 @@ func forwardUsableTargets(r ForwardRender) (kept, dropped []BalTarget) {
 // traffic to a loopback address (127.0.0.0/8). Those rules need
 // net.ipv4.conf.all.route_localnet=1 (RUNBOOK ITEM 35) or the kernel
 // drops the martian packets — see routelocalnet.go.
-func scriptHasLoopbackDNAT(script string) bool {
+func ScriptHasLoopbackDNAT(script string) bool {
 	for _, line := range strings.Split(script, "\n") {
 		i := strings.Index(line, " dnat to ")
 		if i < 0 {
