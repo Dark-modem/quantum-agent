@@ -341,36 +341,6 @@ func requirePeerSecretHidden(next http.HandlerFunc) http.HandlerFunc {
 // handlers this tree carries (no handshake/apply-carrier/engine/ping/
 // status/wrap surface — those flows are controller-driven via the WSS
 // protocol now).
-func mountPeerRoutes(mux *http.ServeMux, base string) {
-	routes := []struct {
-		method, path string
-		h            http.HandlerFunc
-	}{
-		{"POST", "/api/peer/ping", handlePeerPing},
-		{"POST", "/api/peer/revpath-probe", handlePeerRevPathProbe},
-		{"POST", "/api/peer/sshfwd-install-key", handlePeerSSHFwdInstallKey},
-		{"POST", "/api/peer/swap-carrier", handlePeerSwapCarrier},
-		{"GET", "/api/peer/swap-status", handlePeerSwapStatus},
-		{"GET", "/api/peer/swap-request", handlePeerSwapRequestGet},
-		{"POST", "/api/peer/swap-request", handlePeerSwapRequest},
-	}
-	for _, rt := range routes {
-		mux.HandleFunc(rt.method+" "+base+rt.path, requirePeerAuth(rt.h))
-		guard := requirePeerSecretHidden
-		switch rt.path {
-		case "/api/peer/swap-request":
-			// A peer's foreign server knows its own tunnel token, not the
-			// Peer Link secret: it may still ask for a swap of its tunnel.
-			guard = requireTunnelSecretHidden
-		}
-		mux.HandleFunc(rt.method+" "+peerRoutePrefix+rt.path, guard(rt.h))
-	}
-	mux.HandleFunc("GET "+peerRoutePrefix+"/api/peer/rescue-offer", requireRescuePeerHidden(handlePeerRescueOffer))
-	mux.HandleFunc("POST "+peerRoutePrefix+"/api/peer/rescue-ack", requireRescuePeerHidden(handlePeerRescueAck))
-	// Anything else under the prefix (other paths, wrong methods) is a plain
-	// 404 rather than the catch-all redirect or a 405 that would reveal routes.
-	mux.HandleFunc(peerRoutePrefix+"/", http.NotFound)
-}
 
 // sendToPeer sends an HTTP request to the remote peer using dual-path fallback:
 // Path 1: Internal tunnel IP (e.g. http://10.10.10.1:8080/api/peer/...)

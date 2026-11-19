@@ -92,26 +92,8 @@ func TestNoBareHostPort(t *testing.T) {
 
 // TestPeerPatchIPv6 went with peers_edit.go in §6.A3 (its
 // handlePeersPatch entry point is deleted dead code).
-
-func TestRescueIPv6(t *testing.T) {
-	if ip, err := validRemoteIP(" 2001:DB8::5 "); err != nil || ip != "2001:db8::5" {
-		t.Errorf("IPv6 rescue peer: %q %v", ip, err)
-	}
-	for _, bad := range []string{"fe80::1", "::1", "ff02::1", "::"} {
-		if _, err := validRemoteIP(bad); err == nil {
-			t.Errorf("%s accepted", bad)
-		}
-	}
-	if fw := rescueFwNft(7000, "2001:db8::5"); !strings.Contains(fw, "tcp dport 7000 ip6 saddr != 2001:db8::5 counter drop") {
-		t.Errorf("IPv6 firewall rule:\n%s", fw)
-	}
-	if fw := rescueFwNft(7000, "203.0.113.5"); !strings.Contains(fw, "ip saddr != 203.0.113.5") {
-		t.Errorf("IPv4 firewall rule:\n%s", fw)
-	}
-	if d := rescueDnatNft("2001:db8::5", []int{443}); !strings.Contains(d, "dnat ip6 to 2001:db8::5") || !strings.Contains(d, "ip6 daddr 2001:db8::5") {
-		t.Errorf("IPv6 DNAT:\n%s", d)
-	}
-}
+// TestRescueIPv6 went with the rescue engine in §6.A3 (validRemoteIP and
+// the rescue nft builders are deleted dead code).
 
 func TestBundlesAndSetupIPv6(t *testing.T) {
 	// Backhaul without GRE carries either family; the GRE bundles stay IPv4

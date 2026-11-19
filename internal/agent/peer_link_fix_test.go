@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -76,41 +75,10 @@ func TestSendToPeerAddressesPeerNotLocalBasePath(t *testing.T) {
 	}
 }
 
-// H1: the handshake records the caller's base path and port, and answers
-// with ours.
-// H1: the fixed prefix needs the peer secret and otherwise looks like
-// nothing is there (404, never 401/405/redirect).
-func TestPeerFixedPrefixRoutes(t *testing.T) {
-	withPeerLink(t, PeerConfig{Role: "worker", PeerSecret: "s3cret", AutoPilotExplicit: true})
-	mux := http.NewServeMux()
-	mountPeerRoutes(mux, "/localbase")
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/localbase/", http.StatusFound) })
 
-	do := func(method, path, secret string) int {
-		req := httptest.NewRequest(method, path, bytes.NewReader([]byte(`{}`)))
-		if secret != "" {
-			req.Header.Set("X-Peer-Secret", secret)
-		}
-		rr := httptest.NewRecorder()
-		mux.ServeHTTP(rr, req)
-		return rr.Code
-	}
-	if c := do("POST", peerRoutePrefix+"/api/peer/ping", "s3cret"); c != http.StatusOK {
-		t.Fatalf("ping with secret: %d", c)
-	}
-	if c := do("POST", peerRoutePrefix+"/api/peer/ping", ""); c != http.StatusNotFound {
-		t.Fatalf("ping without secret: %d, want 404", c)
-	}
-	if c := do("POST", peerRoutePrefix+"/api/peer/ping", "wrong"); c != http.StatusNotFound {
-		t.Fatalf("ping with wrong secret: %d, want 404", c)
-	}
-	if c := do("GET", peerRoutePrefix+"/api/peer/handshake", ""); c != http.StatusNotFound {
-		t.Fatalf("wrong method: %d, want 404", c)
-	}
-	if c := do("POST", "/localbase/api/peer/ping", "s3cret"); c != http.StatusOK {
-		t.Fatalf("base-path route still needed for old peers: %d", c)
-	}
-}
+
+
+
 
 // M13: a status update must not overwrite settings saved in the meantime.
 func TestPeerStatusUpdateKeepsConcurrentEdits(t *testing.T) {
