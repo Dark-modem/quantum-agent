@@ -58,6 +58,7 @@ import (
 	"github.com/Dark-modem/quantum-agent/internal/balancer"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 	"github.com/Dark-modem/quantum-agent/internal/infra"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
@@ -283,7 +284,7 @@ func TestBalancerUDPFailoverLab(t *testing.T) {
 	// the apply seam is wrapped PASS-THROUGH (record + forward), never
 	// stubbed, so every asserted script was actually applied to the kernel
 	// INSIDE THE ROUTER netns.
-	fake := engine.NewFakeEngine("fake")
+	fake := faketest.NewFakeEngine("fake")
 	reg := engine.NewRegistry()
 	if err := reg.Register(fake); err != nil {
 		t.Fatal(err)

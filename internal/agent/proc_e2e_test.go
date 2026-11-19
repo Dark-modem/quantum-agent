@@ -36,7 +36,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
@@ -44,7 +44,7 @@ func TestAgentProcE2E(t *testing.T) {
 	if os.Getenv("AGENT_PROC_E2E") == "" {
 		t.Skip("AGENT_PROC_E2E not set (builds and runs the real agent binary)")
 	}
-	_ = engine.NewFakeEngine("fake") // framework anchor (the lab driver is env-gated)
+	_ = faketest.NewFakeEngine("fake") // framework anchor (the lab driver is env-gated)
 
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "quantum-agent")

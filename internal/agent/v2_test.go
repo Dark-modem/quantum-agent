@@ -15,6 +15,7 @@ import (
 
 	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
@@ -143,12 +144,12 @@ func resetV2Runtime() {
 	matrixDriverRegOnce = sync.Once{}
 }
 
-func registerV2TestDriver(t *testing.T) *engine.FakeEngine {
+func registerV2TestDriver(t *testing.T) *faketest.FakeEngine {
 	agentV2.mu.Lock()
 	agentV2AppliedRevision = ""
 	agentV2.mu.Unlock()
 	t.Helper()
-	fake := engine.NewFakeEngine("fake")
+	fake := faketest.NewFakeEngine("fake")
 	agentV2TestDriver = fake
 	// Force the next AgentEngines() to rebuild with the test driver even
 	// if an earlier test already consumed the sync.Once.
@@ -179,7 +180,7 @@ func TestHardeningOpRouting(t *testing.T) {
 // ---- balancer (STEP 4) ----
 
 type balHarness struct {
-	fake *engine.FakeEngine
+	fake *faketest.FakeEngine
 	bal  *balancer.ForwardBalancer
 	mgr  *engine.Manager
 	reg  *engine.Registry
@@ -193,7 +194,7 @@ type balHarness struct {
 
 func newBalHarness(t *testing.T) *balHarness {
 	t.Helper()
-	fake := engine.NewFakeEngine("fake")
+	fake := faketest.NewFakeEngine("fake")
 	h := &balHarness{reg: engine.NewRegistry()}
 	if err := h.reg.Register(fake); err != nil {
 		t.Fatal(err)

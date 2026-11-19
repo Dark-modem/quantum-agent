@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
@@ -38,10 +39,10 @@ func mustJSONRaw2(t *testing.T, v any) json.RawMessage {
 	return b
 }
 
-func newProcTestManager(t *testing.T, drv engine.Driver) (*engine.Manager, *engine.FakeEngine) {
+func newProcTestManager(t *testing.T, drv engine.Driver) (*engine.Manager, *faketest.FakeEngine) {
 	t.Helper()
 	reg := engine.NewRegistry()
-	fake := engine.NewFakeEngine("fake")
+	fake := faketest.NewFakeEngine("fake")
 	if err := reg.Register(fake); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +53,7 @@ func newProcTestManager(t *testing.T, drv engine.Driver) (*engine.Manager, *engi
 }
 
 func TestAgentSampleTunnelProcIdleDoesNoProcReads(t *testing.T) {
-	mgr, _ := newProcTestManager(t, &stubPIDDriver{Driver: engine.NewFakeEngine("procy")})
+	mgr, _ := newProcTestManager(t, &stubPIDDriver{Driver: faketest.NewFakeEngine("procy")})
 	var reads int64
 	procReadCounter = &reads
 	t.Cleanup(func() { procReadCounter = nil })
@@ -74,7 +75,7 @@ func TestAgentSampleTunnelProcIdleDoesNoProcReads(t *testing.T) {
 }
 
 func TestAgentSampleTunnelProcTreeRSSAndCPU(t *testing.T) {
-	drv := &stubPIDDriver{Driver: engine.NewFakeEngine("procy")}
+	drv := &stubPIDDriver{Driver: faketest.NewFakeEngine("procy")}
 	mgr, _ := newProcTestManager(t, drv)
 	var reads int64
 	procReadCounter = &reads
@@ -148,7 +149,7 @@ func TestAgentSampleTunnelProcTreeRSSAndCPU(t *testing.T) {
 }
 
 func TestAgentSampleTunnelProcUnreadableMeansUnknownNotZero(t *testing.T) {
-	drv := &stubPIDDriver{Driver: engine.NewFakeEngine("procy")}
+	drv := &stubPIDDriver{Driver: faketest.NewFakeEngine("procy")}
 	mgr, _ := newProcTestManager(t, drv)
 	if res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "procy", Enabled: true}},

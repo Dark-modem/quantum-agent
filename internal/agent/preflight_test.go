@@ -18,6 +18,7 @@ import (
 	protocol "github.com/Dark-modem/quantum-protocol"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 )
 
 // pfPortSeams installs a synthetic ss listing + ephemeral range and
@@ -202,7 +203,7 @@ func TestPreflightReapplySameParamsSkipsPortCheck(t *testing.T) {
 // allowance is exercisable without a real process (FakeEngine is not a
 // ProcessInfoer).
 type pfProcDriver struct {
-	*engine.FakeEngine
+	*faketest.FakeEngine
 	pid int
 }
 
@@ -227,7 +228,7 @@ func TestPreflightSelfHeldPIDAllowed(t *testing.T) {
 	// 4242 (the tunnel's "own process") and rebuild the runtime. The
 	// rebuild wipes the manager (and the in-memory fence floor), so the
 	// tunnel is re-established under a newer revision.
-	procDriver := &pfProcDriver{FakeEngine: engine.NewFakeEngine("fake"), pid: 4242}
+	procDriver := &pfProcDriver{FakeEngine: faketest.NewFakeEngine("fake"), pid: 4242}
 	pfSwapTestDriver(t, procDriver)
 	redo := pfDesiredWithTunnel("1796470000000000306", `{"listen_port":5201}`)
 	if ack := agentApplyDesiredV2(&redo); !ack.OK {

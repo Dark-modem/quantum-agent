@@ -27,6 +27,7 @@ import (
 
 	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
 	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
@@ -301,7 +302,7 @@ func TestBalancerNoNftChurnOnRepeatedReconcile(t *testing.T) {
 // paramsForwardDriver is a minimal driver whose forward address comes
 // ONLY from engine_params (like the lab driver) — the exact shape that
 // the old params-less forwardAddressOf fabrication broke.
-type paramsForwardDriver struct{ *engine.FakeEngine }
+type paramsForwardDriver struct{ *faketest.FakeEngine }
 
 func (p *paramsForwardDriver) ForwardAddress(inst engine.Instance) (string, int, bool) {
 	var v struct {
@@ -322,7 +323,7 @@ func (p *paramsForwardDriver) ForwardAddress(inst engine.Instance) (string, int,
 // artifact).
 func TestBalancerForwardAddressFromManagerInstance(t *testing.T) {
 	h := newBalHarness(t)
-	if err := h.reg.Register(&paramsForwardDriver{FakeEngine: engine.NewFakeEngine("paramdrv")}); err != nil {
+	if err := h.reg.Register(&paramsForwardDriver{FakeEngine: faketest.NewFakeEngine("paramdrv")}); err != nil {
 		t.Fatal(err)
 	}
 	d := newWeightTestDesired(t)

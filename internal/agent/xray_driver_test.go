@@ -28,9 +28,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Dark-modem/quantum-agent/internal/infra"
-
 	"github.com/Dark-modem/quantum-agent/internal/engine"
+	"github.com/Dark-modem/quantum-agent/internal/engine/faketest"
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // xrayTestArtifact builds a signed xray-style tar.gz: the single binary
@@ -543,7 +543,7 @@ func TestXrayMixedManagerShape(t *testing.T) {
 	}
 	// Lab fake for the matrix stand-in (needs a forward address).
 	origLab := agentV2TestDriver
-	lab := engine.NewFakeEngine("fake")
+	lab := faketest.NewFakeEngine("fake")
 	agentV2TestDriver = lab
 	lab.SetForwardAddress("t-matrix", "10.203.0.9", 5201)
 	matrixDriverRegOnce = sync.Once{}
