@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func matrixDashboardFixture(t *testing.T, role string, service, connected bool) (*hostView, matrixState) {
@@ -52,27 +51,6 @@ func TestMatrixServiceIsNotMeshConnection(t *testing.T) {
 	}
 }
 
-func TestMatrixTrafficAndFleetIsolation(t *testing.T) {
-	resetTrafficState(t)
-	data := devLines(map[string][2]uint64{"qmx0": {100, 200}, "ens5": {999999, 999999}})
-	cur := trafficTunnelIfs(data)
-	if len(cur) != 1 || cur["qmx0"] != [2]uint64{100, 200} {
-		t.Fatalf("qmx0 real counters missing or NIC counted: %+v", cur)
-	}
-	if cur := trafficTunnelIfs(devLines(map[string][2]uint64{"ens5": {999, 999}})); len(cur) != 0 {
-		t.Fatalf("invented Matrix traffic: %+v", cur)
-	}
-	v, st := matrixDashboardFixture(t, "node", true, true)
-	snap := &HubSnapshot{At: time.Now(), Local: tunnelStatus{Matrix: matrixStatusFrom(st, v)}}
-	links := snap.MatrixLinks()
-	if len(links) != 1 || links[0].Engine != "matrix" || links[0].GreUp || links[0].FrpUp || !links[0].Linked || links[0].Rx == nil {
-		t.Fatalf("fleet mislabeled Matrix: %+v", links)
-	}
-	if len(snap.All()) != 0 {
-		t.Fatal("Matrix polluted legacy tunnel records")
-	}
-	targets := icmpTargets(snap)
-	if _, ok := targets[matrixProbeKey(matrixHubIP)]; !ok {
-		t.Fatalf("no qmx0-bound background mesh probe: %+v", targets)
-	}
-}
+// TestMatrixTrafficAndFleetIsolation went with its dead entry points
+// (trafficTunnelIfs, HubSnapshot.All/MatrixLinks) in §6.A3 — tests of the
+// legacy monolith's dashboard path, which the agent no longer routes.

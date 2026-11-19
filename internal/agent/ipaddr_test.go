@@ -90,24 +90,8 @@ func TestNoBareHostPort(t *testing.T) {
 	}
 }
 
-func TestPeerPatchIPv6(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	defer func() { configDir = old }()
-	_ = os.WriteFile(peersFile(), []byte(`{"peers":[
-	 {"id":1,"name":"gre","local_pub":"1.2.3.4","remote_pub":"198.51.100.1","frp_port":25000,"local_gre":"10.10.10.2","peer_gre":"10.10.10.1","ports":[80],"token":"t1","gre_if":"gre-t1","frps_svc":"frps"},
-	 {"id":2,"name":"bh","engine":"backhaul","local_pub":"1.2.3.4","remote_pub":"198.51.100.2","frp_port":25001,"ports":[81],"token":"t2","gre_if":"none","frps_svc":"backhaul-server-2"}]}`), 0600)
-	rr := httptest.NewRecorder()
-	handlePeersPatch(rr, httptest.NewRequest("PATCH", "/api/peers", strings.NewReader(`{"id":1,"remote_pub":"2001:db8::9"}`)))
-	if rr.Code != 400 || !strings.Contains(rr.Body.String(), "IPv4") {
-		t.Errorf("GRE peer to IPv6: %d %s", rr.Code, rr.Body.String())
-	}
-	rr = httptest.NewRecorder()
-	handlePeersPatch(rr, httptest.NewRequest("PATCH", "/api/peers", strings.NewReader(`{"id":2,"remote_pub":"2001:db8::9"}`)))
-	if strings.Contains(rr.Body.String(), "E-PEER-07") {
-		t.Errorf("Backhaul peer without GRE to IPv6 rejected: %d %s", rr.Code, rr.Body.String())
-	}
-}
+// TestPeerPatchIPv6 went with peers_edit.go in §6.A3 (its
+// handlePeersPatch entry point is deleted dead code).
 
 func TestRescueIPv6(t *testing.T) {
 	if ip, err := validRemoteIP(" 2001:DB8::5 "); err != nil || ip != "2001:db8::5" {

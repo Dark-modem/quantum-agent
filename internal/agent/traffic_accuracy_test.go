@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,29 @@ import (
 )
 
 // The bugs behind wrong totals and speeds, one test each.
+
+// resetTrafficState (was dashboard_test.go's helper; that file's remaining
+// test went with the dead isTunnelInterface in §6.A3) zeroes the live
+// traffic state between these tests.
+func resetTrafficState(t *testing.T) {
+	t.Helper()
+	old := configDir
+	configDir = t.TempDir()
+	trafficStateMu.Lock()
+	trafficStateInit, lifetimeUp, lifetimeDown, lastRawUp, lastRawDown, lastRawIf = false, 0, 0, 0, 0, nil
+	lastSampleAt, speedDeltaUp, speedDeltaDown, currentSpeedUp, currentSpeedDown = time.Time{}, 0, 0, 0, 0
+	trafficStateMu.Unlock()
+	t.Cleanup(func() { configDir = old })
+}
+
+// devLines renders a /proc/net/dev snippet (was dashboard_test.go's helper).
+func devLines(ifs map[string][2]uint64) string {
+	s := "Inter-|   Receive |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets\n"
+	for name, c := range ifs {
+		s += fmt.Sprintf("  %s: %d 1 0 0 0 0 0 0 %d 1 0 0 0 0 0 0\n", name, c[0], c[1])
+	}
+	return s
+}
 
 // Two samplers shared the traffic state: the snapshot handed in a
 // /proc/net/dev read seconds before the recorder's fresh one. Processed after
@@ -200,13 +224,5 @@ func TestCarrierTagCounters(t *testing.T) {
 		if tags[tag] != want {
 			t.Errorf("%s = %v, want %v (all: %v)", tag, tags[tag], want, tags)
 		}
-	}
-}
-
-// The base tunnel and Backhaul peers without GRE get their own counters, so
-// the Tunnel tab can show their speeds.
-func TestSpoofInterfaceIsATunnel(t *testing.T) {
-	if !isTunnelInterface(spoofIface) {
-		t.Fatal("the Spoof tunnel's WireGuard interface carries tunnel traffic")
 	}
 }

@@ -4,6 +4,14 @@ package agent
 // controller. In the separated architecture, the agent computes its own
 // status locally using these lightweight view types. The controller
 // receives agent-reported data through the WSS protocol.
+//
+// REFACTOR-PLAN-AGENT §6.A3: the 29 prod-dead helpers of the old 50
+// (deadcode RTA from main — writeJSON/writeAPIError, the proxy/auth pair,
+// the snapshot-age/usage-response builders, the CSRF machinery, the
+// dashboard interface classifiers, …) are deleted together with the
+// mutually-dead usage cluster they referenced (traffic_usage.go,
+// usage_compat.go, spoof.go). The types below stay: live code (the
+// snapshot builders, alerts, tunnel health, the drivers) references them.
 
 import (
 	"crypto/hmac"
@@ -11,7 +19,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -35,7 +42,8 @@ func (s *agentSeam[F]) get() F  { s.mu.RLock(); defer s.mu.RUnlock(); return s.f
 func (s *agentSeam[F]) set(f F) { s.mu.Lock(); s.fn = f; s.mu.Unlock() }
 
 // HubSnapshot is a minimal stub: the agent does not build hub snapshots.
-// Referenced by carrieradvisor.go and tunnelhealth.go for type compatibility.
+// Referenced by tunnelhealth.go and the snapshot builders for type
+// compatibility.
 type HubSnapshot struct {
 	At            time.Time
 	Seq           uint64
@@ -57,7 +65,7 @@ type HubSnapshot struct {
 	// CountersAt is when DevData and the carrier counters were read: every
 	// speed (dashboard, per link) is bytes moved between two CountersAt.
 	CountersAt time.Time
-	// Carrier: the Backhaul/Bagher port counters (carrier_traffic.go), in
+	// Carrier: the Backhaul/Bagher port counters (acct.go), in
 	// total and per tunnel.
 	CarrierRx, CarrierTx uint64
 	CarrierOK            bool
@@ -83,7 +91,7 @@ type PeerHandshakeRequest struct {
 
 // alertTracker tracks alert states for the agent's local alert
 // evaluation (struct shape ported verbatim from the monolith alerts.go;
-// resalerts.go reads the fields directly).
+// the alerts machinery reads the fields directly).
 type alertTracker struct {
 	mu       sync.Mutex
 	last     map[string]string
@@ -91,13 +99,22 @@ type alertTracker struct {
 	primed   bool
 }
 
-func newAlertTracker() *alertTracker {
-	return &alertTracker{last: map[string]string{}, lastSent: map[string]time.Time{}}
-}
-
 // linkSnap is a link snapshot view DTO.
 type linkSnap struct {
 	Name, State, Why string
+}
+
+// maxPeers is the foreign-server cap; quantum.sh enforces the same value.
+// §6.A3 note: peers_edit.go (this func's original home) is deleted;
+// setup.go's legacy handleSetupPost — itself prod-dead, that file being
+// outside this stage's named scope — still calls it.
+func maxPeers() int {
+	if v := os.Getenv("GRE_MAX_PEERS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 10
 }
 
 // primaryInterface returns the outbound-facing interface name.
@@ -126,7 +143,7 @@ type hostView struct {
 	serverCounters map[string][2]uint64 // physical host NICs only: received, transmitted
 	serverKnown    bool
 	bootID         string
-	// Backhaul/Bagher port counters, read right after devData (carrier_traffic.go)
+	// Backhaul/Bagher port counters, read right after devData (acct.go)
 	carrierRx, carrierTx uint64
 	carrierOK            bool
 	carrierTags          map[string][2]uint64
@@ -153,7 +170,9 @@ func (v *hostView) traffic(ifname string) (rx, tx *uint64) {
 }
 
 // carrierTraffic is the port counters of one Backhaul unit or Bagher link
-// (a tunnel without an interface of its own).
+// (a tunnel without an interface of its own). §6.A3 note: prod-unreachable
+// (snapshot_compat.go's dead mainTunnelFrom — that file being outside this
+// stage's named scope — still calls it).
 func (v *hostView) carrierTraffic(tag string) (rx, tx *uint64) {
 	c, ok := v.carrierTags[tag]
 	if !ok || tag == "" {
@@ -222,11 +241,6 @@ func LogSecurityAudit(event, user, ip, detail string) {
 	// The agent logs locally; no HTTP or database involved.
 }
 
-// syncCarrierToPeer is a no-op on the agent: carrier sync is controller-managed.
-func syncCarrierToPeer(ends interface{}, engine, transport string) (string, error) {
-	return "", nil
-}
-
 // trimLen truncates a string to n characters.
 func trimLen(s string, n int) string {
 	if len(s) <= n {
@@ -235,19 +249,22 @@ func trimLen(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// writeJSON writes JSON to an HTTP response (used by the agent's local
-// diagnostic endpoints; the agent has no management UI listener).
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
-}
-
 // --- Controller-only stubs ---
 // The agent has no HTTP management server. These stubs satisfy compilation
 // for engine files that reference controller HTTP helpers. They are never
 // called at runtime because the agent has no HTTP routes.
 
 var frpDir = "/etc/frp"
+
+// writeJSON writes JSON to an HTTP response. §6.A3 note: its only remaining
+// callers are carrier.go's legacy /api/carrier handlers — prod-unreachable,
+// but a live security test (TestCarrierSetWSSPortAndSNI, the hostile-input
+// round) drives handleCarrierPost directly, so the handler pair and these
+// two helpers stay until the architect decides where that validation lives.
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
 
 // writeAPIError is the single way backend handlers report failures:
 // stable JSON {error_code, error, hint} + journal entry.
@@ -273,7 +290,101 @@ func writeAPIError(w http.ResponseWriter, r *http.Request, code, detail string) 
 	})
 }
 
-func linkLabelFromString(s string) string { return s }
+// IsTrustedProxy checks whether a given IP address belongs to TRUSTED_PROXY_IPS.
+// Loopback is NOT trusted implicitly: tunnels also deliver outside clients
+// from 127.0.0.1 (Session 4 gate). §6.A3 note: prod-unreachable on the agent
+// (kept only because matrix.go/carrier_swap.go's legacy handlers — purged
+// later in this stage — still call it); the live semantics are the panel's.
+func IsTrustedProxy(ipStr string) bool {
+	ipStr = strings.TrimSpace(ipStr)
+	if ipStr == "" {
+		return false
+	}
+	if strings.EqualFold(ipStr, "localhost") {
+		ipStr = "127.0.0.1"
+	}
+	parsedIP := net.ParseIP(ipStr)
+
+	raw := os.Getenv("TRUSTED_PROXY_IPS")
+	if raw == "" {
+		return false
+	}
+
+	if parsedIP == nil {
+		return false
+	}
+
+	parts := strings.Split(raw, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+
+		// CIDR notation
+		if strings.Contains(p, "/") {
+			_, subnet, err := net.ParseCIDR(p)
+			if err == nil && subnet.Contains(parsedIP) {
+				return true
+			}
+			continue
+		}
+
+		// Exact IP match
+		if target := net.ParseIP(p); target != nil {
+			if target.Equal(parsedIP) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ClientIP extracts the real client IP; X-Forwarded-For is trusted only
+// behind a verified reverse proxy (see IsTrustedProxy). Same §6.A3 note.
+func ClientIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteHost = strings.Trim(r.RemoteAddr, "[]")
+	}
+
+	// Only trust forwarding headers if the immediate peer is a verified reverse proxy
+	if IsTrustedProxy(remoteHost) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// Session 4 gate: with nginx's $proxy_add_x_forwarded_for the
+			// TRUSTED proxy APPENDS the real client address as the LAST
+			// entry — every earlier entry was supplied by the client and
+			// is therefore spoofable. Take the last non-empty hop.
+			parts := strings.Split(xff, ",")
+			var candidate string
+			for i := len(parts) - 1; i >= 0; i-- {
+				if c := strings.TrimSpace(parts[i]); c != "" {
+					candidate = c
+					break
+				}
+			}
+			if candidate != "" {
+				if host, _, err := net.SplitHostPort(candidate); err == nil {
+					return host
+				}
+				return strings.Trim(candidate, "[]")
+			}
+		}
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			cand := strings.TrimSpace(xri)
+			if host, _, err := net.SplitHostPort(cand); err == nil {
+				return host
+			}
+			return strings.Trim(cand, "[]")
+		}
+	}
+
+	return remoteHost
+}
 
 // --- Peer coordination stubs ---
 // The agent does NOT manage the peer registry or coordinate with peers.
@@ -294,10 +405,6 @@ type PeerApplyCarrierRequest struct {
 func applyBenchmarkCarrier(target string) (string, error) {
 	return "Applied benchmark carrier " + target, nil
 }
-
-// Extended peerRecord fields that only exist in the controller's registry.
-// The agent's local peerRecord doesn't have these — they come from the
-// controller's desired state via the WSS protocol.
 
 // CleanHost parses and extracts the raw host or IP from an input string,
 // stripping URL schemes (http://, https://, etc.), ports, paths, and IPv6 brackets.
@@ -392,104 +499,6 @@ func truncateForError(b []byte) string {
 	return s
 }
 
-// IsTrustedProxy checks whether a given IP address belongs to TRUSTED_PROXY_IPS.
-//
-// Loopback is NOT trusted implicitly: tunnels (frps, backhaul, tls-proxy) also
-// deliver outside clients from 127.0.0.1, and trusting it let anyone set
-// X-Forwarded-For to dodge the per-IP login lockout and the terminal allowlist.
-// A local nginx/Caddy needs TRUSTED_PROXY_IPS=127.0.0.1 (see the generated
-// reverse-proxy config).
-func IsTrustedProxy(ipStr string) bool {
-	ipStr = strings.TrimSpace(ipStr)
-	if ipStr == "" {
-		return false
-	}
-	if strings.EqualFold(ipStr, "localhost") {
-		ipStr = "127.0.0.1"
-	}
-	parsedIP := net.ParseIP(ipStr)
-
-	raw := os.Getenv("TRUSTED_PROXY_IPS")
-	if raw == "" {
-		return false
-	}
-
-	if parsedIP == nil {
-		return false
-	}
-
-	parts := strings.Split(raw, ",")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-
-		// CIDR notation
-		if strings.Contains(p, "/") {
-			_, subnet, err := net.ParseCIDR(p)
-			if err == nil && subnet.Contains(parsedIP) {
-				return true
-			}
-			continue
-		}
-
-		// Exact IP match
-		if target := net.ParseIP(p); target != nil {
-			if target.Equal(parsedIP) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ClientIP extracts the real client IP.
-// Header X-Forwarded-For is ONLY trusted if the direct connection comes from a trusted proxy.
-func ClientIP(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-
-	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		remoteHost = strings.Trim(r.RemoteAddr, "[]")
-	}
-
-	// Only trust forwarding headers if the immediate peer is a verified reverse proxy
-	if IsTrustedProxy(remoteHost) {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// Session 4 gate: with nginx's $proxy_add_x_forwarded_for the
-			// TRUSTED proxy APPENDS the real client address as the LAST
-			// entry — every earlier entry was supplied by the client and
-			// is therefore spoofable. Take the last non-empty hop.
-			parts := strings.Split(xff, ",")
-			var candidate string
-			for i := len(parts) - 1; i >= 0; i-- {
-				if c := strings.TrimSpace(parts[i]); c != "" {
-					candidate = c
-					break
-				}
-			}
-			if candidate != "" {
-				if host, _, err := net.SplitHostPort(candidate); err == nil {
-					return host
-				}
-				return strings.Trim(candidate, "[]")
-			}
-		}
-		if xri := r.Header.Get("X-Real-IP"); xri != "" {
-			cand := strings.TrimSpace(xri)
-			if host, _, err := net.SplitHostPort(cand); err == nil {
-				return host
-			}
-			return strings.Trim(cand, "[]")
-		}
-	}
-
-	return remoteHost
-}
-
 // effectiveTLSPort is the agent-side stand-in for the controller's TLS
 // port resolution: the agent has no TLS settings of its own, so callers
 // get the documented default peer TLS port.
@@ -512,8 +521,9 @@ func (s *HubSnapshot) AgeMs() int64 {
 	return time.Since(s.At).Milliseconds()
 }
 
-// PeersAged is Peers (without the main tunnel) with the snapshot age set
-// (ported verbatim from the monolith snapshot.go).
+// PeersAged is Peers (without the main tunnel) with the snapshot age set.
+// §6.A3 note: prod-unreachable (tunnel.go — outside this stage's named
+// scope — still compiles against it).
 func (s *HubSnapshot) PeersAged() []peerLive {
 	age := s.AgeMs()
 	out := append([]peerLive(nil), s.Peers...)
@@ -523,16 +533,201 @@ func (s *HubSnapshot) PeersAged() []peerLive {
 	return out
 }
 
-// setSnapshotAgeHeader tells clients how old the served data is
-// (ported verbatim from the monolith snapshot.go).
+// setSnapshotAgeHeader tells clients how old the served data is. §6.A3
+// note: prod-unreachable; tunnel.go (outside this stage's scope) still
+// compiles against it.
 func setSnapshotAgeHeader(w http.ResponseWriter, s *HubSnapshot) {
 	w.Header().Set("X-Snapshot-Age-Ms", strconv.FormatInt(s.AgeMs(), 10))
 }
 
-// clientIP is the auth-path client IP; the agent never sits behind the
-// controller's trusted-proxy chain, so this is the immediate peer
-// address (see ClientIP above for the rationale).
-func clientIP(r *http.Request) string { return ClientIP(r) }
+// All returns the main tunnel (when present) followed by the peers. §6.A3
+// note: prod-unreachable (snapshot_compat.go's dead icmpTargets — that file
+// being outside this stage's named scope — still calls it).
+func (s *HubSnapshot) All() []peerLive {
+	age := s.AgeMs()
+	out := make([]peerLive, 0, len(s.Peers)+1)
+	if s.Main != nil {
+		out = append(out, *s.Main)
+	}
+	out = append(out, s.Peers...)
+	for i := range out {
+		out[i].SnapshotAgeMs = age
+	}
+	return out
+}
+
+// spoofIface is the interface name the legacy spoof tunnel used ("wg-spoof").
+// §6.A3 note: spoof.go is deleted; this survives only for isTunnelInterface
+// below (trafficstate_compat.go's dead trafficSample — out of this stage's
+// scope — still compiles against it). KERNEL-RELEVANT: hosts that ever ran
+// spoof may still have a wg-spoof interface.
+var spoofIface = "wg-spoof"
+
+// trafficTunnelIfs parses /proc/net/dev rows for tunnel interfaces. §6.A3
+// note: prod-unreachable (trafficstate_compat.go's dead trafficSample —
+// outside this stage's scope — still calls it).
+func trafficTunnelIfs(devData string) map[string][2]uint64 {
+	cur := map[string][2]uint64{}
+	for _, line := range strings.Split(devData, "\n") {
+		i := strings.Index(line, ":")
+		if i < 0 {
+			continue
+		}
+		ifname := strings.TrimSpace(line[:i])
+		if !isTunnelInterface(ifname) {
+			continue
+		}
+		f := strings.Fields(line[i+1:])
+		if len(f) < 9 {
+			continue
+		}
+		r, e1 := strconv.ParseUint(f[0], 10, 64)
+		t, e2 := strconv.ParseUint(f[8], 10, 64)
+		if e1 == nil && e2 == nil {
+			cur[ifname] = [2]uint64{r, t}
+		}
+	}
+	return cur
+}
+
+// getKnownPeerIfs lists the peers' GRE interfaces. §6.A3 note: reachable
+// only from isTunnelInterface (see above).
+func getKnownPeerIfs() map[string]bool {
+	m := make(map[string]bool)
+	for _, q := range loadPeers() {
+		if q.GreIf != "" {
+			m[q.GreIf] = true
+		}
+	}
+	return m
+}
+
+// isTunnelInterface determines if an interface is a GRE or Backhaul tunnel.
+// §6.A3 note: prod-unreachable (dead callers in out-of-scope files).
+func isTunnelInterface(ifname string) bool {
+	if ifname == "lo" || ifname == "gre0" || ifname == "gretap0" || ifname == "erspan0" {
+		return false
+	}
+	if strings.HasPrefix(ifname, "docker") || strings.HasPrefix(ifname, "veth") ||
+		strings.HasPrefix(ifname, "br-") || strings.HasPrefix(ifname, "dummy") ||
+		strings.HasPrefix(ifname, "eth") || strings.HasPrefix(ifname, "ens") ||
+		strings.HasPrefix(ifname, "enp") || strings.HasPrefix(ifname, "wl") {
+		return false
+	}
+	if strings.HasPrefix(ifname, "gre-") || strings.HasPrefix(ifname, "tun") || ifname == spoofIface || ifname == matrixIfaceName {
+		return true
+	}
+	known := getKnownPeerIfs()
+	if known[ifname] {
+		return true
+	}
+	if data, err := os.ReadFile(filepath.Join("/sys/class/net", ifname, "type")); err == nil {
+		t := strings.TrimSpace(string(data))
+		if t == "778" || t == "823" {
+			return true
+		}
+	}
+	return false
+}
+
+// purgeTunnelUsage was the legacy usage-ledger purge; the store went with
+// traffic_usage.go in §6.A3. Its remaining callers (sshfwd.go/matrix.go/
+// tunnel.go/xray.go legacy handlers — files outside this stage's named
+// scope) are themselves prod-dead, so a no-op preserves the compiled shape
+// with identical runtime behavior.
+func purgeTunnelUsage(ids ...string) {}
+
+// counterDelta returns the monotonic counter growth between two reads.
+// §6.A3 note: prod-unreachable (trafficstate_compat.go's dead trafficSample
+// — that file being outside this stage's named scope — still calls it).
+func counterDelta(prev, cur uint64) uint64 {
+	if cur >= prev {
+		return cur - prev
+	}
+	return cur
+}
+
+// usageMainKey is the usage-ledger key of the base tunnel ("main"), from the
+// deleted traffic_usage.go. §6.A3 note: tunnel.go — outside this stage's
+// named scope — still compiles against it.
+const usageMainKey = "main"
+
+// countersAtMs renders a snapshot's counter timestamp for the UI. §6.A3
+// note: prod-unreachable (tunnel.go — outside this stage's named scope —
+// still compiles against it).
+func countersAtMs(s *HubSnapshot) any {
+	if s == nil || s.CountersAt.IsZero() {
+		return nil
+	}
+	return s.CountersAt.UnixMilli()
+}
+
+// CSRF token machinery (ported verbatim from the monolith security.go).
+// §6.A3 note: prod-unreachable (tunnel.go — outside this stage's named
+// scope — still compiles against it); the live CSRF semantics are the
+// panel's.
+var (
+	csrfKey   [32]byte
+	csrfKeyMu sync.Once
+)
+
+func initCSRFKey() {
+	csrfKeyMu.Do(func() {
+		if _, err := rand.Read(csrfKey[:]); err != nil {
+			copy(csrfKey[:], "gre-panel-csrf-fallback-key-32b")
+		}
+	})
+}
+
+// GenerateCSRFToken derives a cryptographically secure CSRF token tied to a
+// session token. §6.A3 note: prod-unreachable (tunnel.go — outside this
+// stage's named scope — still compiles against it).
+func GenerateCSRFToken(sessionToken string) string {
+	initCSRFKey()
+	mac := hmac.New(sha256.New, csrfKey[:])
+	mac.Write([]byte("gre-csrf:" + sessionToken))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// logFinding is one summarized log signature (monolith errors.go).
+type logFinding struct {
+	Code  string `json:"code"`
+	Msg   string `json:"msg"`
+	Hint  string `json:"hint"`
+	Count int    `json:"count"`
+	Line  string `json:"line"` // first matching line (trimmed)
+}
+
+// summarizeLogs folds raw log text into per-code findings for the UI header.
+// §6.A3 note: prod-unreachable (tunnel.go — outside this stage's named
+// scope — still compiles against it).
+func summarizeLogs(raw string) []logFinding {
+	by := map[string]*logFinding{}
+	order := []string{}
+	for _, ln := range strings.Split(raw, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		code, _ := matchLogCode(ln)
+		if code == "" {
+			continue
+		}
+		f, ok := by[code]
+		if !ok {
+			info := errCatalog[code]
+			f = &logFinding{Code: code, Msg: info.Msg, Hint: info.Hint, Line: trimLen(ln, 220)}
+			by[code] = f
+			order = append(order, code)
+		}
+		f.Count++
+	}
+	out := []logFinding{}
+	for _, c := range order {
+		out = append(out, *by[c])
+	}
+	return out
+}
 
 // ensureWatchdogTimer is a no-op on the agent: the quantum-watchdog
 // timer is controller-host machinery (systemd timer management stays
@@ -569,10 +764,10 @@ func getOutboundIP() string {
 // agent has no snapshot collector, so this is always a fresh local read.
 func currentLocal() tunnelStatus { return localStatus() }
 
-// authed reports an authenticated admin session. The agent runs no web
-// session machinery, so this is fail-closed false; rescue endpoints stay
-// reachable through their own mechanisms (rescuePeerAllowed / ClientIP
-// match), exactly as requireRescuePeerAuth composes them.
+// authed reports an authenticated admin session: fail-closed false on the
+// agent (no web session machinery). §6.A3 note: prod-unreachable here
+// (rescue.go's legacy handlers — purged later in this stage — still call
+// it); the live session semantics are the panel's.
 func authed(r *http.Request) bool { return false }
 
 // mu is the panel/agent global config lock (monolith main.go global) —
@@ -595,15 +790,6 @@ const panelScriptName = "quantum.sh"
 // E-INSTALL-02 instead of being replaced.
 func syncPanelScript() {}
 
-// counterDelta returns the monotonic counter growth between two reads
-// (ported verbatim from the monolith dashboard.go).
-func counterDelta(prev, cur uint64) uint64 {
-	if cur >= prev {
-		return cur - prev
-	}
-	return cur
-}
-
 // ClusterConfig is a minimal stand-in for the controller's cluster
 // subsystem (cluster.go): pools of foreign servers shared by topologies.
 // The agent's port-clash check (setup_ports.go) reads Pools; on the
@@ -616,169 +802,10 @@ type ClusterPool struct {
 	Port int
 }
 
+// loadClusterConfig returns the agent's (empty) cluster view. §6.A3 note:
+// prod-unreachable (setup_ports.go's dead peerPortClash — that file being
+// outside this stage's named scope — still calls it).
 func loadClusterConfig() ClusterConfig { return ClusterConfig{} }
-
-// usageSnapshotAliases maps counter identities onto canonical usage IDs
-// (ported verbatim from the monolith topology_usage.go; requires only
-// peerRecord/HubSnapshot fields the agent tree carries).
-func usageSnapshotAliases(snapshot *HubSnapshot) map[string]string {
-	aliases := map[string]string{"bagher:1": "bagher"}
-	if snapshot == nil {
-		return aliases
-	}
-	for _, p := range snapshot.Peers {
-		if p.ID <= 0 {
-			continue
-		}
-		main := p.GreIf == "gre-tunnel"
-		if p.NoGre && p.FrpsSvc != "" {
-			svc := snapshot.Local.FrpSvc
-			if snapshot.Main != nil && snapshot.Main.FrpsSvc != "" {
-				svc = snapshot.Main.FrpsSvc
-			}
-			main = p.FrpsSvc == svc
-		}
-		if main {
-			aliases["peer:"+strconv.Itoa(p.ID)] = "main"
-		}
-	}
-	return aliases
-}
-
-// topologyUsageKey maps a usage id to its ledger key (ported verbatim
-// from the monolith topology_usage.go).
-func topologyUsageKey(id string) string {
-	if strings.HasPrefix(id, "peer:") {
-		return "p" + strings.TrimPrefix(id, "peer:")
-	}
-	return id
-}
-
-// All returns the main tunnel (when present) followed by the peers. The records
-// are copies carrying this request's snapshot age; the snapshot stays immutable
-// (ported verbatim from the monolith snapshot.go).
-func (s *HubSnapshot) All() []peerLive {
-	age := s.AgeMs()
-	out := make([]peerLive, 0, len(s.Peers)+1)
-	if s.Main != nil {
-		out = append(out, *s.Main)
-	}
-	out = append(out, s.Peers...)
-	for i := range out {
-		out[i].SnapshotAgeMs = age
-	}
-	return out
-}
-
-// linkName is a peer link's display name (ported verbatim from the
-// monolith history.go).
-func linkName(l peerLive) string {
-	if l.Name != "" {
-		return l.Name
-	}
-	return fmt.Sprintf("peer-%d", l.ID)
-}
-
-// trafficTunnelIfs parses /proc/net/dev rows for tunnel interfaces
-// (ported verbatim from the monolith dashboard.go).
-func trafficTunnelIfs(devData string) map[string][2]uint64 {
-	cur := map[string][2]uint64{}
-	for _, line := range strings.Split(devData, "\n") {
-		i := strings.Index(line, ":")
-		if i < 0 {
-			continue
-		}
-		ifname := strings.TrimSpace(line[:i])
-		if !isTunnelInterface(ifname) {
-			continue
-		}
-		f := strings.Fields(line[i+1:])
-		if len(f) < 9 {
-			continue
-		}
-		r, e1 := strconv.ParseUint(f[0], 10, 64)
-		t, e2 := strconv.ParseUint(f[8], 10, 64)
-		if e1 == nil && e2 == nil {
-			cur[ifname] = [2]uint64{r, t}
-		}
-	}
-	return cur
-}
-
-// usageObserveSpecialTunnels folds Matrix and carrier-port counters into
-// the usage ledger (ported verbatim from the monolith topology_usage.go).
-func usageObserveSpecialTunnels(s *HubSnapshot, at time.Time) {
-	aliases := usageSnapshotAliases(s)
-	trafficUsage.mu.Lock()
-	for _, p := range s.Peers {
-		if p.ID <= 0 {
-			continue
-		}
-		if old := trafficUsage.links[usageKey(p)]; old != nil {
-			alias := ""
-			if aliases["peer:"+strconv.Itoa(p.ID)] == "main" {
-				alias = usageMainKey
-			}
-			if old.AliasOf != alias {
-				old.AliasOf = alias
-				trafficUsage.dirty = true
-			}
-		}
-	}
-	trafficUsage.mu.Unlock()
-	if mx := s.Local.Matrix; mx != nil && mx.Enabled {
-		rx, tx := mx.Rx, mx.Tx
-		if rx == nil || tx == nil {
-			if c, ok := parseNetDev(s.DevData)[matrixIfaceName]; ok {
-				rx, tx = &c.rx, &c.tx
-			}
-		}
-		trafficUsage.observe("matrix", "Matrix", at, rx, tx)
-	}
-	seen := map[string]bool{}
-	for tag, c := range s.CarrierTags {
-		var id string
-		switch {
-		case strings.HasPrefix(tag, "bagher-"):
-			n, err := strconv.Atoi(strings.TrimPrefix(tag, "bagher-"))
-			if err != nil || n <= 0 {
-				continue
-			}
-			id = "bagher"
-			if n != 1 {
-				id += ":" + strconv.Itoa(n)
-			}
-		case strings.HasPrefix(tag, "xray-"):
-			n, err := strconv.Atoi(strings.TrimPrefix(tag, "xray-"))
-			if err != nil || n <= 0 {
-				continue
-			}
-			id = "xray:" + strconv.Itoa(n)
-		default:
-			continue
-		}
-		if !s.CarrierOK {
-			continue
-		}
-		seen[id] = true
-		rx, tx := c[0], c[1]
-		trafficUsage.observe(id, id, at, &rx, &tx)
-	}
-	// Previously measurable engines missing from this snapshot are unknown,
-	// retaining their baseline and history rather than reporting measured zero.
-	trafficUsage.mu.Lock()
-	missing := []string{}
-	for key := range trafficUsage.links {
-		if key == "matrix" && (s.Local.Matrix == nil || !s.Local.Matrix.Enabled) ||
-			(key == "bagher" || strings.HasPrefix(key, "bagher:") || strings.HasPrefix(key, "xray:")) && !seen[key] {
-			missing = append(missing, key)
-		}
-	}
-	trafficUsage.mu.Unlock()
-	for _, key := range missing {
-		trafficUsage.observe(key, "", at, nil, nil)
-	}
-}
 
 // serverTrafficMetrics is the host-NIC traffic block of a snapshot
 // (ported verbatim from the monolith server_metrics.go).
@@ -816,134 +843,4 @@ func parseNetDev(data string) map[string]devCounters {
 		m[strings.TrimSpace(name)] = devCounters{r, t}
 	}
 	return m
-}
-
-// getKnownPeerIfs lists the peers' GRE interfaces (monolith
-// dashboard.go caches for 10s; the agent reads peers directly — the
-// call sites are low-frequency).
-func getKnownPeerIfs() map[string]bool {
-	m := make(map[string]bool)
-	for _, q := range loadPeers() {
-		if q.GreIf != "" {
-			m[q.GreIf] = true
-		}
-	}
-	return m
-}
-
-// isTunnelInterface determines if an interface is a GRE or Backhaul tunnel
-// (ported verbatim from the monolith dashboard.go).
-func isTunnelInterface(ifname string) bool {
-	if ifname == "lo" || ifname == "gre0" || ifname == "gretap0" || ifname == "erspan0" {
-		return false
-	}
-	if strings.HasPrefix(ifname, "docker") || strings.HasPrefix(ifname, "veth") ||
-		strings.HasPrefix(ifname, "br-") || strings.HasPrefix(ifname, "dummy") ||
-		strings.HasPrefix(ifname, "eth") || strings.HasPrefix(ifname, "ens") ||
-		strings.HasPrefix(ifname, "enp") || strings.HasPrefix(ifname, "wl") {
-		return false
-	}
-	if strings.HasPrefix(ifname, "gre-") || strings.HasPrefix(ifname, "tun") || ifname == spoofIface || ifname == matrixIfaceName {
-		return true
-	}
-	known := getKnownPeerIfs()
-	if known[ifname] {
-		return true
-	}
-	if data, err := os.ReadFile(filepath.Join("/sys/class/net", ifname, "type")); err == nil {
-		t := strings.TrimSpace(string(data))
-		if t == "778" || t == "823" {
-			return true
-		}
-	}
-	return false
-}
-
-// countersAtMs renders a snapshot's counter timestamp for the UI
-// (ported verbatim from the monolith dashboard.go).
-func countersAtMs(s *HubSnapshot) any {
-	if s == nil || s.CountersAt.IsZero() {
-		return nil
-	}
-	return s.CountersAt.UnixMilli()
-}
-
-// usageResponse builds the usage API payload. Agent adaptation of the
-// monolith topology_usage.go version: topology grouping is
-// controller-side, so rows are empty and topology_known is false; the
-// ledger/series logic is the agent's own (traffic_usage.go).
-func usageResponse(now time.Time, window time.Duration, step int64, rangeName string) map[string]any {
-	trafficUsage.mu.Lock()
-	server, serverWindow := trafficUsage.serverTotalsLocked(now, window, step)
-	trafficUsage.mu.Unlock()
-	out := map[string]any{
-		"range": rangeName, "keep_days": int(usageKeep / (24 * time.Hour)), "step_sec": step, "now": now.Unix(),
-		"links":        trafficUsage.all(now, window, step),
-		"server_total": server, "server_window": serverWindow, "topologies": []topologyUsageRow{},
-		"grouping_basis": "current_assignments", "server_basis": "physical_interfaces", "topology_basis": "recorded_tunnel_counters",
-		"topology_known": false,
-		"topology_error": "topology collection is controller-side",
-	}
-	return out
-}
-
-// CSRF token machinery (ported verbatim from the monolith security.go).
-var (
-	csrfKey   [32]byte
-	csrfKeyMu sync.Once
-)
-
-func initCSRFKey() {
-	csrfKeyMu.Do(func() {
-		if _, err := rand.Read(csrfKey[:]); err != nil {
-			copy(csrfKey[:], "gre-panel-csrf-fallback-key-32b")
-		}
-	})
-}
-
-// GenerateCSRFToken derives a cryptographically secure CSRF token tied to a session token.
-func GenerateCSRFToken(sessionToken string) string {
-	initCSRFKey()
-	mac := hmac.New(sha256.New, csrfKey[:])
-	mac.Write([]byte("gre-csrf:" + sessionToken))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// logFinding is one summarized log signature (monolith errors.go).
-type logFinding struct {
-	Code  string `json:"code"`
-	Msg   string `json:"msg"`
-	Hint  string `json:"hint"`
-	Count int    `json:"count"`
-	Line  string `json:"line"` // first matching line (trimmed)
-}
-
-// summarizeLogs folds raw log text into per-code findings for the UI header
-// (ported verbatim from the monolith errors.go).
-func summarizeLogs(raw string) []logFinding {
-	by := map[string]*logFinding{}
-	order := []string{}
-	for _, ln := range strings.Split(raw, "\n") {
-		ln = strings.TrimSpace(ln)
-		if ln == "" {
-			continue
-		}
-		code, _ := matchLogCode(ln)
-		if code == "" {
-			continue
-		}
-		f, ok := by[code]
-		if !ok {
-			info := errCatalog[code]
-			f = &logFinding{Code: code, Msg: info.Msg, Hint: info.Hint, Line: trimLen(ln, 220)}
-			by[code] = f
-			order = append(order, code)
-		}
-		f.Count++
-	}
-	out := []logFinding{}
-	for _, c := range order {
-		out = append(out, *by[c])
-	}
-	return out
 }

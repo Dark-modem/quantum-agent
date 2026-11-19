@@ -67,45 +67,9 @@ func TestHostResourceLinksSkipUnavailable(t *testing.T) {
 	}
 }
 
-func TestResourceAlertsFlowThroughTracker(t *testing.T) {
-	tr := newAlertTracker()
-	cfg := alertConfig{MinGapSec: 10}
-	now := time.Unix(1_700_000_000, 0)
-	disk := 50.0
-	exp := now.Add(60 * 24 * time.Hour)
-	tick := func(at time.Time) []alertEvent {
-		links := hostResourceLinks(at, hostReaders{
-			diskPct: func() (float64, bool) { return disk, true },
-			cert:    func() (time.Time, bool) { return exp, true },
-		}, tr.lastState)
-		return tr.observe(at, links, cfg)
-	}
-	if ev := tick(now); len(ev) != 0 {
-		t.Fatalf("baseline must be silent: %v", ev)
-	}
-	disk = 95
-	ev := tick(now.Add(time.Minute))
-	if len(ev) != 1 || ev[0].Link != "host:disk" || ev[0].To != stateDown || !strings.Contains(ev[0].Why, "95%") {
-		t.Fatalf("critical disk must alert once: %+v", ev)
-	}
-	if ev := tick(now.Add(2 * time.Minute)); len(ev) != 0 {
-		t.Fatalf("staying critical must not repeat: %v", ev)
-	}
-	disk = 90 // inside hysteresis band: no flap, no alert
-	if ev := tick(now.Add(3 * time.Minute)); len(ev) != 0 {
-		t.Fatalf("hysteresis band must be silent: %v", ev)
-	}
-	disk = 40
-	ev = tick(now.Add(5 * time.Minute))
-	if len(ev) != 1 || ev[0].To != stateHealthy {
-		t.Fatalf("recovery must alert: %+v", ev)
-	}
-	exp = now.Add(5 * 24 * time.Hour) // certificate about to expire
-	ev = tick(now.Add(10 * time.Minute))
-	if len(ev) != 1 || ev[0].Link != "host:tls-cert" || ev[0].To != stateDown {
-		t.Fatalf("cert expiry must alert: %+v", ev)
-	}
-}
+// TestResourceAlertsFlowThroughTracker went with newAlertTracker in §6.A3 —
+// nothing in the agent's reachable graph constructs the legacy alert
+// tracker (the live alert semantics are the panel's).
 
 func TestLiveHostReadersDoNotPanic(t *testing.T) {
 	r := liveHostReaders()

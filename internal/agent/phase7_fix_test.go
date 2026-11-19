@@ -58,21 +58,9 @@ func TestGreExpected(t *testing.T) {
 	}
 }
 
-// L16: an empty snapshot must not wipe the latency history.
-// L9: after a reset the tracker only primes, it does not alert on old state.
-func TestAlertTrackerResetPrimesAgain(t *testing.T) {
-	tr := newAlertTracker()
-	now := time.Now()
-	c := alertConfig{MinGapSec: 0}
-	tr.observe(now, []linkSnap{{Name: "p1", State: stateHealthy}}, c)
-	tr.reset()
-	if ev := tr.observe(now, []linkSnap{{Name: "p1", State: stateDown}}, c); len(ev) != 0 {
-		t.Fatalf("alert fired on the first observation after reset: %+v", ev)
-	}
-	if ev := tr.observe(now.Add(time.Minute), []linkSnap{{Name: "p1", State: stateHealthy}}, c); len(ev) != 1 {
-		t.Fatalf("real change after reset not reported: %+v", ev)
-	}
-}
+// TestAlertTrackerResetPrimesAgain went with newAlertTracker in §6.A3 —
+// nothing in the agent's reachable graph constructs the legacy alert
+// tracker (the live alert semantics are the panel's).
 
 // L7: updating one Telegram field keeps the others.
 // M6: the backup key is only released with the panel password.
