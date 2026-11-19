@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -154,11 +156,11 @@ func (d *MatrixDriver) Counters(inst engine.Instance) engine.Counters {
 	if !in.valid() {
 		return engine.Counters{}
 	}
-	data, err := agentReadNetDev()
+	data, err := infra.AgentReadNetDev()
 	if err != nil {
 		return engine.Counters{}
 	}
-	c, ok := agentParseNetDev(data)[in.iface()]
+	c, ok := infra.AgentParseNetDev(data)[in.iface()]
 	if !ok {
 		return engine.Counters{}
 	}

@@ -5,6 +5,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // setupBundle is a parsed
@@ -127,7 +129,7 @@ func ParseBackhaulBundle(s string) (setupBundle, error) {
 	}
 	iranPub, portS, transport, token := parts[0], parts[1], parts[2], parts[3]
 	transport, udp, udpPort := splitBundleTransport(transport)
-	if ipFamily(iranPub) == 0 { // no GRE: IPv4 or IPv6
+	if infra.IPFamily(iranPub) == 0 { // no GRE: IPv4 or IPv6
 		return b, fmt.Errorf("bad Iran public IP in bundle: %q", iranPub)
 	}
 	port, err := strconv.Atoi(portS)

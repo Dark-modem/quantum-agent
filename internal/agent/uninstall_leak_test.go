@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -36,16 +38,16 @@ func TestUninstallLeakAllEngines(t *testing.T) {
 		inst engine.Instance
 	}
 	drivers := []drv{
-		{"frp", NewFRPDriver(), engine.Instance{TunnelID: "leak-frp", Params: mustJSON(frpTestParams())}},
-		{"backhaul", NewBackhaulDriver(), engine.Instance{TunnelID: "leak-bh", Params: mustJSON(backhaulTestParams())}},
-		{"xray", NewXrayDriver(), engine.Instance{TunnelID: "leak-xr", Params: mustJSON(xrayTestParams())}},
-		{"rathole", NewRatholeDriver(), engine.Instance{TunnelID: "leak-rh", Params: mustJSON(ratholeTestParams())}},
-		{"gost", NewGostDriver(), engine.Instance{TunnelID: "leak-gst", Params: mustJSON(gostTestParams())}},
-		{"wireguard", NewWgDriver(), engine.Instance{TunnelID: "leak-wg", Params: mustJSON(wgTestParams())}},
-		{"wstunnel", NewWstDriver(), engine.Instance{TunnelID: "leak-wst", Params: mustJSON(
+		{"frp", NewFRPDriver(), engine.Instance{TunnelID: "leak-frp", Params: infra.MustJSON(frpTestParams())}},
+		{"backhaul", NewBackhaulDriver(), engine.Instance{TunnelID: "leak-bh", Params: infra.MustJSON(backhaulTestParams())}},
+		{"xray", NewXrayDriver(), engine.Instance{TunnelID: "leak-xr", Params: infra.MustJSON(xrayTestParams())}},
+		{"rathole", NewRatholeDriver(), engine.Instance{TunnelID: "leak-rh", Params: infra.MustJSON(ratholeTestParams())}},
+		{"gost", NewGostDriver(), engine.Instance{TunnelID: "leak-gst", Params: infra.MustJSON(gostTestParams())}},
+		{"wireguard", NewWgDriver(), engine.Instance{TunnelID: "leak-wg", Params: infra.MustJSON(wgTestParams())}},
+		{"wstunnel", NewWstDriver(), engine.Instance{TunnelID: "leak-wst", Params: infra.MustJSON(
 			wstTestParams(strings.Repeat("aa", 32), strings.Repeat("bb", 32),
 				strings.Repeat("QQ==", 22)[:88], strings.Repeat("QQ==", 22)[:88]))}},
-		{"chisel", NewChiselDriver(), engine.Instance{TunnelID: "leak-ch", Params: mustJSON(
+		{"chisel", NewChiselDriver(), engine.Instance{TunnelID: "leak-ch", Params: infra.MustJSON(
 			chiselTestParams(strings.Repeat("aa", 32), strings.Repeat("bb", 32),
 				strings.Repeat("QQ==", 22)[:88], strings.Repeat("QQ==", 22)[:88]))}},
 	}
@@ -72,7 +74,7 @@ func TestUninstallLeakAllEngines(t *testing.T) {
 				t.Fatalf("processes still spawning after Uninstall: %d → %d", spawnedMid, got)
 			}
 			// Files: the engine dir must be gone.
-			p := filepath.Join(configDir, "engines", dd.id)
+			p := filepath.Join(infra.ConfigDir, "engines", dd.id)
 			if _, err := os.Stat(p); err == nil {
 				t.Fatalf("engine dir %s left behind", p)
 			}
@@ -138,21 +140,21 @@ func leakTestEnv(t *testing.T) (restore func()) {
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Server: "http://panel.test", Name: "germany"}, true
 	}
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	// Warm every binary cache the Start paths hit, with the marker set to
 	// each params' OWN pinned sha (the drivers compare marker==pin before
 	// trusting the cache). The fetch/verify chain has its own integration
 	// coverage.
 	warm := func(eng, ver, bin, sha string) {
-		d := filepath.Join(configDir, "engines", eng, "bin", ver)
+		d := filepath.Join(infra.ConfigDir, "engines", eng, "bin", ver)
 		_ = os.MkdirAll(d, 0o700)
 		_ = os.WriteFile(filepath.Join(d, bin), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 		_ = os.WriteFile(filepath.Join(d, "artifact.sha256"), []byte(sha), 0o600)
 	}
 	frpP := frpTestParams()
 	// NB: frpBinDir has NO "bin" segment (unlike the other engines).
-	frpDir := filepath.Join(configDir, "engines", "frp", frpP.Version)
+	frpDir := filepath.Join(infra.ConfigDir, "engines", "frp", frpP.Version)
 	_ = os.MkdirAll(frpDir, 0o700)
 	_ = os.WriteFile(filepath.Join(frpDir, "frps"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	_ = os.WriteFile(filepath.Join(frpDir, "frpc"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
@@ -182,6 +184,6 @@ func leakTestEnv(t *testing.T) (restore func()) {
 		execCommandJSON = origStats
 		engineArtifactPubKeyB64 = origKey
 		frpLoadIdentity = origIdent
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	}
 }

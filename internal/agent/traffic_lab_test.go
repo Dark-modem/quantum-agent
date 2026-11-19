@@ -1,7 +1,5 @@
 package agent
 
-import ()
-
 // TestTrafficLab runs in the hub namespace of tests/test_traffic_lab.sh with
 // the real kernel: a GRE main tunnel (gre-tunnel), a GRE peer (gre-p2), a
 // Backhaul peer without GRE (port 3090, iptables counters) and a Bagher link

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Traffic-state machinery ported verbatim from the controller monolith
@@ -42,7 +44,7 @@ type persistentTrafficState struct {
 	SavedAt int64                `json:"saved_at"`
 }
 
-func trafficStateFile() string { return filepath.Join(configDir, "traffic_state.json") }
+func trafficStateFile() string { return filepath.Join(infra.ConfigDir, "traffic_state.json") }
 
 func loadTrafficStateLocked() {
 	if trafficStateInit {
@@ -71,7 +73,7 @@ func loadTrafficStateLocked() {
 }
 
 func saveTrafficStateLocked() {
-	_ = os.MkdirAll(configDir, 0700)
+	_ = os.MkdirAll(infra.ConfigDir, 0700)
 	st := persistentTrafficState{
 		LifetimeUp:    lifetimeUp,
 		LifetimeDown:  lifetimeDown,
@@ -81,7 +83,7 @@ func saveTrafficStateLocked() {
 		LastIf:        lastRawIf,
 		SavedAt:       time.Now().Unix(),
 	}
-	b := mustJSON(st)
+	b := infra.MustJSON(st)
 	tmp := trafficStateFile() + ".tmp"
 	if err := os.WriteFile(tmp, b, 0600); err == nil {
 		_ = os.Rename(tmp, trafficStateFile())

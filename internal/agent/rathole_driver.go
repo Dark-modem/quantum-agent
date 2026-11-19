@@ -38,6 +38,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -189,7 +191,7 @@ func (d *RatholeDriver) Validate(params json.RawMessage) error {
 }
 
 func ratholeEngineDir() string {
-	return filepath.Join(configDir, "engines", ratholeID)
+	return filepath.Join(infra.ConfigDir, "engines", ratholeID)
 }
 
 func ratholeConfigPath(tunnelID string) string {
@@ -324,7 +326,7 @@ func ratholeNoiseKeypair() (pubB64, privB64 string, err error) {
 }
 
 // Start implements engine.Driver. The SERVER end generates the noise
-// keypair (persisted 0600 per tunnel under configDir/wg — the same store
+// keypair (persisted 0600 per tunnel under infra.ConfigDir/wg — the same store
 // the WG driver uses, keys are the same format); the CLIENT end requires
 // noise_server_public in its params (fail closed: without it the noise
 // handshake cannot authenticate).
@@ -403,7 +405,7 @@ func (d *RatholeDriver) Start(ctx context.Context, inst engine.Instance) error {
 // ratholeNoisePrivateKey loads or generates the server's persisted noise
 // private key (0600, same store/format family as the WG keys).
 func ratholeNoisePrivateKey(tunnelID string) (string, error) {
-	dir := filepath.Join(configDir, "wg")
+	dir := filepath.Join(infra.ConfigDir, "wg")
 	path := filepath.Join(dir, "rathole-"+tunnelID+".noise")
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		var ks wgKeyState

@@ -47,6 +47,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -291,15 +293,15 @@ func TestCtunnelIntegration(t *testing.T) {
 	defer artSrv.Close()
 	artURL := fmt.Sprintf("http://127.0.0.1:%d", artLn.Addr().(*net.TCPAddr).Port)
 
-	origConfigDir := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = origConfigDir })
+	origConfigDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = origConfigDir })
 	origKey := engineArtifactPubKeyB64
 	engineArtifactPubKeyB64 = pubB64
 	t.Cleanup(func() { engineArtifactPubKeyB64 = origKey })
-	origRunner := runner
-	runner = execRunner
-	t.Cleanup(func() { runner = origRunner })
+	origRunner := infra.Runner
+	infra.Runner = infra.ExecRunner
+	t.Cleanup(func() { infra.Runner = origRunner })
 
 	// Spawn seam: the namespace comes from the env file's ROLE= line (the
 	// args are identical for both ends: -config <env path>).
@@ -442,7 +444,7 @@ func TestCtunnelIntegration(t *testing.T) {
 	dServer := NewCtunnelDriver()
 	dClient := NewCtunnelDriver()
 	serverInst := engine.Instance{TunnelID: "ct-int", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := dServer.Start(context.Background(), serverInst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -451,9 +453,9 @@ func TestCtunnelIntegration(t *testing.T) {
 	srvEnv := ctEnvPath("ct-int")
 	serveNSCT = ctNSB
 	serveRoleCT = ctNSB
-	configDir = t.TempDir() // the "second host": fresh state dir, fresh artifact fetch
+	infra.ConfigDir = t.TempDir() // the "second host": fresh state dir, fresh artifact fetch
 	clientInst := engine.Instance{TunnelID: "ct-int", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := dClient.Start(context.Background(), clientInst); err != nil {
 		t.Fatalf("client Start: %v", err)
 	}

@@ -7,6 +7,8 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // Backhaul connection pool: how many connections the foreign server (the
@@ -32,7 +34,7 @@ func backhaulPoolSize() int {
 func backhaulConfigs(svc string) []string {
 	var out []string
 	for _, c := range staleConfigCandidates() {
-		if c.svc == svc && fileExists(c.path) {
+		if c.svc == svc && infra.FileExists(c.path) {
 			out = append(out, c.path)
 		}
 	}

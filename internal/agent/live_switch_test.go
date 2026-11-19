@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestCurrentIranBundleExtraction(t *testing.T) {
@@ -14,9 +16,9 @@ func TestCurrentIranBundleExtraction(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	// 1. Setup mock setup.json with token
 	setupData := map[string]any{

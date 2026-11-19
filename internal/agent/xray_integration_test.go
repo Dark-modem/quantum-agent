@@ -39,6 +39,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -277,15 +279,15 @@ while True:
 	defer artSrv.Close()
 	artURL := fmt.Sprintf("http://127.0.0.1:%d", artLn.Addr().(*net.TCPAddr).Port)
 
-	origConfigDir := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = origConfigDir })
+	origConfigDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = origConfigDir })
 	origKey := engineArtifactPubKeyB64
 	engineArtifactPubKeyB64 = pubB64
 	t.Cleanup(func() { engineArtifactPubKeyB64 = origKey })
-	origRunner := runner
-	runner = execRunner
-	t.Cleanup(func() { runner = origRunner })
+	origRunner := infra.Runner
+	infra.Runner = execRunner
+	t.Cleanup(func() { infra.Runner = origRunner })
 
 	// One driver per end; the identity decides the role.
 	dServer := NewXrayDriver()
@@ -346,7 +348,7 @@ while True:
 
 	// Start the SERVER end inside xrNSA (its identity name matches).
 	serverInst := engine.Instance{TunnelID: "xr-int-s", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := dServer.Start(context.Background(), serverInst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -357,7 +359,7 @@ while True:
 	serveNS = xrNSB
 	logTag = "client"
 	clientInst := engine.Instance{TunnelID: "xr-int-c", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := dClient.Start(context.Background(), clientInst); err != nil {
 		t.Fatalf("client Start: %v", err)
 	}

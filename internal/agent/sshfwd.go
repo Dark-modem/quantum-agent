@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // handlePeerSSHFwdInstallKey served the peer-API authorized_keys install.
@@ -64,8 +66,8 @@ var (
 )
 
 func defaultSSHFwdKeyPath() string {
-	if os.Geteuid() != 0 || strings.Contains(configDir, "gre-panel-test-") {
-		return filepath.Join(configDir, "quantum-fwd")
+	if os.Geteuid() != 0 || strings.Contains(infra.ConfigDir, "gre-panel-test-") {
+		return filepath.Join(infra.ConfigDir, "quantum-fwd")
 	}
 	return "/root/.ssh/quantum-fwd"
 }
@@ -92,7 +94,7 @@ func defaultSSHFwdConfig() SSHFwdConfig {
 }
 
 func sshFwdConfigFile() string {
-	return filepath.Join(configDir, "sshfwd.json")
+	return filepath.Join(infra.ConfigDir, "sshfwd.json")
 }
 
 func loadSSHFwdConfigLocked() SSHFwdConfig {
@@ -202,7 +204,7 @@ func MakeBagherBundle(cfg SSHFwdConfig, pubKey string) (string, error) {
 		return "", fmt.Errorf("remote host IP is required before generating bundle")
 	}
 	iranIP := resolvePublicIP()
-	if isV6(cfg.RemoteHost) { // the link runs over IPv6: the foreign server sees this one's IPv6
+	if infra.IsV6(cfg.RemoteHost) { // the link runs over IPv6: the foreign server sees this one's IPv6
 		if v6 := detectPublicIP6(); v6 != "" {
 			iranIP = v6
 		}
@@ -319,7 +321,7 @@ func getBagherLiveMetrics(cfg SSHFwdConfig) BagherLiveMetrics {
 			remoteSSHPort = 22
 		}
 		tRemote := time.Now()
-		rConn, rErr := net.DialTimeout("tcp", hostPort(cfg.RemoteHost, remoteSSHPort), 600*time.Millisecond)
+		rConn, rErr := net.DialTimeout("tcp", infra.HostPort(cfg.RemoteHost, remoteSSHPort), 600*time.Millisecond)
 		if rErr == nil {
 			lat = float64(time.Since(tRemote).Microseconds()) / 1000.0
 			_ = rConn.Close()

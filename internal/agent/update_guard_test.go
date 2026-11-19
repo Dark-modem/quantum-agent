@@ -1,7 +1,5 @@
 package agent
 
-import ()
-
 // The new binary clears the pending marker once it listens; the old binary
 // (swap not in effect) leaves it for the guard.
 // A rollback by the guard shows in /api/version for a day.

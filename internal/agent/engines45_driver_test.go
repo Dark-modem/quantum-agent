@@ -30,6 +30,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -168,15 +170,15 @@ func wstTestHarness(t *testing.T, role string) (*WstDriver, *int, *strings.Build
 	}
 	origIpt := acctIptables
 	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	t.Cleanup(func() {
 		engineArtifactPubKeyB64 = origKey
 		frpLoadIdentity = origIdent
 		frpFetchArtifact = origFetch
 		wstSpawn = origSpawn
 		acctIptables = origIpt
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return NewWstDriver(), &spawned, leaked, p
 }
@@ -221,15 +223,15 @@ func chiselTestHarness(t *testing.T, role string) (*ChiselDriver, *int, *strings
 	}
 	origIpt := acctIptables
 	acctIptables = func(args ...string) ([]byte, error) { return nil, nil }
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	t.Cleanup(func() {
 		engineArtifactPubKeyB64 = origKey
 		frpLoadIdentity = origIdent
 		frpFetchArtifact = origFetch
 		chiselSpawn = origSpawn
 		acctIptables = origIpt
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return NewChiselDriver(), &spawned, leaked, p
 }
@@ -302,7 +304,7 @@ func TestWstRoleResolution(t *testing.T) {
 func TestWstStartManifestPathAndArgsShape(t *testing.T) {
 	d, spawned, leaked, p := wstTestHarness(t, "germany") // this host IS the server side
 	inst := engine.Instance{TunnelID: "t-wst-1", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -394,7 +396,7 @@ func TestWstClientArgsShapeAndHealthProbe(t *testing.T) {
 
 func TestWstSupervisorRestartsAndStopKeepsItDead(t *testing.T) {
 	d, spawned, _, p := wstTestHarness(t, "germany")
-	inst := engine.Instance{TunnelID: "t-wst-2", Params: mustJSON(p)}
+	inst := engine.Instance{TunnelID: "t-wst-2", Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +435,7 @@ func TestWstSupervisorRestartsAndStopKeepsItDead(t *testing.T) {
 
 func TestWstUninstallLeavesNothing(t *testing.T) {
 	d, _, _, p := wstTestHarness(t, "germany")
-	inst := engine.Instance{TunnelID: "t-wst-3", Params: mustJSON(p)}
+	inst := engine.Instance{TunnelID: "t-wst-3", Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +485,7 @@ func TestChiselValidateParams(t *testing.T) {
 
 func TestChiselRoleAndArgsShape(t *testing.T) {
 	d, spawned, leaked, p := chiselTestHarness(t, "iran-7") // this host is the CLIENT
-	inst := engine.Instance{TunnelID: "t-ch-1", Params: mustJSON(p)}
+	inst := engine.Instance{TunnelID: "t-ch-1", Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -520,7 +522,7 @@ func TestChiselRoleAndArgsShape(t *testing.T) {
 
 func TestChiselSupervisorAndUninstall(t *testing.T) {
 	d, spawned, _, p := chiselTestHarness(t, "germany")
-	inst := engine.Instance{TunnelID: "t-ch-2", Params: mustJSON(p)}
+	inst := engine.Instance{TunnelID: "t-ch-2", Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}

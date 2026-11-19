@@ -30,7 +30,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Dark-modem/quantum-protocol"
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
+
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // panelShapeRules builds the rule set exactly as the panel compiler does:
@@ -115,9 +117,9 @@ func TestPanelShapeWeightMatrix(t *testing.T) {
 				w      int
 			}{tc.tA, tc.tB})
 
-			// resolveWeight per tunnel (the agent's resolution).
-			wA, okA := resolveWeight(rules, topo, tc.tA.local, tc.tA.remote, tc.tA.id)
-			wB, okB := resolveWeight(rules, topo, tc.tB.local, tc.tB.remote, tc.tB.id)
+			// balancer.ResolveWeight per tunnel (the agent's resolution).
+			wA, okA := balancer.ResolveWeight(rules, topo, tc.tA.local, tc.tA.remote, tc.tA.id)
+			wB, okB := balancer.ResolveWeight(rules, topo, tc.tB.local, tc.tB.remote, tc.tB.id)
 			if !okA || wA != tc.tA.w {
 				t.Fatalf("A resolved %d,%v want %d", wA, okA, tc.tA.w)
 			}
@@ -130,11 +132,11 @@ func TestPanelShapeWeightMatrix(t *testing.T) {
 			}
 
 			// Render the nft for a forward rule over the HEALTHY targets.
-			targets := []balTarget{{TunnelID: tc.tA.id, IP: "10.189.0.2", Port: 5201, Weight: wA}}
+			targets := []balancer.BalTarget{{TunnelID: tc.tA.id, IP: "10.189.0.2", Port: 5201, Weight: wA}}
 			if okB && wB > 0 {
-				targets = append(targets, balTarget{TunnelID: tc.tB.id, IP: "10.189.0.3", Port: 5202, Weight: wB})
+				targets = append(targets, balancer.BalTarget{TunnelID: tc.tB.id, IP: "10.189.0.3", Port: 5202, Weight: wB})
 			}
-			script := renderForwardNFT([]forwardRender{{
+			script := balancer.RenderForwardNFT([]balancer.ForwardRender{{
 				ID: "w-fwd", ListenPort: 8443, Proto: "tcp", Targets: targets,
 			}})
 			wantSel := fmt.Sprintf("numgen inc mod %d", tc.wantTotal)
@@ -176,14 +178,14 @@ func TestPanelShapeMixedEnginesAndUnhealthy(t *testing.T) {
 		{"mx-1", "iran", "germany", 3},
 		{"frp-1", "iran", "germany", 7},
 	})
-	wMx, okMx := resolveWeight(rules, topo, "iran", "germany", "mx-1")
-	wFrp, okFrp := resolveWeight(rules, topo, "iran", "germany", "frp-1")
+	wMx, okMx := balancer.ResolveWeight(rules, topo, "iran", "germany", "mx-1")
+	wFrp, okFrp := balancer.ResolveWeight(rules, topo, "iran", "germany", "frp-1")
 	if !okMx || wMx != 3 || !okFrp || wFrp != 7 {
 		t.Fatalf("matrix+frp resolution: mx=%d,%v frp=%d,%v", wMx, okMx, wFrp, okFrp)
 	}
 	// Healthy both: 3/7 (the render sorts by TunnelID — frp-1 first).
-	both := renderForwardNFT([]forwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp",
-		Targets: []balTarget{
+	both := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp",
+		Targets: []balancer.BalTarget{
 			{TunnelID: "frp-1", IP: "10.189.0.3", Port: 5202, Weight: wFrp},
 			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 5201, Weight: wMx},
 		}}})
@@ -196,8 +198,8 @@ func TestPanelShapeMixedEnginesAndUnhealthy(t *testing.T) {
 		t.Fatalf("nft -c rejected: %v", err)
 	}
 	// frp unhealthy: the matrix takes 100% (mod 3, not mod 10).
-	frpDown := renderForwardNFT([]forwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp",
-		Targets: []balTarget{{TunnelID: "mx-1", IP: "10.189.0.2", Port: 5201, Weight: wMx}}}})
+	frpDown := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp",
+		Targets: []balancer.BalTarget{{TunnelID: "mx-1", IP: "10.189.0.2", Port: 5201, Weight: wMx}}}})
 	if !strings.Contains(frpDown, "numgen inc mod 3") || !strings.Contains(frpDown, "0-2 : 10.189.0.2 . 5201") {
 		t.Fatalf("unhealthy-exclusion render wrong:\n%s", frpDown)
 	}
@@ -217,8 +219,8 @@ func TestPanelShapeMixedEnginesAndUnhealthy(t *testing.T) {
 func TestMixedGroupPortlessTargets(t *testing.T) {
 	// 1. Mixed group with a rule TargetPort: the port-less target renders
 	//    the RULE's port (`. 443`), the ported one its own (`. 5201`).
-	mixed := renderForwardNFT([]forwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp", TargetPort: 443,
-		Targets: []balTarget{
+	mixed := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp", TargetPort: 443,
+		Targets: []balancer.BalTarget{
 			{TunnelID: "frp-1", IP: "10.189.0.3", Port: 5201, Weight: 7},
 			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 3},
 		}}})
@@ -241,8 +243,8 @@ func TestMixedGroupPortlessTargets(t *testing.T) {
 	// 2. Mixed group with TargetPort 0: the port-less target is SKIPPED
 	//    (a port-less target cannot join a ported map); the ported one
 	//    keeps the whole modulus (7, not 10).
-	mixed0 := renderForwardNFT([]forwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp",
-		Targets: []balTarget{
+	mixed0 := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp",
+		Targets: []balancer.BalTarget{
 			{TunnelID: "frp-1", IP: "10.189.0.3", Port: 5201, Weight: 7},
 			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 3},
 		}}})
@@ -258,8 +260,8 @@ func TestMixedGroupPortlessTargets(t *testing.T) {
 
 	// 3. Pure port-less group (both targets port 0, TargetPort 0):
 	//    address-only map, no port suffix — the matrix shape.
-	allmx := renderForwardNFT([]forwardRender{{ID: "fwd-mx", ListenPort: 8443, Proto: "tcp",
-		Targets: []balTarget{
+	allmx := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fwd-mx", ListenPort: 8443, Proto: "tcp",
+		Targets: []balancer.BalTarget{
 			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 5},
 			{TunnelID: "mx-2", IP: "10.189.0.3", Port: 0, Weight: 5},
 		}}})
@@ -276,8 +278,8 @@ func TestMixedGroupPortlessTargets(t *testing.T) {
 	// 4. Mixed group whose port-less target's fallback equals the ported
 	//    target's port AND the rule TargetPort: uniform effective port →
 	//    the address-only map with the single suffix.
-	uniform := renderForwardNFT([]forwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp", TargetPort: 443,
-		Targets: []balTarget{
+	uniform := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "fwd-mix", ListenPort: 8443, Proto: "tcp", TargetPort: 443,
+		Targets: []balancer.BalTarget{
 			{TunnelID: "frp-1", IP: "10.189.0.3", Port: 443, Weight: 7},
 			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 0, Weight: 3},
 		}}})
@@ -303,13 +305,13 @@ func TestPairLevelDegenerateMod60(t *testing.T) {
 	rules := []protocol.WeightRule{
 		{TopologyID: topo, LocalServer: "iran", RemoteServer: "germany", Weight: 30},
 	}
-	wA, _ := resolveWeight(rules, topo, "iran", "germany", "mx-1")
-	wB, _ := resolveWeight(rules, topo, "iran", "germany", "mx-2")
+	wA, _ := balancer.ResolveWeight(rules, topo, "iran", "germany", "mx-1")
+	wB, _ := balancer.ResolveWeight(rules, topo, "iran", "germany", "mx-2")
 	if wA != 30 || wB != 30 {
 		t.Fatalf("pair-level write should resolve 30 on BOTH tunnels, got %d/%d", wA, wB)
 	}
-	script := renderForwardNFT([]forwardRender{{ID: "w-fwd", ListenPort: 8443, Proto: "tcp",
-		Targets: []balTarget{
+	script := balancer.RenderForwardNFT([]balancer.ForwardRender{{ID: "w-fwd", ListenPort: 8443, Proto: "tcp",
+		Targets: []balancer.BalTarget{
 			{TunnelID: "mx-1", IP: "10.189.0.2", Port: 5201, Weight: wA},
 			{TunnelID: "mx-2", IP: "10.189.0.3", Port: 5202, Weight: wB},
 		}}})

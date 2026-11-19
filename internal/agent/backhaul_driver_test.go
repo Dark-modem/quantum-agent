@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -130,14 +132,14 @@ func backhaulSetTestEnv(t *testing.T) (spawned *int, fetchCalls *int) {
 		}
 		return &fakeFRPProcess{}, nil
 	}
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	t.Cleanup(func() {
 		engineArtifactPubKeyB64 = origKey
 		frpLoadIdentity = origIdent
 		frpFetchArtifact = origFetch
 		frpSpawn = origSpawn
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return spawned, fetchCalls
 }
@@ -228,7 +230,7 @@ func TestBackhaulStartStopHealth(t *testing.T) {
 	// Both ends of one tunnel (separate state dirs would exist in
 	// production; here the seams make one process tree serve both).
 	serverInst := engine.Instance{TunnelID: "tb1", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(backhaulTestParams())}
+		Params: infra.MustJSON(backhaulTestParams())}
 	if err := d.Start(context.Background(), serverInst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -264,7 +266,7 @@ func TestBackhaulUninstallRemovesCache(t *testing.T) {
 	spawned, _ := backhaulSetTestEnv(t)
 	d := NewBackhaulDriver()
 	inst := engine.Instance{TunnelID: "tb2", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(backhaulTestParams())}
+		Params: infra.MustJSON(backhaulTestParams())}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +299,7 @@ func TestBackhaulManagerReconcile(t *testing.T) {
 	p := backhaulTestParams()
 	if res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "backhaul", Enabled: true}},
-		[]engine.TunnelSpec{{ID: "tb3", Engine: "backhaul", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(p), Enabled: true}}); len(res.Errors) != 0 {
+		[]engine.TunnelSpec{{ID: "tb3", Engine: "backhaul", LocalServer: "germany", RemoteServer: "iran", Params: infra.MustJSON(p), Enabled: true}}); len(res.Errors) != 0 {
 		t.Fatalf("reconcile: %v", res.Errors)
 	}
 	if mgr.RunningCount() != 1 || *spawned != 1 {
@@ -306,7 +308,7 @@ func TestBackhaulManagerReconcile(t *testing.T) {
 	// Idempotent reconcile.
 	res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "backhaul", Enabled: true}},
-		[]engine.TunnelSpec{{ID: "tb3", Engine: "backhaul", LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(p), Enabled: true}})
+		[]engine.TunnelSpec{{ID: "tb3", Engine: "backhaul", LocalServer: "germany", RemoteServer: "iran", Params: infra.MustJSON(p), Enabled: true}})
 	if len(res.Errors) != 0 {
 		t.Fatalf("reconcile 2: %v", res.Errors)
 	}

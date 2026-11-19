@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestDiagBundleRedacted(t *testing.T) {
-	oldCfg := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = origCfgForDiag(oldCfg) })
+	oldCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = origCfgForDiag(oldCfg) })
 
 	// Seed secrets: the enrollment (key + pin), a Matrix state file with a
 	// token, and a private-key file in the state dir.
@@ -33,7 +36,7 @@ func TestDiagBundleRedacted(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	privKey := filepath.Join(configDir, "some-engine", "private.key")
+	privKey := filepath.Join(infra.ConfigDir, "some-engine", "private.key")
 	if err := os.MkdirAll(filepath.Dir(privKey), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -49,11 +52,11 @@ func TestDiagBundleRedacted(t *testing.T) {
 	// The diag payload with a tunnel/balancer section carrying a token-ish
 	// field name (the redaction is key-based for maps, value-based for the
 	// identity).
-	balancer := []balTargetDiag{{
+	targets := []balancer.TargetDiag{{
 		Forward: "fwd-1", Tunnel: "t-1", Reason: "selected", Health: "up",
 		Weight: 30, Addr: "10.189.0.2:5201", NftRange: "0-29", Total: 60,
 	}}
-	bundle := diagCollect(nil, balancer, false)
+	bundle := diagCollect(nil, targets, false)
 	data, err := json.MarshalIndent(bundle, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +90,22 @@ func TestDiagBundleRedacted(t *testing.T) {
 
 }
 
-// origCfgForDiag restores the caller's configDir (named so the cleanup
+// origCfgForDiag restores the caller's infra.ConfigDir (named so the cleanup
 // reads naturally).
 func origCfgForDiag(old string) string { return old }
+
+func TestDiagCollectNetSection(t *testing.T) {
+	bundle := diagCollect(nil, nil, true)
+	net, ok := bundle["net"].(map[string]any)
+	if !ok {
+		t.Fatalf("diag bundle lacks the net section: %+v", bundle["net"])
+	}
+	if v, ok := net["route_localnet"].(bool); !ok || !v {
+		t.Fatalf("net.route_localnet = %+v, want true", net["route_localnet"])
+	}
+	bundle = diagCollect(nil, nil, false)
+	net = bundle["net"].(map[string]any)
+	if v, ok := net["route_localnet"].(bool); !ok || v {
+		t.Fatalf("net.route_localnet = %+v, want false", net["route_localnet"])
+	}
+}

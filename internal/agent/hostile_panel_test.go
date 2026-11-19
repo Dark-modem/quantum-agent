@@ -43,9 +43,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 	"github.com/Dark-modem/quantum-agent/internal/hardening"
-	"github.com/Dark-modem/quantum-protocol"
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+	protocol "github.com/Dark-modem/quantum-protocol"
 	"github.com/gorilla/websocket"
 )
 
@@ -403,7 +405,7 @@ func TestValidateRejectsWrongTypedParams(t *testing.T) {
 
 // balHostileFixture builds a balancer over a fake engine with one running
 // tunnel in topology "topo", plus the apply seam recording every script.
-func balHostileFixture(t *testing.T, forwardHost string) (*forwardBalancer, *[]string) {
+func balHostileFixture(t *testing.T, forwardHost string) (*balancer.ForwardBalancer, *[]string) {
 	t.Helper()
 	fake := engine.NewFakeEngine("fake")
 	fake.SetForwardAddress("t1", forwardHost, 15901)
@@ -419,11 +421,11 @@ func balHostileFixture(t *testing.T, forwardHost string) (*forwardBalancer, *[]s
 	if len(res.Errors) > 0 {
 		t.Fatalf("manager reconcile: %v", res.Errors)
 	}
-	bal := newForwardBalancer(mgr, reg)
+	bal := balancer.New(mgr, reg)
 	var scripts []string
-	old := nftApplyScript
-	nftApplyScript = func(s string) error { scripts = append(scripts, s); return nil }
-	t.Cleanup(func() { nftApplyScript = old })
+	old := balancer.ApplyNFTScript
+	balancer.ApplyNFTScript = func(s string) error { scripts = append(scripts, s); return nil }
+	t.Cleanup(func() { balancer.ApplyNFTScript = old })
 	return bal, &scripts
 }
 
@@ -440,7 +442,7 @@ func TestBalancerHostileStaticTargetsRefused(t *testing.T) {
 			Forwards: []protocol.ForwardRule{{ID: "f1", ListenPort: 15000 + i, Proto: "tcp", Target: target, TargetPort: 15901}},
 		}
 		bal.Reconcile(&doc)
-		rep := bal.tick()
+		rep := bal.Tick()
 		bal.Stop()
 		for _, s := range *scripts {
 			for _, bad := range []string{"flush", "evil", "touch", "comment", "ruleset", "example"} {
@@ -472,7 +474,7 @@ func TestBalancerHostileDriverForwardTargetSkipped(t *testing.T) {
 	for _, hostile := range []string{"10.189.0.9; flush ruleset", "evil.example", "$(id)"} {
 		bal, scripts := balHostileFixture(t, hostile)
 		bal.Reconcile(balDoc())
-		rep := bal.tick()
+		rep := bal.Tick()
 		bal.Stop()
 		for _, s := range *scripts {
 			if strings.Contains(s, "flush") || strings.Contains(s, "evil") || strings.Contains(s, "$(id)") {
@@ -493,7 +495,7 @@ func TestBalancerHostileDriverForwardTargetSkipped(t *testing.T) {
 	// Regression: a legit IPv4 forward address still renders.
 	bal, scripts := balHostileFixture(t, "10.189.0.9")
 	bal.Reconcile(balDoc())
-	bal.tick()
+	bal.Tick()
 	bal.Stop()
 	rendered := false
 	for _, s := range *scripts {
@@ -509,20 +511,20 @@ func TestBalancerHostileDriverForwardTargetSkipped(t *testing.T) {
 // TestRenderForwardChainRefusesNonIPDirectCall: the renderer's own
 // defense-in-depth for any caller that bypasses the balancer's tick.
 func TestRenderForwardChainRefusesNonIPDirectCall(t *testing.T) {
-	r := forwardRender{ID: "f1", ListenPort: 15900, Proto: "tcp", TargetPort: 15901,
-		Targets: []balTarget{
+	r := balancer.ForwardRender{ID: "f1", ListenPort: 15900, Proto: "tcp", TargetPort: 15901,
+		Targets: []balancer.BalTarget{
 			{TunnelID: "good", IP: "10.189.0.2", Port: 15901, Weight: 1},
 			{TunnelID: "evil", IP: "10.189.0.2; flush ruleset", Port: 15901, Weight: 1},
 		}}
-	script := renderForwardChain("tcp", r)
+	script := balancer.RenderForwardChain("tcp", r)
 	if strings.Contains(script, "flush") {
 		t.Fatalf("hostile target leaked into the rendered chain:\n%s", script)
 	}
 	if !strings.Contains(script, "0-0 : 10.189.0.2") {
 		t.Fatalf("the legit target must survive:\n%s", script)
 	}
-	r.Targets = []balTarget{{TunnelID: "evil", IP: "$(id)", Port: 15901, Weight: 1}}
-	script = renderForwardChain("tcp", r)
+	r.Targets = []balancer.BalTarget{{TunnelID: "evil", IP: "$(id)", Port: 15901, Weight: 1}}
+	script = balancer.RenderForwardChain("tcp", r)
 	if strings.Contains(script, "$(id)") || strings.Contains(script, "dnat") {
 		t.Fatalf("all-hostile rule must render the fail-fast pass-through:\n%s", script)
 	}
@@ -532,12 +534,12 @@ func TestRenderForwardChainRefusesNonIPDirectCall(t *testing.T) {
 
 func TestHostileCommandsRefusedBeforeExecution(t *testing.T) {
 	var calls int
-	oldRunner := runner
-	runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	oldRunner := infra.Runner
+	infra.Runner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		calls++
 		return nil, nil
 	}
-	t.Cleanup(func() { runner = oldRunner })
+	t.Cleanup(func() { infra.Runner = oldRunner })
 
 	run := func(op string, params map[string]string) agentCommandResult {
 		return agentRunCommand(agentCommand{ID: "h", Op: op, Params: params})
@@ -606,7 +608,7 @@ func TestHostileCommandsRefusedBeforeExecution(t *testing.T) {
 	}
 
 	// 3e. agent.update with a hostile request: validated BEFORE the
-	// background runner starts; nothing downloads. (A cross-origin URL
+	// background infra.Runner starts; nothing downloads. (A cross-origin URL
 	// that PASSES the request shape is refused later at the DOWNLOAD by
 	// the same-origin rule — asserted in
 	// TestHostileUpdateRequestAndArtifactVerify.)
@@ -825,7 +827,7 @@ func TestHostileDesiredV2FailsSafe(t *testing.T) {
 
 	// Hostile SELF stamps (R6): a whitespace Self.Name trims to "" at the
 	// apply layer, and the role resolution FAILS CLOSED on an empty self
-	// (isolated configDir = no enrollment identity → error, never a
+	// (isolated infra.ConfigDir = no enrollment identity → error, never a
 	// guessed role).
 	withTmpConfig(t)
 	role, rerr := frpResolveRole(frpTestParams(), "  ")

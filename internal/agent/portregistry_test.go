@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// portRegistryReset points the registry at the current (temp) configDir.
+// portRegistryReset points the registry at the current (temp) infra.ConfigDir.
 func portRegistryReset(t *testing.T) {
 	t.Helper()
 	old := portRegPath

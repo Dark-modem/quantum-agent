@@ -31,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // peerRoutePrefix serves the peer API at a fixed path, independent of each
@@ -64,7 +66,7 @@ var (
 )
 
 func peerConfigFile() string {
-	return filepath.Join(configDir, "peer_link.json")
+	return filepath.Join(infra.ConfigDir, "peer_link.json")
 }
 
 func loadPeerConfig() PeerConfig {
@@ -121,7 +123,7 @@ func updatePeerConfig(fn func(c *PeerConfig)) error {
 
 // writePeerConfig persists c atomically. Caller holds peerMu.
 func writePeerConfig(c PeerConfig) error {
-	_ = os.MkdirAll(configDir, 0700)
+	_ = os.MkdirAll(infra.ConfigDir, 0700)
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
@@ -208,7 +210,7 @@ func peerTargetURLs(c PeerConfig, path string) []string {
 			ports = append(ports, cfg.Port)
 		}
 		for _, p := range ports {
-			bases = append(bases, "http://"+hostPort(c.InternalIP, p))
+			bases = append(bases, "http://"+infra.HostPort(c.InternalIP, p))
 		}
 	}
 	if c.PeerURL != "" {
@@ -225,7 +227,7 @@ func peerTargetURLs(c PeerConfig, path string) []string {
 				for _, p := range []int{c.InternalPort, cfg.Port, effectiveTLSPort(), 7443, 7777, 8080} {
 					if p > 0 && !seen[p] {
 						seen[p] = true
-						bases = append(bases, parsed.Scheme+"://"+hostPort(host, p))
+						bases = append(bases, parsed.Scheme+"://"+infra.HostPort(host, p))
 					}
 				}
 			}

@@ -1,4 +1,4 @@
-package agent
+package balancer
 
 // routelocalnet.go — RUNBOOK ITEM 35: a DNAT to a loopback target
 // (127.0.0.0/8) is dropped by the kernel's martian filter unless
@@ -13,7 +13,7 @@ package agent
 //     written through `sysctl -w`;
 //   - when a later render has no loopback targets anymore, the captured
 //     value is restored and forgotten;
-//   - the state lives on the forwardBalancer (guarded by its mutex, the
+//   - the state lives on the ForwardBalancer (guarded by its mutex, the
 //     same lock the tick holds) and is surfaced in the balancer tick
 //     report → `quantum-agent balancer status` and the diag bundle's
 //     "net" section.
@@ -29,44 +29,46 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
-// rlSysctlAll is the kernel key the balancer owns while any rendered
+// RlSysctlAll is the kernel key the balancer owns while any rendered
 // forward DNATs to loopback.
-const rlSysctlAll = "net.ipv4.conf.all.route_localnet"
+const RlSysctlAll = "net.ipv4.conf.all.route_localnet"
 
 // Seams (tests swap them; production reads /proc and shells out to
 // sysctl through the shared runner).
 var (
-	// rlSysctlRead reads one sysctl key's current value.
-	rlSysctlRead = func(key string) (string, error) {
+	// RlSysctlRead reads one sysctl key's current value.
+	RlSysctlRead = func(key string) (string, error) {
 		b, err := os.ReadFile("/proc/sys/" + strings.ReplaceAll(key, ".", "/"))
 		if err != nil {
 			return "", err
 		}
 		return strings.TrimSpace(string(b)), nil
 	}
-	// rlSysctlWrite writes one sysctl key (`sysctl -w key=value`, the
+	// RlSysctlWrite writes one sysctl key (`sysctl -w key=value`, the
 	// value UNQUOTED — netapply's live-acceptance lesson).
-	rlSysctlWrite = func(key, val string) error {
-		_, err := runCmdTimeout(5*time.Second, "sysctl", "-w", key+"="+val)
+	RlSysctlWrite = func(key, val string) error {
+		_, err := infra.RunCmdTimeout(5*time.Second, "sysctl", "-w", key+"="+val)
 		return err
 	}
-	// rlListenIface resolves the interface a listen port is reached on.
+	// RlListenIface resolves the interface a listen port is reached on.
 	// Nothing resolves it today ("" = only the 'all' knob, the
 	// documented default); the seam exists so the per-interface write is
 	// exercisable and a future resolver can plug in.
-	rlListenIface = func(listenPort int) string { return "" }
+	RlListenIface = func(listenPort int) string { return "" }
 )
 
 // applyScriptRL applies one rendered nft transaction with the
 // route_localnet ensure/restore wrapped around it. Caller holds b.mu
 // (the tick holds it for its whole pass; Stop takes it).
-func (b *forwardBalancer) applyScriptRL(script string, listenPorts ...int) error {
+func (b *ForwardBalancer) ApplyScriptRL(script string, listenPorts ...int) error {
 	if err := b.ensureRouteLocalnet(script, listenPorts); err != nil {
 		return err
 	}
-	err := nftApplyScript(script)
+	err := ApplyNFTScript(script)
 	// A script without loopback targets no longer needs the knob — even
 	// when the apply itself failed (the state converges on the next pass).
 	b.settleRouteLocalnet(script)
@@ -77,19 +79,19 @@ func (b *forwardBalancer) applyScriptRL(script string, listenPorts ...int) error
 // it to 1 when the script DNATs to loopback. Idempotent: an active knob
 // is left alone; a knob that already read 1 records before="1" so the
 // restore is a no-op write of the same value. Caller holds b.mu.
-func (b *forwardBalancer) ensureRouteLocalnet(script string, listenPorts []int) error {
-	if !scriptHasLoopbackDNAT(script) || b.rlActive {
+func (b *ForwardBalancer) ensureRouteLocalnet(script string, listenPorts []int) error {
+	if !ScriptHasLoopbackDNAT(script) || b.RlActive {
 		return nil
 	}
-	before, err := rlSysctlRead(rlSysctlAll)
+	before, err := RlSysctlRead(RlSysctlAll)
 	if err != nil {
-		return fmt.Errorf("route_localnet: read %s: %w", rlSysctlAll, err)
+		return fmt.Errorf("route_localnet: read %s: %w", RlSysctlAll, err)
 	}
-	if err := rlSysctlWrite(rlSysctlAll, "1"); err != nil {
-		return fmt.Errorf("route_localnet: sysctl -w %s=1: %w", rlSysctlAll, err)
+	if err := RlSysctlWrite(RlSysctlAll, "1"); err != nil {
+		return fmt.Errorf("route_localnet: sysctl -w %s=1: %w", RlSysctlAll, err)
 	}
-	b.rlActive = true
-	b.rlSaved = before // the true before value — never a guess
+	b.RlActive = true
+	b.RlSaved = before // the true before value — never a guess
 	if len(listenPorts) > 0 {
 		b.ensureRouteLocalnetIface(listenPorts[0])
 	}
@@ -99,40 +101,40 @@ func (b *forwardBalancer) ensureRouteLocalnet(script string, listenPorts []int) 
 // ensureRouteLocalnetIface additionally sets the per-interface knob when
 // the listen interface is known; its failure is non-fatal (the 'all' knob
 // is already set). Caller holds b.mu.
-func (b *forwardBalancer) ensureRouteLocalnetIface(listenPort int) {
-	iface := rlListenIface(listenPort)
+func (b *ForwardBalancer) ensureRouteLocalnetIface(listenPort int) {
+	iface := RlListenIface(listenPort)
 	if iface == "" {
 		return
 	}
 	key := "net.ipv4.conf." + iface + ".route_localnet"
-	before, err := rlSysctlRead(key)
+	before, err := RlSysctlRead(key)
 	if err != nil {
 		return // unknown key on this kernel: 'all' covers it
 	}
-	if err := rlSysctlWrite(key, "1"); err != nil {
+	if err := RlSysctlWrite(key, "1"); err != nil {
 		log.Printf("[balancer] route_localnet: %s=1 failed (%v); the 'all' knob is set", key, err)
 		return
 	}
-	b.rlIface, b.rlSavedIface = iface, before
+	b.RlIface, b.RlSavedIface = iface, before
 }
 
 // settleRouteLocalnet restores the captured route_localnet when the new
 // script no longer DNATs to loopback, then forgets the capture. Only
 // values this process captured are ever written back. Caller holds b.mu.
-func (b *forwardBalancer) settleRouteLocalnet(script string) {
-	if scriptHasLoopbackDNAT(script) || !b.rlActive {
+func (b *ForwardBalancer) settleRouteLocalnet(script string) {
+	if ScriptHasLoopbackDNAT(script) || !b.RlActive {
 		return
 	}
-	if b.rlSaved != "" {
-		if err := rlSysctlWrite(rlSysctlAll, b.rlSaved); err != nil {
-			log.Printf("[balancer] route_localnet: restore %s=%s failed: %v", rlSysctlAll, b.rlSaved, err)
+	if b.RlSaved != "" {
+		if err := RlSysctlWrite(RlSysctlAll, b.RlSaved); err != nil {
+			log.Printf("[balancer] route_localnet: restore %s=%s failed: %v", RlSysctlAll, b.RlSaved, err)
 		}
 	}
-	if b.rlIface != "" && b.rlSavedIface != "" {
-		key := "net.ipv4.conf." + b.rlIface + ".route_localnet"
-		if err := rlSysctlWrite(key, b.rlSavedIface); err != nil {
-			log.Printf("[balancer] route_localnet: restore %s=%s failed: %v", key, b.rlSavedIface, err)
+	if b.RlIface != "" && b.RlSavedIface != "" {
+		key := "net.ipv4.conf." + b.RlIface + ".route_localnet"
+		if err := RlSysctlWrite(key, b.RlSavedIface); err != nil {
+			log.Printf("[balancer] route_localnet: restore %s=%s failed: %v", key, b.RlSavedIface, err)
 		}
 	}
-	b.rlActive, b.rlSaved, b.rlIface, b.rlSavedIface = false, "", "", ""
+	b.RlActive, b.RlSaved, b.RlIface, b.RlSavedIface = false, "", "", ""
 }

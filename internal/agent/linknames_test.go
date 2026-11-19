@@ -4,12 +4,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestLinkNames(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = old })
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = old })
 
 	if got := linkLabel("main"); got != "" {
 		t.Fatalf("no file: got %q", got)

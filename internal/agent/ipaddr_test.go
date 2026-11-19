@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestIPFamily(t *testing.T) {
@@ -15,8 +17,8 @@ func TestIPFamily(t *testing.T) {
 		"2001:db8::1": 6, "::1": 6, "fd00::5": 6,
 		"": 0, "example.com": 0, "[2001:db8::1]": 0, "1.2.3.4/32": 0, "1.2.3": 0,
 	} {
-		if got := ipFamily(in); got != want {
-			t.Errorf("ipFamily(%q) = %d, want %d", in, got, want)
+		if got := infra.IPFamily(in); got != want {
+			t.Errorf("infra.IPFamily(%q) = %d, want %d", in, got, want)
 		}
 	}
 }
@@ -35,11 +37,11 @@ func TestHostPortAndURLHost(t *testing.T) {
 		{"0.0.0.0", 9000, "0.0.0.0:9000", "0.0.0.0"},
 		{"::", 9000, "[::]:9000", "[::]"},
 	} {
-		if got := hostPort(c.host, c.port); got != c.hp {
-			t.Errorf("hostPort(%q, %d) = %q, want %q", c.host, c.port, got, c.hp)
+		if got := infra.HostPort(c.host, c.port); got != c.hp {
+			t.Errorf("infra.HostPort(%q, %d) = %q, want %q", c.host, c.port, got, c.hp)
 		}
-		if got := urlHost(c.host); got != c.uh {
-			t.Errorf("urlHost(%q) = %q, want %q", c.host, got, c.uh)
+		if got := infra.URLHost(c.host); got != c.uh {
+			t.Errorf("infra.URLHost(%q) = %q, want %q", c.host, got, c.uh)
 		}
 	}
 }

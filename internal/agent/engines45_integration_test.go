@@ -35,6 +35,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -46,7 +48,7 @@ func eng45Env(key, def string) string {
 }
 
 // The test harness (TestMain) clears the pinned-key var for hermetic
-// tests; the container runner re-pins it from ENG45_PUBKEY before any
+// tests; the container infra.Runner re-pins it from ENG45_PUBKEY before any
 // driver runs (the orchestrator passes the artifact-signing public key).
 func init() {
 	if k := os.Getenv("ENG45_PUBKEY"); k != "" {
@@ -276,7 +278,7 @@ func TestEngines45WstunnelEnd(t *testing.T) {
 	eng45InitSpawnCapture(role)
 
 	d := NewWstDriver()
-	inst := engine.Instance{TunnelID: "eng45-wst", Params: mustJSON(p)}
+	inst := engine.Instance{TunnelID: "eng45-wst", Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		eng45Status(t, "wst start ERROR "+err.Error())
 		t.Fatalf("start: %v", err)
@@ -368,7 +370,7 @@ func TestEngines45ChiselEnd(t *testing.T) {
 	eng45InitSpawnCapture(role)
 
 	d := NewChiselDriver()
-	inst := engine.Instance{TunnelID: "eng45-ch", Params: mustJSON(p)}
+	inst := engine.Instance{TunnelID: "eng45-ch", Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		eng45Status(t, "chisel start ERROR "+err.Error())
 		t.Fatalf("start: %v", err)
@@ -473,9 +475,9 @@ func TestEngines45MixedManager(t *testing.T) {
 	// each agent resolves its role from its enrollment name). The iran
 	// container runs the iperf3 -s targets the relays point at.
 	tunnels := []engine.TunnelSpec{
-		{ID: "mix-wst", Engine: "wstunnel", Params: mustJSON(wst), Enabled: true},
-		{ID: "mix-ch", Engine: "chisel", Params: mustJSON(ch), Enabled: true},
-		{ID: "mix-frp", Engine: "frp", Params: mustJSON(fr), Enabled: true},
+		{ID: "mix-wst", Engine: "wstunnel", Params: infra.MustJSON(wst), Enabled: true},
+		{ID: "mix-ch", Engine: "chisel", Params: infra.MustJSON(ch), Enabled: true},
+		{ID: "mix-frp", Engine: "frp", Params: infra.MustJSON(fr), Enabled: true},
 	}
 	res := mgr.Reconcile(context.Background(), engines, tunnels)
 	if len(res.Errors) > 0 {

@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // netProbeDial is the connectivity-probe seam (defaults to the shared dialFn
@@ -38,7 +40,7 @@ const (
 )
 
 // Owned file paths are vars so hermetic tests can redirect them into the
-// temp configDir; production keeps the real system paths.
+// temp infra.ConfigDir; production keeps the real system paths.
 var (
 	netOwnedSysctlFile = "/etc/sysctl.d/99-quantum-netopt.conf"
 	netOwnedUnitFile   = "/etc/systemd/system/quantum-netopt-nic.service"
@@ -77,7 +79,7 @@ type netBaseline struct {
 	OwnedFiles map[string]string   `json:"owned_files_before"` // owned file path -> previous content
 }
 
-func netOptDir() string      { return filepath.Join(configDir, "netopt") }
+func netOptDir() string      { return filepath.Join(infra.ConfigDir, "netopt") }
 func netJournalPath() string { return filepath.Join(netOptDir(), "journal.json") }
 func netBaselinePath() string {
 	return filepath.Join(netOptDir(), "baseline.json")

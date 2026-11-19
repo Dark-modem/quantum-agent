@@ -3,7 +3,7 @@ package agent
 // frpSecrets is the per-install frp credential set. The Phase-1A
 // decision (ARCHITECTURE-BRIEF-V2 follow-up): the old shared hardcoded
 // token/password are gone — every install generates its own on first
-// use and persists them 0600 (atomic tmp+rename) under configDir.
+// use and persists them 0600 (atomic tmp+rename) under infra.ConfigDir.
 //
 // Migration note: an install upgrading from the hardcoded defaults
 // starts with fresh credentials, so the frp config must regenerate on
@@ -16,12 +16,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // frpDashboardUser is fixed: the user name is not a secret.
 const frpDashboardUser = "admin"
 
-// frpSecretsFile is the credentials file inside configDir.
+// frpSecretsFile is the credentials file inside infra.ConfigDir.
 const frpSecretsFile = "frp-secrets.json"
 
 type frpSecrets struct {
@@ -63,7 +65,7 @@ func loadFrpSecrets() frpSecrets {
 	return *sec
 }
 
-func frpSecretsPath() string { return filepath.Join(configDir, frpSecretsFile) }
+func frpSecretsPath() string { return filepath.Join(infra.ConfigDir, frpSecretsFile) }
 
 func readFrpSecrets() *frpSecrets {
 	data, err := os.ReadFile(frpSecretsPath())
@@ -78,7 +80,7 @@ func readFrpSecrets() *frpSecrets {
 }
 
 func saveFrpSecrets(sec frpSecrets) error {
-	_ = os.MkdirAll(configDir, 0700)
+	_ = os.MkdirAll(infra.ConfigDir, 0700)
 	b, err := json.MarshalIndent(sec, "", "  ")
 	if err != nil {
 		return err

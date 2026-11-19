@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestPeerAuthMiddleware(t *testing.T) {
@@ -15,9 +17,9 @@ func TestPeerAuthMiddleware(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	c := loadPeerConfig()
 	c.PeerSecret = "super-secret-peer-key-12345"
@@ -81,9 +83,9 @@ func TestSendToPeerDualPath(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	oldConfigDir := configDir
-	configDir = tmpDir
-	defer func() { configDir = oldConfigDir }()
+	oldConfigDir := infra.ConfigDir
+	infra.ConfigDir = tmpDir
+	defer func() { infra.ConfigDir = oldConfigDir }()
 
 	c := loadPeerConfig()
 	c.PeerURL = mockServer.URL

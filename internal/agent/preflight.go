@@ -46,7 +46,7 @@ import (
 	"strings"
 
 	"github.com/Dark-modem/quantum-agent/internal/engine"
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // preflightScanDepth: the params object itself plus ONE nested map level

@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // status of GRE + FRP on this machine.
@@ -275,7 +277,7 @@ func tuneViaInstaller(action string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", script, arg)
-	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 	out, runErr := cmd.CombinedOutput()
 	o := strings.TrimSpace(string(out))
 	if o == "" {
@@ -298,7 +300,7 @@ func removeViaInstaller() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", script, "remove-tunnel", "--force")
-	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 	out, runErr := cmd.CombinedOutput()
 	o := strings.TrimSpace(string(out))
 	if o == "" {
@@ -397,7 +399,7 @@ type peerLive struct {
 	icmpTarget    string
 }
 
-func peersFile() string { return configDir + "/peers.json" }
+func peersFile() string { return infra.ConfigDir + "/peers.json" }
 
 func loadPeers() []peerRecord {
 	data, err := os.ReadFile(peersFile())
@@ -540,7 +542,7 @@ func removePeerViaInstaller(id int) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", script, "remove-peer", "--id", fmt.Sprint(id), "--force")
-	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 	out, runErr := cmd.CombinedOutput()
 	o := strings.TrimSpace(stripANSI(string(out)))
 	if o == "" {
@@ -811,9 +813,9 @@ func staleConfigCandidates() []staleConfigCandidate {
 		{filepath.Join(frpDir, "frpc.toml"), "frpc", "foreign (client)", "frpc"},
 		{filepath.Join(backhaulDir, "config.toml"), "backhaul", "iran (backhaul)", "backhaul-server"},
 		{filepath.Join(backhaulDir, "server.toml"), "backhaul", "iran (backhaul)", "backhaul-server"},
-		{filepath.Join(configDir, "server.toml"), "backhaul", "iran (backhaul)", "backhaul-server"},
+		{filepath.Join(infra.ConfigDir, "server.toml"), "backhaul", "iran (backhaul)", "backhaul-server"},
 		{filepath.Join(backhaulDir, "client.toml"), "backhaul", "foreign (backhaul)", "backhaul-client"},
-		{filepath.Join(configDir, "client.toml"), "backhaul", "foreign (backhaul)", "backhaul-client"},
+		{filepath.Join(infra.ConfigDir, "client.toml"), "backhaul", "foreign (backhaul)", "backhaul-client"},
 	}
 }
 
@@ -827,7 +829,7 @@ func localStatus() tunnelStatus {
 // the config files; it runs no commands itself.
 func localStatusFrom(v *hostView) tunnelStatus {
 	var st tunnelStatus
-	st.TuneBackup = fileExists(filepath.Join(configDir, "tune.bak"))
+	st.TuneBackup = infra.FileExists(filepath.Join(infra.ConfigDir, "tune.bak"))
 	// GRE interface
 	if v.tunnelOK {
 		for _, line := range strings.Split(v.tunnelShow, "\n") {
@@ -897,7 +899,7 @@ func localStatusFrom(v *hostView) tunnelStatus {
 		// fall back to config presence, but only for an engine that is
 		// actually installed; a stale config alone must not claim a role
 		for _, c := range staleConfigCandidates() {
-			if fileExists(c.path) && engineBinaryPresent(c.engine) {
+			if infra.FileExists(c.path) && engineBinaryPresent(c.engine) {
 				st.Role = c.role
 				st.FrpSvc = c.svc
 				break
@@ -917,15 +919,15 @@ func localStatusFrom(v *hostView) tunnelStatus {
 		if _, err := os.Stat(bhPath); err != nil {
 			if _, err := os.Stat(filepath.Join(backhaulDir, "server.toml")); err == nil {
 				bhPath = filepath.Join(backhaulDir, "server.toml")
-			} else if _, err := os.Stat(filepath.Join(configDir, "server.toml")); err == nil {
-				bhPath = filepath.Join(configDir, "server.toml")
+			} else if _, err := os.Stat(filepath.Join(infra.ConfigDir, "server.toml")); err == nil {
+				bhPath = filepath.Join(infra.ConfigDir, "server.toml")
 			}
 		}
 		if st.FrpSvc == "backhaul-client" {
 			if _, err := os.Stat(filepath.Join(backhaulDir, "client.toml")); err == nil {
 				bhPath = filepath.Join(backhaulDir, "client.toml")
-			} else if _, err := os.Stat(filepath.Join(configDir, "client.toml")); err == nil {
-				bhPath = filepath.Join(configDir, "client.toml")
+			} else if _, err := os.Stat(filepath.Join(infra.ConfigDir, "client.toml")); err == nil {
+				bhPath = filepath.Join(infra.ConfigDir, "client.toml")
 			}
 		}
 		if data, err := os.ReadFile(bhPath); err == nil {
@@ -1091,10 +1093,6 @@ func grePeerInner(cidr string) string {
 	return fmt.Sprintf("%s.%s.%s.%d", parts[0], parts[1], parts[2], last)
 }
 
-// engineUnitDir is where systemd unit files for tunnel engines live (tests
-// point it at a throwaway dir).
-var engineUnitDir = "/etc/systemd/system"
-
 // preflightEngineSwitch verifies the target engine can actually run on this
 // host BEFORE any running service is stopped: binary installed and, for
 // Backhaul, the systemd unit written by quantum.sh present. A failed switch
@@ -1117,7 +1115,7 @@ func preflightEngineSwitch(engine string, isIran bool) error {
 		if isIran {
 			unit = "backhaul-server"
 		}
-		if _, err := os.Stat(filepath.Join(engineUnitDir, unit+".service")); err != nil {
+		if _, err := os.Stat(filepath.Join(infra.EngineUnitDir, unit+".service")); err != nil {
 			return fmt.Errorf("systemd unit %s.service is missing (run the Backhaul setup in `quantum` first); nothing was changed", unit)
 		}
 	}
@@ -1486,7 +1484,7 @@ remotePort = %d
 			}
 			conf := filepath.Join(backhaulDir, "client.toml")
 			tx.backup(conf)
-			if err := writeBackhaulClientConfig(conf, hostPort(dial, port), targetTransport, token); err != nil {
+			if err := writeBackhaulClientConfig(conf, infra.HostPort(dial, port), targetTransport, token); err != nil {
 				return outMsg.String(), tx.rollback(fmt.Errorf("write backhaul config: %w", err))
 			}
 			if err := tx.start("backhaul-client"); err != nil {
@@ -1517,7 +1515,7 @@ var engineSwitchServices = []string{"gre-tunnel", "frps", "frpc", "backhaul-serv
 var (
 	// engineServiceActive reports whether a unit is running; swappable for tests.
 	engineServiceActive = func(svc string) bool {
-		out, err := runCmdTimeoutOut(5*time.Second, "systemctl", "is-active", svc+".service")
+		out, err := infra.RunCmdTimeoutOut(5*time.Second, "systemctl", "is-active", svc+".service")
 		return err == nil && strings.TrimSpace(string(out)) == "active"
 	}
 	// engineVerifyDelay is how long a new engine must stay up after its

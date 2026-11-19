@@ -31,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 const (
@@ -68,43 +70,38 @@ func greScriptPath() (string, error) {
 		return "", fmt.Errorf("GRE_SCRIPT=%s not found", p)
 	}
 	if exe, err := os.Executable(); err == nil {
-		if p := filepath.Join(filepath.Dir(exe), "quantum.sh"); fileExists(p) {
+		if p := filepath.Join(filepath.Dir(exe), "quantum.sh"); infra.FileExists(p) {
 			return p, nil
 		}
-		if p := filepath.Join(filepath.Dir(exe), "gre.sh"); fileExists(p) {
+		if p := filepath.Join(filepath.Dir(exe), "gre.sh"); infra.FileExists(p) {
 			return p, nil
 		}
 	}
-	if fileExists("/usr/local/bin/quantum.sh") {
+	if infra.FileExists("/usr/local/bin/quantum.sh") {
 		return "/usr/local/bin/quantum.sh", nil
 	}
-	if fileExists("/usr/local/bin/gre.sh") {
+	if infra.FileExists("/usr/local/bin/gre.sh") {
 		return "/usr/local/bin/gre.sh", nil
 	}
-	if fileExists("/usr/local/bin/quantum") {
+	if infra.FileExists("/usr/local/bin/quantum") {
 		if abs, err := filepath.Abs("/usr/local/bin/quantum"); err == nil {
 			return abs, nil
 		}
 		return "/usr/local/bin/quantum", nil
 	}
-	if fileExists("quantum.sh") {
+	if infra.FileExists("quantum.sh") {
 		if abs, err := filepath.Abs("quantum.sh"); err == nil {
 			return abs, nil
 		}
 		return "quantum.sh", nil
 	}
-	if fileExists("gre.sh") {
+	if infra.FileExists("gre.sh") {
 		if abs, err := filepath.Abs("gre.sh"); err == nil {
 			return abs, nil
 		}
 		return "gre.sh", nil
 	}
 	return "", fmt.Errorf("quantum.sh not found (set QUANTUM_SCRIPT=/path/to/quantum.sh)")
-}
-
-func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
 }
 
 // greScriptTarget is where syncPanelScript writes the fresh script:
@@ -156,7 +153,7 @@ func currentIranBundle() (string, string) {
 		Engine     string `json:"engine"`
 		Transport  string `json:"transport"`
 	}
-	if sData, err := os.ReadFile(filepath.Join(configDir, "setup.json")); err == nil {
+	if sData, err := os.ReadFile(filepath.Join(infra.ConfigDir, "setup.json")); err == nil {
 		_ = json.Unmarshal(sData, &setupMeta)
 	}
 
@@ -346,7 +343,7 @@ func detectPublicIP() string {
 }
 
 func routeSourceIP() string {
-	out, err := runCmdTimeout(5*time.Second, "ip", "route", "get", "1.1.1.1")
+	out, err := infra.RunCmdTimeout(5*time.Second, "ip", "route", "get", "1.1.1.1")
 	if err == nil {
 		f := strings.Fields(string(out))
 		for i, p := range f {
@@ -365,7 +362,7 @@ func savedPublicIP() string {
 	var meta struct {
 		LocalPub string `json:"local_public"`
 	}
-	if data, err := os.ReadFile(filepath.Join(configDir, "setup.json")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(infra.ConfigDir, "setup.json")); err == nil {
 		_ = json.Unmarshal(data, &meta)
 	}
 	if ip := strings.TrimSpace(meta.LocalPub); net.ParseIP(ip) != nil && !isPrivateIP(ip) {
@@ -450,13 +447,13 @@ func routeSourceIP6() string { return routeSourceTo6("2001:4860:4860::8888") }
 
 // routeSourceTo6 is the source address this server uses towards IPv6 dst.
 func routeSourceTo6(dst string) string {
-	out, err := runCmdTimeout(5*time.Second, "ip", "-6", "route", "get", dst)
+	out, err := infra.RunCmdTimeout(5*time.Second, "ip", "-6", "route", "get", dst)
 	if err != nil {
 		return ""
 	}
 	f := strings.Fields(string(out))
 	for i, p := range f {
-		if p == "src" && i+1 < len(f) && isV6(f[i+1]) {
+		if p == "src" && i+1 < len(f) && infra.IsV6(f[i+1]) {
 			return f[i+1]
 		}
 	}
@@ -738,7 +735,7 @@ func handleSetupPost(w http.ResponseWriter, r *http.Request) {
 			// The master's panel port is unknown here (each panel picks its
 			// own); without a port sendToPeer tries the usual ones, and the
 			// handshake reply then records the real port.
-			pcfg.PeerURL = "http://" + urlHost(body.RemotePub)
+			pcfg.PeerURL = "http://" + infra.URLHost(body.RemotePub)
 		}
 		_ = savePeerConfig(pcfg)
 
@@ -786,7 +783,7 @@ func runInstaller(b setupRequest, ports []int, rawPorts []string) (string, strin
 	ctx, cancel := context.WithTimeout(context.Background(), installerTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", append([]string{script}, args...)...)
-	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+	cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 	out, runErr := cmd.CombinedOutput()
 	steps := []string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {

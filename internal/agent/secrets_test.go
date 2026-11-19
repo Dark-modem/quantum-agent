@@ -9,15 +9,17 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func TestFrpSecretsGeneratedOncePerInstall(t *testing.T) {
 	dir := t.TempDir()
-	old := configDir
-	configDir = dir
-	t.Cleanup(func() { configDir = old })
+	old := infra.ConfigDir
+	infra.ConfigDir = dir
+	t.Cleanup(func() { infra.ConfigDir = old })
 	// Earlier tests may have populated the process-wide cache against a
-	// different configDir seam; this test owns the seam from here on.
+	// different infra.ConfigDir seam; this test owns the seam from here on.
 	frpSecretsMu.Lock()
 	frpSecretsCache = nil
 	frpSecretsMu.Unlock()
@@ -55,8 +57,8 @@ func TestFrpSecretsGeneratedOncePerInstall(t *testing.T) {
 }
 
 func TestFrpSecretsDistinctAcrossInstalls(t *testing.T) {
-	old := configDir
-	defer func() { configDir = old }()
+	old := infra.ConfigDir
+	defer func() { infra.ConfigDir = old }()
 	frpSecretsMu.Lock()
 	frpSecretsCache = nil
 	frpSecretsMu.Unlock()
@@ -72,10 +74,10 @@ func TestFrpSecretsDistinctAcrossInstalls(t *testing.T) {
 		frpSecretsMu.Unlock()
 	}
 	resetCache()
-	configDir = t.TempDir()
+	infra.ConfigDir = t.TempDir()
 	a := loadFrpSecrets()
 	resetCache()
-	configDir = t.TempDir()
+	infra.ConfigDir = t.TempDir()
 	b := loadFrpSecrets()
 	if a.AuthToken == b.AuthToken || a.DashboardPassword == b.DashboardPassword {
 		t.Fatal("two installs generated identical credentials")

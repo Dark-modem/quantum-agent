@@ -30,6 +30,8 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"strings"
 	"time"
 
@@ -778,7 +780,7 @@ func (d *XrayDriver) ForwardAddress(inst engine.Instance) (string, int, bool) {
 }
 
 // xrayParamsJSON is test/ops helper.
-func xrayParamsJSON(p xrayParams) json.RawMessage { return mustJSON(p) }
+func xrayParamsJSON(p xrayParams) json.RawMessage { return infra.MustJSON(p) }
 
 // execCommandJSON runs `xray api statsquery --server=...` and returns the
 // parsed counters for the prefix. Seam-able for tests.

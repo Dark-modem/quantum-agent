@@ -11,6 +11,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // cliMode marks a one-shot command (no listeners); netcli.go sets it too.
@@ -21,7 +23,7 @@ var cliMode bool
 // endpoints are legitimate) and never creates configuration.
 func cliStart() bool {
 	if v := os.Getenv("GRE_PANEL_DIR"); v != "" {
-		configDir = v
+		infra.ConfigDir = v
 	}
 	cliMode = true
 	log.SetOutput(io.Discard)
@@ -31,7 +33,7 @@ func cliStart() bool {
 
 // cfgPath is the controller config file location (kept for install-shape
 // detection: netops_api.go distinguishes controller vs agent endpoints).
-func cfgPath() string { return filepath.Join(configDir, "panel.json") }
+func cfgPath() string { return filepath.Join(infra.ConfigDir, "panel.json") }
 
 // loadOrInit reads the controller config when present; on an agent-only
 // endpoint it is a no-op (the monolith's version would create a default

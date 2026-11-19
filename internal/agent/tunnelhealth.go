@@ -32,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 const (
@@ -164,7 +166,7 @@ func thTargets(s *HubSnapshot) []thTarget {
 			peerInner = grePeerInner(st.Gre.Inner)
 			hosts = append(hosts, peerInner)
 		}
-		if h := normHost(st.RemotePub); h != "" {
+		if h := infra.NormHost(st.RemotePub); h != "" {
 			hosts = append(hosts, h)
 		}
 		l := peerLive{peerRecord: peerRecord{ID: mainTunnelID, Name: "Tunnel", RemotePub: st.RemotePub, Engine: st.Engine,

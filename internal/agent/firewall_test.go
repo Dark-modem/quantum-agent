@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // fwFakeHost records every command and answers from a script.
@@ -76,13 +78,13 @@ func (f *fwFakeHost) failWhen(frag string) {
 	f.failOn = append(f.failOn, frag)
 }
 
-// fwTestLab redirects configDir (audit file) and installs the fake host.
+// fwTestLab redirects infra.ConfigDir (audit file) and installs the fake host.
 func fwTestLab(t *testing.T) *fwFakeHost {
 	t.Helper()
 	dir := t.TempDir()
-	oldDir := configDir
-	configDir = dir
-	t.Cleanup(func() { configDir = oldDir })
+	oldDir := infra.ConfigDir
+	infra.ConfigDir = dir
+	t.Cleanup(func() { infra.ConfigDir = oldDir })
 	fake := &fwFakeHost{responses: map[string]string{}}
 	oldRun := fwRun
 	fwRun = fake.run
@@ -384,7 +386,7 @@ func TestFirewallTunnelTeardownRemovesOnlyOwnRules(t *testing.T) {
 	fake := fwTestLab(t)
 	fake.adopt(fwIptablesHost())
 	fake.setResponse("iptables -S QUANTUM_FW", "")
-	portRegistryReset(t) // registry on the same temp configDir
+	portRegistryReset(t) // registry on the same temp infra.ConfigDir
 
 	// Two tunnels each hold one port; the registry is the teardown source.
 	if err := portReserve(7001, "tcp", portOwnerTunnel, "at_a", "ipv4", ""); err != nil {
@@ -457,7 +459,7 @@ func TestFirewallAuditTrailRecordsSnapshots(t *testing.T) {
 	if _, err := fwApply(plan); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(configDir, "firewall_audit.jsonl"))
+	data, err := os.ReadFile(filepath.Join(infra.ConfigDir, "firewall_audit.jsonl"))
 	if err != nil {
 		t.Fatalf("audit trail missing: %v", err)
 	}

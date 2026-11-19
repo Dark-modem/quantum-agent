@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func withBackhaulVersion(t *testing.T, v string) {
@@ -115,9 +117,9 @@ func TestCarrierApplicable(t *testing.T) {
 
 // L13: the port in "wss:PORT" is applied to the WSS carrier.
 func TestWSSConfigForCarrierAppliesPort(t *testing.T) {
-	old := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = old })
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = old })
 	c := loadWSSConfig()
 	c.RemoteAddr = "203.0.113.5:8443"
 	_ = saveWSSConfig(c)

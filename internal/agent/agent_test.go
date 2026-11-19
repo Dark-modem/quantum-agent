@@ -29,9 +29,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
-// agentLab is matrixInstanceLab (temp configDir/unitDir, stubbed tinc and
+// agentLab is matrixInstanceLab (temp infra.ConfigDir/unitDir, stubbed tinc and
 // exec funnel) plus the agent-specific seams: no real docker and no real
 // PasarGuard directories.
 func agentLab(t *testing.T) {
@@ -430,7 +432,7 @@ func TestAgentCommandPowerAndRegister(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("stop: %+v", res)
 	}
-	if _, err := os.Stat(filepath.Join(configDir, "matrix.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(infra.ConfigDir, "matrix.json")); err != nil {
 		t.Fatal("stop removed the instance state (stop must be stop-only)")
 	}
 	res = agentRunCommand(agentCommand{ID: "p2", Op: agentCmdMatrixStart, Params: map[string]string{"instance": "matrix"}})
@@ -768,9 +770,9 @@ func TestAgentTrafficClassification(t *testing.T) {
 		"  eth0: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0\n" +
 		"  qmx0: 10 1 0 0 0 0 0 0 20 2 0 0 0 0 0 0\n" +
 		"docker0: 1 1 0 0 0 0 0 0 1 1 0 0 0 0 0 0\n"
-	oldRead := agentReadNetDev
-	agentReadNetDev = func() (string, error) { return data, nil }
-	t.Cleanup(func() { agentReadNetDev = oldRead })
+	oldRead := infra.AgentReadNetDev
+	infra.AgentReadNetDev = func() (string, error) { return data, nil }
+	t.Cleanup(func() { infra.AgentReadNetDev = oldRead })
 
 	rep := agentCollectTraffic()
 	if len(rep.Ifaces) != 2 {
@@ -783,7 +785,7 @@ func TestAgentTrafficClassification(t *testing.T) {
 		t.Fatalf("qmx0 entry = %+v", rep.Ifaces[1])
 	}
 
-	agentReadNetDev = func() (string, error) { return "", errAgentNoNetDev }
+	infra.AgentReadNetDev = func() (string, error) { return "", errAgentNoNetDev }
 	rep = agentCollectTraffic()
 	if len(rep.Ifaces) != 1 || rep.Ifaces[0].Name != "_all" || rep.Ifaces[0].Known {
 		t.Fatalf("unreadable fallback = %+v", rep.Ifaces)
@@ -862,8 +864,8 @@ func TestAgentTLSPinTOFU(t *testing.T) {
 // TestAgentEnrollCLI runs enroll against an httptest controller: success
 // persists agent.json, rejection fails cleanly.
 func TestAgentEnrollCLI(t *testing.T) {
-	oldCfg := configDir
-	t.Cleanup(func() { configDir = oldCfg })
+	oldCfg := infra.ConfigDir
+	t.Cleanup(func() { infra.ConfigDir = oldCfg })
 
 	var gotToken, gotPath string
 	var gotBody agentEnrollRequest

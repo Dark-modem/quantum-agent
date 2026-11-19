@@ -39,6 +39,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -61,7 +63,7 @@ var agentBackoffBase = 2 * time.Second
 
 // agentOpsWG tracks the session's async work (desired application, command
 // execution, heartbeat loop, reconcile) so tests can wait for it to drain
-// before rotating the configDir/matrix seams those goroutines read.
+// before rotating the infra.ConfigDir/matrix seams those goroutines read.
 var agentOpsWG sync.WaitGroup
 
 // AgentOpsWait blocks until the agent runtime's in-flight async operations
@@ -602,7 +604,7 @@ func (s *agentSession) sendHeartbeat() {
 func agentRun() int {
 	ident, ok := agentLoadIdentity()
 	if !ok {
-		fmt.Fprintf(os.Stderr, "agent: no enrollment found in %s — run `gre-panel agent enroll --server <url> --token <token>` first\n", configDir)
+		fmt.Fprintf(os.Stderr, "agent: no enrollment found in %s — run `gre-panel agent enroll --server <url> --token <token>` first\n", infra.ConfigDir)
 		return 2
 	}
 	log.Printf("[agent] starting agent %s for %s (v%s)", ident.ID, agentWSURL(ident), panelVersion)
@@ -715,7 +717,7 @@ func agentEnroll(args []string) int {
 	fmt.Println("[OK] Agent enrolled.")
 	fmt.Printf("Agent ID:  %s\n", ident.ID)
 	fmt.Printf("Server:    %s\n", agentWSURL(ident))
-	fmt.Printf("State dir: %s\n", configDir)
+	fmt.Printf("State dir: %s\n", infra.ConfigDir)
 	fmt.Println("Next:      gre-panel agent install   (or run `gre-panel agent run` directly)")
 	fmt.Println("==================================================")
 	return 0
@@ -753,11 +755,11 @@ var filepathAbs = filepath.Abs
 // --- CLI dispatch -----------------------------------------------------------
 
 // agentCmd is the `gre-panel agent` entry point, dispatched from main() as
-// `case "agent": os.Exit(agentCmd(os.Args[2:]))`. It scopes configDir from
+// `case "agent": os.Exit(agentCmd(os.Args[2:]))`. It scopes infra.ConfigDir from
 // GRE_PANEL_DIR before anything else, exactly like cliSetPassword.
 func agentCmd(args []string) int {
 	if v := os.Getenv("GRE_PANEL_DIR"); v != "" {
-		configDir = v
+		infra.ConfigDir = v
 	}
 	if len(args) == 0 {
 		agentUsage()

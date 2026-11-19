@@ -1,4 +1,4 @@
-package agent
+package infra
 
 import (
 	"context"
@@ -9,17 +9,17 @@ import (
 	"time"
 )
 
-// withRunner swaps the command runner for one test and resets exec stats.
+// withRunner swaps the command Runner for one test and resets exec stats.
 func withRunner(t *testing.T, r cmdRunner) {
 	t.Helper()
-	old := runner
-	runner = r
-	resetExecStats()
-	t.Cleanup(func() { runner = old; resetExecStats() })
+	old := Runner
+	Runner = r
+	ResetExecStats()
+	t.Cleanup(func() { Runner = old; ResetExecStats() })
 }
 
 func execStatFor(name string) (execStatJSON, bool) {
-	for _, e := range execSnapshot() {
+	for _, e := range ExecSnapshot() {
 		if e.Command == name {
 			return e, true
 		}
@@ -34,11 +34,11 @@ func TestRunCmdCountsAndOutput(t *testing.T) {
 		}
 		return []byte(strings.Join(args, " ")), nil
 	})
-	out, err := runCmdTimeout(time.Second, "echo", "a", "b")
+	out, err := RunCmdTimeout(time.Second, "echo", "a", "b")
 	if err != nil || string(out) != "a b" {
 		t.Fatalf("got %q %v", out, err)
 	}
-	out, err = runCmdTimeout(time.Second, "bad")
+	out, err = RunCmdTimeout(time.Second, "bad")
 	if err == nil || string(out) != "boom" {
 		t.Fatalf("error output must pass through, got %q %v", out, err)
 	}
@@ -57,7 +57,7 @@ func TestRunCmdTimeout(t *testing.T) {
 		return nil, ctx.Err()
 	})
 	start := time.Now()
-	_, err := runCmdTimeout(40*time.Millisecond, "slow")
+	_, err := RunCmdTimeout(40*time.Millisecond, "slow")
 	if err == nil || time.Since(start) > time.Second {
 		t.Fatalf("expected quick timeout, err=%v after %v", err, time.Since(start))
 	}
@@ -73,11 +73,11 @@ func TestRunCmdOutSelectsStdoutOnly(t *testing.T) {
 		got = ctx.Value(stdoutOnlyKey{}) != nil
 		return nil, nil
 	})
-	_, _ = runCmdTimeoutOut(time.Second, "x")
+	_, _ = RunCmdTimeoutOut(time.Second, "x")
 	if !got {
 		t.Fatal("runCmdTimeoutOut must mark the context stdout-only")
 	}
-	_, _ = runCmdTimeout(time.Second, "x")
+	_, _ = RunCmdTimeout(time.Second, "x")
 	if got {
 		t.Fatal("runCmdTimeout must not be stdout-only")
 	}
@@ -88,7 +88,7 @@ func TestRunCmdConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, _ = runCmdTimeout(time.Second, "c") }()
+		go func() { defer wg.Done(); _, _ = RunCmdTimeout(time.Second, "c") }()
 	}
 	wg.Wait()
 	if e, _ := execStatFor("c"); e.Calls != 50 {
@@ -97,14 +97,14 @@ func TestRunCmdConcurrent(t *testing.T) {
 }
 
 func TestRunCmdRealExec(t *testing.T) {
-	old := runner
-	runner = execRunner
-	defer func() { runner = old }()
-	out, err := runCmdTimeout(5*time.Second, "sh", "-c", "echo out; echo err 1>&2")
+	old := Runner
+	Runner = ExecRunner
+	defer func() { Runner = old }()
+	out, err := RunCmdTimeout(5*time.Second, "sh", "-c", "echo out; echo err 1>&2")
 	if err != nil || !strings.Contains(string(out), "out") || !strings.Contains(string(out), "err") {
 		t.Fatalf("combined: %q %v", out, err)
 	}
-	out, _ = runCmdTimeoutOut(5*time.Second, "sh", "-c", "echo out; echo err 1>&2")
+	out, _ = RunCmdTimeoutOut(5*time.Second, "sh", "-c", "echo out; echo err 1>&2")
 	if strings.Contains(string(out), "err") {
 		t.Fatalf("stdout-only leaked stderr: %q", out)
 	}

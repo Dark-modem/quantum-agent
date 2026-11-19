@@ -16,6 +16,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/balancer"
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // diagRedactValue redacts one secret string: sha256, first 12 hex chars.
@@ -30,7 +33,7 @@ func diagRedactValue(v string) string {
 // diagCmdOut runs a command and returns its output (or the error text),
 // capped so one noisy command cannot bloat the bundle.
 func diagCmdOut(name string, args ...string) string {
-	out, err := runCmdTimeout(10*time.Second, name, args...)
+	out, err := infra.RunCmdTimeout(10*time.Second, name, args...)
 	if err != nil {
 		return "ERROR: " + err.Error()
 	}
@@ -68,7 +71,7 @@ func diagIdentityShape() map[string]any {
 // private keys).
 func diagConfigFiles() []map[string]any {
 	out := []map[string]any{}
-	_ = filepath.Walk(configDir, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(infra.ConfigDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -78,7 +81,7 @@ func diagConfigFiles() []map[string]any {
 			return nil
 		}
 		out = append(out, map[string]any{
-			"path":   strings.TrimPrefix(path, configDir+"/"),
+			"path":   strings.TrimPrefix(path, infra.ConfigDir+"/"),
 			"bytes":  info.Size(),
 			"sha256": "sha256:" + hex.EncodeToString(sha256SumBytes(b)[:12]),
 		})
@@ -109,7 +112,7 @@ func diagInterfaces() string {
 
 // diagCollect builds the bundle's top-level map. The tunnels/balancer
 // views come from the caller (the persisted balancer snapshot).
-func diagCollect(tunnels []map[string]any, balancer []balTargetDiag, routeLocalnet bool) map[string]any {
+func diagCollect(tunnels []map[string]any, balancer []balancer.TargetDiag, routeLocalnet bool) map[string]any {
 	return map[string]any{
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 		"agent": map[string]any{
@@ -149,23 +152,23 @@ func cliDiag(args []string) int {
 		return 2
 	}
 	if v := os.Getenv("GRE_PANEL_DIR"); v != "" {
-		configDir = v
+		infra.ConfigDir = v
 	}
 	// The balancer view comes from the persisted snapshot (the running
 	// agent wrote it); a cold agent produces what it can. The snapshot
 	// also carries the tunnel summaries and the route_localnet state.
-	balancer := []balTargetDiag{}
+	var balDiag []balancer.TargetDiag
 	var tunnels []map[string]any
 	routeLocalnet := false
-	if b, err := os.ReadFile(balancerStatusPath()); err == nil {
-		var rep balTickReport
+	if b, err := os.ReadFile(balancer.StatusPath()); err == nil {
+		var rep balancer.TickReport
 		if json.Unmarshal(b, &rep) == nil {
-			balancer = rep.Targets
+			balDiag = rep.Targets
 			tunnels = rep.Tunnels
 			routeLocalnet = rep.RouteLocalnet
 		}
 	}
-	bundle := diagCollect(tunnels, balancer, routeLocalnet)
+	bundle := diagCollect(tunnels, balDiag, routeLocalnet)
 	data, err := json.MarshalIndent(bundle, "", "  ")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "diag: render:", err)

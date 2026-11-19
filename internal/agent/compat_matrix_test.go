@@ -15,7 +15,7 @@
 //
 //	AGENT_COMPAT_E2E=1      run the matrix
 //	PANEL_RC2_BIN, PANEL_CUR_BIN   prebuilt panel binaries (both repos'
-//	                            worktrees are built by the runner script;
+//	                            worktrees are built by the infra.Runner script;
 //	                            the agent test never leaves its repo)
 //
 // Results land in COMPAT-OUT (dir) as JSON + the test log.

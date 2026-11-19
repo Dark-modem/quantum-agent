@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 type carrierConfig struct {
@@ -70,7 +72,7 @@ func wssRemoteHost(addr string) string {
 }
 
 func carrierConfigPath() string {
-	return filepath.Join(configDir, "carrier.json")
+	return filepath.Join(infra.ConfigDir, "carrier.json")
 }
 
 func defaultCarrierConfig() carrierConfig {
@@ -146,7 +148,7 @@ func saveCarrierConfig(cfg carrierConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	if err := os.MkdirAll(infra.ConfigDir, 0700); err != nil {
 		return err
 	}
 	tmp := carrierConfigPath() + ".tmp"
@@ -160,7 +162,7 @@ func getPeerGRE() string {
 	if p := findPeer(1); p != nil && p.PeerGre != "" {
 		return p.PeerGre
 	}
-	data, err := os.ReadFile(filepath.Join(configDir, "setup.json"))
+	data, err := os.ReadFile(filepath.Join(infra.ConfigDir, "setup.json"))
 	if err == nil {
 		var s struct {
 			PeerGre string `json:"peer_gre"`
@@ -198,7 +200,7 @@ func handleCarrierGet(w http.ResponseWriter, r *http.Request) {
 	cfg := loadCarrierConfig()
 	// Without a GRE interface there is nothing to ping: say so instead of
 	// reporting packet loss to the 10.10.10.1 fallback.
-	greExists := fileExists(filepath.Join(sysClassNet, "gre-tunnel"))
+	greExists := infra.FileExists(filepath.Join(sysClassNet, "gre-tunnel"))
 	st, rtt, statusText := "no_tunnel", "", "No tunnel"
 	if greExists {
 		st, rtt = getCarrierPingStatus()
@@ -391,13 +393,13 @@ func runQuantumCarrierCmd(args ...string) ([]byte, error) {
 	if err == nil {
 		cmdArgs := append([]string{script, "carrier"}, args...)
 		cmd := exec.CommandContext(ctx, "bash", cmdArgs...)
-		cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+		cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 		return cmd.CombinedOutput()
 	}
-	if fileExists("/usr/local/bin/quantum") {
+	if infra.FileExists("/usr/local/bin/quantum") {
 		cmdArgs := append([]string{"carrier"}, args...)
 		cmd := exec.CommandContext(ctx, "/usr/local/bin/quantum", cmdArgs...)
-		cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+configDir)
+		cmd.Env = append(os.Environ(), "GRE_SKIP_PANEL=1", "TERM=dumb", "GRE_PANEL_DIR="+infra.ConfigDir)
 		return cmd.CombinedOutput()
 	}
 	return nil, fmt.Errorf("quantum script not found")

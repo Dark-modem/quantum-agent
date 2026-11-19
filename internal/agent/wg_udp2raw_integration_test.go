@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"net/http"
 	"os"
 	"os/exec"
@@ -110,9 +112,9 @@ func TestWgUdp2rawIntegration(t *testing.T) {
 	origKey := engineArtifactPubKeyB64
 	engineArtifactPubKeyB64 = "integration-pinned-key"
 	t.Cleanup(func() { engineArtifactPubKeyB64 = origKey })
-	origCfg := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = origCfg })
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = origCfg })
 
 	if out, err := exec.Command("sudo", "ip", "link", "add", "wg-probe0", "type", "wireguard").CombinedOutput(); err != nil {
 		t.Skipf("wireguard kernel module unavailable: %v: %s", err, out)
@@ -172,7 +174,7 @@ func TestWgUdp2rawIntegration(t *testing.T) {
 	// The companion binary: download + warm the cache (the R5 fetch/verify
 	// chain is engine-common and covered by the other integrations).
 	bin := udp2rawFetchBinary(t, dir)
-	binDir := filepath.Join(configDir, "engines", "udp2raw", "bin", "20230206.0")
+	binDir := filepath.Join(infra.ConfigDir, "engines", "udp2raw", "bin", "20230206.0")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -275,14 +277,14 @@ func TestWgUdp2rawIntegration(t *testing.T) {
 		SigAmd: strings.Repeat("QQ==", 22)[:88], SigArm: strings.Repeat("QQ==", 22)[:88],
 	}
 	instA := engine.Instance{TunnelID: "twgu-a", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), instA); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
 	mustIfaceName(t, d, "twgu-a")
 	serveNS = wguNSB
 	instB := engine.Instance{TunnelID: "twgu-b", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), instB); err != nil {
 		t.Fatalf("client Start: %v", err)
 	}
@@ -305,11 +307,11 @@ func TestWgUdp2rawIntegration(t *testing.T) {
 	revB := p
 	revB.PeerPublic = pubA
 	serveNS = wguNSA
-	if err := d.Reload(engine.Instance{TunnelID: "twgu-a", Params: mustJSON(revA)}); err != nil {
+	if err := d.Reload(engine.Instance{TunnelID: "twgu-a", Params: infra.MustJSON(revA)}); err != nil {
 		t.Fatalf("server revision: %v", err)
 	}
 	serveNS = wguNSB
-	if err := d.Reload(engine.Instance{TunnelID: "twgu-b", Params: mustJSON(revB)}); err != nil {
+	if err := d.Reload(engine.Instance{TunnelID: "twgu-b", Params: infra.MustJSON(revB)}); err != nil {
 		t.Fatalf("client revision: %v", err)
 	}
 
@@ -453,11 +455,11 @@ print(buf.decode(errors="replace"))
 		t.Fatalf("restart RE-KEYED the tunnel: pubA %s→%s pubB %s→%s (keys must persist per tunnel)", pubA0, pubA1, pubB0, pubB1)
 	}
 	serveNS = wguNSA
-	if err := d.Reload(engine.Instance{TunnelID: "twgu-a", Params: mustJSON(revA)}); err != nil {
+	if err := d.Reload(engine.Instance{TunnelID: "twgu-a", Params: infra.MustJSON(revA)}); err != nil {
 		t.Fatalf("server revision after restart: %v", err)
 	}
 	serveNS = wguNSB
-	if err := d.Reload(engine.Instance{TunnelID: "twgu-b", Params: mustJSON(revB)}); err != nil {
+	if err := d.Reload(engine.Instance{TunnelID: "twgu-b", Params: infra.MustJSON(revB)}); err != nil {
 		t.Fatalf("client revision after restart: %v", err)
 	}
 	reOK := false

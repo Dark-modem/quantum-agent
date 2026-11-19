@@ -16,6 +16,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // The ssh imports went with the deleted carrier (bagherHostKeyCallback,
@@ -45,7 +47,7 @@ type bagherCarrierStatus struct {
 }
 
 func bagherCarrierStatusPath(id int) string {
-	return filepath.Join(configDir, fmt.Sprintf("bagher-carrier-%d.json", id))
+	return filepath.Join(infra.ConfigDir, fmt.Sprintf("bagher-carrier-%d.json", id))
 }
 
 // readBagherCarrierStatus returns the carrier's last report if it is fresh.

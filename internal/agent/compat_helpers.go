@@ -7,7 +7,6 @@ package agent
 
 import (
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -17,15 +16,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // ---- main.go: misc helpers ----
 
 // mustJSON marshals indented JSON, ignoring errors (best-effort output).
-func mustJSON(v any) []byte {
-	b, _ := json.MarshalIndent(v, "", "  ")
-	return b
-}
 
 // portFree reports whether a TCP port is bindable right now.
 func portFree(port int) bool {
@@ -118,7 +115,7 @@ func memInfo() map[string]any {
 
 // ---- tls.go: certificate presence and expiry (read-only parts) ----
 
-func tlsDir() string      { return filepath.Join(configDir, "tls") }
+func tlsDir() string      { return filepath.Join(infra.ConfigDir, "tls") }
 func tlsCertFile() string { return filepath.Join(tlsDir(), "server.crt") }
 func tlsKeyFile() string  { return filepath.Join(tlsDir(), "server.key") }
 

@@ -37,6 +37,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // carrierChoice is one way a tunnel can travel: "frp:kcp", "backhaul:tcpmux",
@@ -296,7 +298,7 @@ func switchPeerCarrier(p peerRecord, to carrierChoice) (string, error) {
 		}
 	}
 
-	unitPath := filepath.Join(engineUnitDir, newSvc+".service")
+	unitPath := filepath.Join(infra.EngineUnitDir, newSvc+".service")
 	tx.backup(unitPath)
 	after := ""
 	if to.needsGRE() {
@@ -339,12 +341,12 @@ func switchPeerCarrier(p peerRecord, to carrierChoice) (string, error) {
 		if cur.Engine != "frp" {
 			oldConf = filepath.Join(backhaulDir, fmt.Sprintf("server-%d.toml", id))
 			_ = runSystemctl("disable", "--now", udpSvc)
-			for _, f := range []string{filepath.Join(engineUnitDir, udpSvc+".service"), filepath.Join(backhaulDir, "udp", bhSvc+".toml")} {
+			for _, f := range []string{filepath.Join(infra.EngineUnitDir, udpSvc+".service"), filepath.Join(backhaulDir, "udp", bhSvc+".toml")} {
 				tx.backup(f)
 				_ = os.Remove(f)
 			}
 		}
-		for _, f := range []string{filepath.Join(engineUnitDir, oldSvc+".service"), oldConf} {
+		for _, f := range []string{filepath.Join(infra.EngineUnitDir, oldSvc+".service"), oldConf} {
 			tx.backup(f)
 			_ = os.Remove(f)
 		}
@@ -439,7 +441,7 @@ func (c carrierChoice) needsGRE() bool { return c.Engine == "frp" || c.Engine ==
 
 // swapStatePath is the peer-swap state file. §6.A3: held for loadSwapState
 // (tunnel.go — out of this stage's named scope — compiles against the chain).
-func swapStatePath() string { return filepath.Join(configDir, "carrier_swap.json") }
+func swapStatePath() string { return filepath.Join(infra.ConfigDir, "carrier_swap.json") }
 
 // loadSwapState reads the per-tunnel carrier the peer swap last applied.
 // §6.A3: prod-unreachable (the legacy peer-swap handlers are deleted);
@@ -582,7 +584,7 @@ type tunnelLink struct {
 	Seen       string `json:"seen,omitempty"`
 }
 
-func tunnelLinksPath() string { return filepath.Join(configDir, "tunnel_links.json") }
+func tunnelLinksPath() string { return filepath.Join(infra.ConfigDir, "tunnel_links.json") }
 
 var tunnelLinksMu sync.Mutex
 

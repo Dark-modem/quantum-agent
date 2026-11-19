@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 type alertConfig struct {
@@ -28,7 +30,7 @@ type alertEvent struct {
 	Host string `json:"host"`
 }
 
-func alertConfigPath() string { return filepath.Join(configDir, "alerts.json") }
+func alertConfigPath() string { return filepath.Join(infra.ConfigDir, "alerts.json") }
 
 func loadAlertConfig() alertConfig {
 	c := alertConfig{MinGapSec: 120}

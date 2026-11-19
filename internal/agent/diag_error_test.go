@@ -4,18 +4,20 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // The dashboard's Diagnostics cell shows only recent tunnel errors: a failed
 // login (E-AUTH-01) or a day-old FRP error must not mark the tunnel red.
 func TestLastTunnelErrorSkipsUnrelatedAndStale(t *testing.T) {
-	oldDir := configDir
-	configDir = t.TempDir()
+	oldDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	errMu.Lock()
 	oldEvents := errEvents
 	errMu.Unlock()
 	t.Cleanup(func() {
-		configDir = oldDir
+		infra.ConfigDir = oldDir
 		errMu.Lock()
 		errEvents = oldEvents
 		errMu.Unlock()

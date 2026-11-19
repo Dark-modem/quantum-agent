@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -58,14 +60,14 @@ func wgSetTestEnv(t *testing.T) (cmds *[]string, spawned *int) {
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Server: "http://panel.test", Name: "germany"}, true
 	}
-	origCfg := configDir
-	configDir = t.TempDir()
+	origCfg := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
 	t.Cleanup(func() {
 		wgRun = origRun
 		wgCmd = origCmd
 		frpSpawn = origSpawn
 		frpLoadIdentity = origIdent
-		configDir = origCfg
+		infra.ConfigDir = origCfg
 	})
 	return cmds, spawned
 }
@@ -124,11 +126,11 @@ func TestWgValidateParams(t *testing.T) {
 // kernel never gets configured and every command "succeeds" — found by
 // the netns integration test).
 func TestWgToolExecMapping(t *testing.T) {
-	origRunner := runner
-	t.Cleanup(func() { runner = origRunner })
+	origRunner := infra.Runner
+	t.Cleanup(func() { infra.Runner = origRunner })
 	var name string
 	var gotArgs []string
-	runner = func(ctx context.Context, n string, a ...string) ([]byte, error) {
+	infra.Runner = func(ctx context.Context, n string, a ...string) ([]byte, error) {
 		name, gotArgs = n, a
 		return nil, nil
 	}
@@ -195,7 +197,7 @@ func TestWgPeerApplicationShape(t *testing.T) {
 	p := wgTestParams()
 	p.PeerPublic = peerPub
 	inst := engine.Instance{TunnelID: "tw2", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("client Start: %v", err)
 	}
@@ -210,7 +212,7 @@ func TestWgPeerApplicationShape(t *testing.T) {
 	p2 := wgTestParams()
 	p2.PeerPublic = peerPub
 	inst2 := engine.Instance{TunnelID: "tw2b", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p2)}
+		Params: infra.MustJSON(p2)}
 	if err := d.Start(context.Background(), inst2); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
@@ -222,7 +224,7 @@ func TestWgPeerApplicationShape(t *testing.T) {
 	// No peer_public: no peer command at all (no placeholder).
 	*cmds = (*cmds)[:0]
 	inst3 := engine.Instance{TunnelID: "tw2c", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(wgTestParams())}
+		Params: infra.MustJSON(wgTestParams())}
 	if err := d.Start(context.Background(), inst3); err != nil {
 		t.Fatalf("peerless client Start: %v", err)
 	}
@@ -269,7 +271,7 @@ func TestWgStartStopShape(t *testing.T) {
 	d := NewWgDriver()
 	p := wgTestParams()
 	inst := engine.Instance{TunnelID: "tw1", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -321,7 +323,7 @@ func TestWgReconcileShape(t *testing.T) {
 	res := mgr.Reconcile(context.Background(),
 		[]engine.EngineSpec{{ID: "wireguard", Enabled: true}},
 		[]engine.TunnelSpec{{ID: "tw2", Engine: "wireguard", LocalServer: "germany", RemoteServer: "iran",
-			Params: mustJSON(p), Enabled: true}})
+			Params: infra.MustJSON(p), Enabled: true}})
 	if len(res.Errors) > 0 {
 		t.Fatalf("reconcile: %v", res.Errors)
 	}
@@ -352,7 +354,7 @@ func TestWgKeyExchangeFlow(t *testing.T) {
 	d := NewWgDriver()
 	p := wgTestParams()
 	inst := engine.Instance{TunnelID: "tw3", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatal(err)
 	}
@@ -376,15 +378,15 @@ func TestWgKeyExchangeFlow(t *testing.T) {
 // non-peer params change still requires a restart.
 func TestWgTwoAgentKeyPersistence(t *testing.T) {
 	cmds, _ := wgSetTestEnv(t)
-	origCfg := configDir
-	t.Cleanup(func() { configDir = origCfg })
+	origCfg := infra.ConfigDir
+	t.Cleanup(func() { infra.ConfigDir = origCfg })
 	dirA, dirB := t.TempDir(), t.TempDir()
 
 	p := wgTestParams()
 	dA := NewWgDriver() // agent A (foreign, server role)
-	configDir = dirA
+	infra.ConfigDir = dirA
 	instA := engine.Instance{TunnelID: "twp-a", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := dA.Start(context.Background(), instA); err != nil {
 		t.Fatalf("A start: %v", err)
 	}
@@ -405,9 +407,9 @@ func TestWgTwoAgentKeyPersistence(t *testing.T) {
 	}
 	t.Cleanup(func() { frpLoadIdentity = origIdent })
 	dB := NewWgDriver() // agent B (Iran, client role)
-	configDir = dirB
+	infra.ConfigDir = dirB
 	instB := engine.Instance{TunnelID: "twp-b", LocalServer: "iran", RemoteServer: "germany",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := dB.Start(context.Background(), instB); err != nil {
 		t.Fatalf("B start: %v", err)
 	}
@@ -419,7 +421,7 @@ func TestWgTwoAgentKeyPersistence(t *testing.T) {
 	*cmds = (*cmds)[:0]
 	revB := p
 	revB.PeerPublic = pubA
-	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(revB)}); err != nil {
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: infra.MustJSON(revB)}); err != nil {
 		t.Fatalf("peer_public revision must apply live, got: %v", err)
 	}
 	joined := strings.Join(*cmds, "\n")
@@ -430,20 +432,20 @@ func TestWgTwoAgentKeyPersistence(t *testing.T) {
 		t.Fatalf("revision recreated the interface:\n%s", joined)
 	}
 	// The revision is recorded in the state: a second identical Reload is a no-op.
-	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(revB)}); err != nil {
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: infra.MustJSON(revB)}); err != nil {
 		t.Fatalf("second identical revision: %v", err)
 	}
 
 	// Peer revocation (peer_public back to empty) removes the kernel peer.
 	*cmds = (*cmds)[:0]
-	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(p)}); err != nil {
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: infra.MustJSON(p)}); err != nil {
 		t.Fatalf("revocation revision: %v", err)
 	}
 	if !strings.Contains(strings.Join(*cmds, "\n"), "peer "+pubA+" remove") {
 		t.Fatalf("revocation missing the kernel peer remove:\n%s", strings.Join(*cmds, "\n"))
 	}
 	// Re-apply for the restart phase.
-	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(revB)}); err != nil {
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: infra.MustJSON(revB)}); err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
 
@@ -453,7 +455,7 @@ func TestWgTwoAgentKeyPersistence(t *testing.T) {
 	*cmds = (*cmds)[:0]
 	dB2 := NewWgDriver()
 	instB2 := instB
-	instB2.Params = mustJSON(revB)
+	instB2.Params = infra.MustJSON(revB)
 	if err := dB2.Start(context.Background(), instB2); err != nil {
 		t.Fatalf("B restart: %v", err)
 	}
@@ -472,13 +474,13 @@ func TestWgTwoAgentKeyPersistence(t *testing.T) {
 
 	// Server side: same persistence + its revision pins the client's /32.
 	*cmds = (*cmds)[:0]
-	configDir = dirA            // back to agent A's state dir
+	infra.ConfigDir = dirA      // back to agent A's state dir
 	frpLoadIdentity = origIdent // agent A's identity (germany, server role)
 	dA2 := NewWgDriver()
 	revA := p
 	revA.PeerPublic = pubB
 	if err := dA2.Start(context.Background(), engine.Instance{TunnelID: "twp-a",
-		LocalServer: "germany", RemoteServer: "iran", Params: mustJSON(revA)}); err != nil {
+		LocalServer: "germany", RemoteServer: "iran", Params: infra.MustJSON(revA)}); err != nil {
 		t.Fatalf("A restart: %v", err)
 	}
 	dA2.mu.Lock()
@@ -494,7 +496,7 @@ func TestWgTwoAgentKeyPersistence(t *testing.T) {
 	// A non-peer change (MTU) still requires a restart.
 	mtu := revB
 	mtu.MTU = 1380
-	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: mustJSON(mtu)}); err != engine.ErrRestartRequired {
+	if err := dB.Reload(engine.Instance{TunnelID: "twp-b", Params: infra.MustJSON(mtu)}); err != engine.ErrRestartRequired {
 		t.Fatalf("MTU change must require a restart, got %v", err)
 	}
 }
@@ -543,11 +545,11 @@ func TestWgUninstallRemovesKeys(t *testing.T) {
 	d := NewWgDriver()
 	p := wgTestParams()
 	inst := engine.Instance{TunnelID: "twu", LocalServer: "germany", RemoteServer: "iran",
-		Params: mustJSON(p)}
+		Params: infra.MustJSON(p)}
 	if err := d.Start(context.Background(), inst); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	keyPath := filepath.Join(configDir, "wg", "twu.key")
+	keyPath := filepath.Join(infra.ConfigDir, "wg", "twu.key")
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("key file must exist while the tunnel runs: %v", err)
 	}
@@ -568,7 +570,7 @@ func TestWgUninstallRemovesKeys(t *testing.T) {
 	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("key file must be removed by Uninstall on idle, stat err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(configDir, "wg")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(infra.ConfigDir, "wg")); !os.IsNotExist(err) {
 		t.Fatalf("wg key dir must be removed by Uninstall on idle, stat err=%v", err)
 	}
 	_ = cmds

@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 	"github.com/gorilla/websocket"
 )
 

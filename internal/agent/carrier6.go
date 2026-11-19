@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // 6to4 and 4in6: the GRE tunnel rides on IPv6 (quantum.sh gre6_rebuild).
@@ -32,12 +34,12 @@ func isCarrier6(t string) bool { return t == carrier6to4 || t == carrier4in6 }
 // shows its IPv4 ends, so this is where they are read from.
 func gre6Env(ifname string) map[string]string {
 	m := map[string]string{}
-	data, err := os.ReadFile(filepath.Join(configDir, "gre6", ifname+".env"))
+	data, err := os.ReadFile(filepath.Join(infra.ConfigDir, "gre6", ifname+".env"))
 	if err != nil {
 		return m
 	}
 	for _, l := range strings.Split(string(data), "\n") {
-		if k, v, ok := strings.Cut(strings.TrimSpace(l), "="); ok && ipFamily(v) != 0 {
+		if k, v, ok := strings.Cut(strings.TrimSpace(l), "="); ok && infra.IPFamily(v) != 0 {
 			m[k] = v
 		}
 	}

@@ -8,15 +8,17 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
-// withPeerLink isolates configDir and the parts of cfg the peer code reads.
+// withPeerLink isolates infra.ConfigDir and the parts of cfg the peer code reads.
 func withPeerLink(t *testing.T, c PeerConfig) {
 	t.Helper()
-	oldDir, oldBase, oldPort := configDir, cfg.BasePath, cfg.Port
-	configDir = t.TempDir()
+	oldDir, oldBase, oldPort := infra.ConfigDir, cfg.BasePath, cfg.Port
+	infra.ConfigDir = t.TempDir()
 	cfg.BasePath, cfg.Port = "localbase", 7777
-	t.Cleanup(func() { configDir, cfg.BasePath, cfg.Port = oldDir, oldBase, oldPort })
+	t.Cleanup(func() { infra.ConfigDir, cfg.BasePath, cfg.Port = oldDir, oldBase, oldPort })
 	if err := savePeerConfig(c); err != nil {
 		t.Fatal(err)
 	}
@@ -106,14 +108,14 @@ func TestPublicIPSkipsPrivateAddresses(t *testing.T) {
 		}
 	}
 
-	oldDir := configDir
-	configDir = t.TempDir()
-	t.Cleanup(func() { configDir = oldDir })
-	_ = os.WriteFile(filepath.Join(configDir, "setup.json"), []byte(`{"local_public":"10.1.2.3"}`), 0600)
+	oldDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = oldDir })
+	_ = os.WriteFile(filepath.Join(infra.ConfigDir, "setup.json"), []byte(`{"local_public":"10.1.2.3"}`), 0600)
 	if v := savedPublicIP(); v != "" {
 		t.Fatalf("private setup.json address accepted: %q", v)
 	}
-	_ = os.WriteFile(filepath.Join(configDir, "setup.json"), []byte(`{"local_public":"198.51.100.22"}`), 0600)
+	_ = os.WriteFile(filepath.Join(infra.ConfigDir, "setup.json"), []byte(`{"local_public":"198.51.100.22"}`), 0600)
 	if v := savedPublicIP(); v != "198.51.100.22" {
 		t.Fatalf("savedPublicIP = %q", v)
 	}

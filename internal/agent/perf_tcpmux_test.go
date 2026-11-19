@@ -5,13 +5,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func withTempConfigDir(t *testing.T) func() {
 	t.Helper()
-	old := configDir
-	configDir = t.TempDir()
-	return func() { configDir = old }
+	old := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	return func() { infra.ConfigDir = old }
 }
 
 func TestTCPMuxDefaultIsOff(t *testing.T) {
@@ -65,7 +67,7 @@ func TestTCPMuxRoundTripJSON(t *testing.T) {
 	if err := savePerfConfig(c); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := os.ReadFile(filepath.Join(configDir, "perf.json"))
+	data, _ := os.ReadFile(filepath.Join(infra.ConfigDir, "perf.json"))
 	if !strings.Contains(string(data), `"tcp_mux": false`) {
 		t.Fatalf("explicit false must be persisted, got %s", data)
 	}

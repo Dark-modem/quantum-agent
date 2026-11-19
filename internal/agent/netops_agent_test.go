@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 // netAgentOnlyFixture: an enrolled lightweight agent — agent.json present,
@@ -32,7 +34,7 @@ import (
 // TestNetopsAgentLowResourcePlanShape pins the exact Conservative apply set
 // through the operation layer (the JSON Session 3 will transport).
 // TestNetopsJournalUnderAgentConfigDir proves the journal/baseline live
-// under the agent's configDir (not /tmp) across operations.
+// under the agent's infra.ConfigDir (not /tmp) across operations.
 // TestNetopsDispatcherAllOps runs every operation through the single
 // NetopDispatch entry point Session 3's agent dispatcher will call, on an
 // agent-only installation, and verifies the result types and the no-fake-
@@ -55,7 +57,7 @@ func netAgentOnlyFixture(t *testing.T) (map[string]string, map[string][]string, 
 	withTempConfig(t)
 	files, dirs, exec := netIranLikeFixture()
 	// The enrolled agent identity is the ONLY installation marker: write it
-	// to the real temp configDir (netInstallRoleOf stats the real FS).
+	// to the real temp infra.ConfigDir (netInstallRoleOf stats the real FS).
 	if err := os.WriteFile(agentIdentityPath(), []byte(`{"id":"agt_testagent001","controller":"wss://ctrl.example.test"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -247,22 +249,22 @@ func TestNetopsAgentLowResourcePlanShape(t *testing.T) {
 }
 
 // TestNetopsJournalUnderAgentConfigDir proves the journal/baseline live
-// under the agent's configDir (not /tmp) across operations.
+// under the agent's infra.ConfigDir (not /tmp) across operations.
 func TestNetopsJournalUnderAgentConfigDir(t *testing.T) {
 	netAgentApplyFixture(t)
 	if _, err := NetopApply(netRoleAuto, "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range []string{netJournalPath(), netBaselinePath()} {
-		if !strings.HasPrefix(f, configDir) {
-			t.Fatalf("journal path %s is not under configDir %s", f, configDir)
+		if !strings.HasPrefix(f, infra.ConfigDir) {
+			t.Fatalf("journal path %s is not under infra.ConfigDir %s", f, infra.ConfigDir)
 		}
 		if _, err := os.Stat(f); err != nil {
 			t.Fatalf("journal file missing: %v", err)
 		}
 	}
 	// and it must be next to agent.json, in the agent's own config dir
-	if filepath.Dir(netJournalPath()) != filepath.Join(configDir, "netopt") {
+	if filepath.Dir(netJournalPath()) != filepath.Join(infra.ConfigDir, "netopt") {
 		t.Fatalf("journal dir = %s", filepath.Dir(netJournalPath()))
 	}
 }

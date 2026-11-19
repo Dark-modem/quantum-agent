@@ -9,12 +9,14 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Dark-modem/quantum-agent/internal/infra"
 )
 
 func matrixEditLab(t *testing.T) matrixState {
 	t.Helper()
-	oldDir, oldUnit, oldTinc, oldExec := configDir, matrixUnitDir, matrixTincPath, matrixExec
-	configDir = t.TempDir()
+	oldDir, oldUnit, oldTinc, oldExec := infra.ConfigDir, matrixUnitDir, matrixTincPath, matrixExec
+	infra.ConfigDir = t.TempDir()
 	matrixUnitDir = t.TempDir()
 	matrixTincPath = func() (string, error) { return "/usr/sbin/tincd", nil }
 	matrixExec = func(name string, args ...string) (string, error) {
@@ -24,7 +26,7 @@ func matrixEditLab(t *testing.T) matrixState {
 		}
 		return "", nil
 	}
-	t.Cleanup(func() { configDir, matrixUnitDir, matrixTincPath, matrixExec = oldDir, oldUnit, oldTinc, oldExec })
+	t.Cleanup(func() { infra.ConfigDir, matrixUnitDir, matrixTincPath, matrixExec = oldDir, oldUnit, oldTinc, oldExec })
 	inst := matrixLegacyInstance()
 	st := matrixState{Enabled: true, Network: matrixNetname, Role: "hub", Family: "ipv4", Addr: "185.226.119.74", Port: 21097, Name: "main", IP: matrixHubIP, Token: strings.Repeat("a", 64), Ports: []int{18080}, Peers: []matrixPeer{{Name: "node", IP: matrixFirstPeer}}, ForwardBefore: "1"}
 	if e := matrixWriteConfig(inst, st, ""); e != nil {

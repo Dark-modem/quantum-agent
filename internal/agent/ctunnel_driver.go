@@ -92,6 +92,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dark-modem/quantum-agent/internal/infra"
+
 	"github.com/Dark-modem/quantum-agent/internal/engine"
 )
 
@@ -331,7 +333,7 @@ func ctEngineArgs(envPath string) []string {
 // created by ctunnel-kernel?") — the driver replicates exactly the
 // script's setup commands and deletes the interface on Stop.
 var ctIPCmd = func(args ...string) error {
-	_, err := runCmdTimeout(10*time.Second, "ip", args...)
+	_, err := infra.RunCmdTimeout(10*time.Second, "ip", args...)
 	return err
 }
 
@@ -424,7 +426,7 @@ func ctComment(tunnelID string) string { return "ctdrv-" + tunnelID }
 // it through the server namespace). Upstream parity: the kernel script
 // sets net.ipv4.ip_forward=1 before adding the forward rules.
 var ctSysctl = func(args ...string) error {
-	_, err := runCmdTimeout(10*time.Second, "sysctl", args...)
+	_, err := infra.RunCmdTimeout(10*time.Second, "sysctl", args...)
 	return err
 }
 
@@ -1235,8 +1237,8 @@ func (d *CtunnelDriver) Counters(inst engine.Instance) engine.Counters {
 			out.WireRx, out.WireTx, out.WireKnown = rx, tx, true
 		}
 	}
-	if data, err := agentReadNetDev(); err == nil {
-		if c, ok := agentParseNetDev(data)[st.iface]; ok {
+	if data, err := infra.AgentReadNetDev(); err == nil {
+		if c, ok := infra.AgentParseNetDev(data)[st.iface]; ok {
 			out.PayloadRx, out.PayloadTx, out.PayloadKnown = c.Rx, c.Tx, true
 		}
 	}

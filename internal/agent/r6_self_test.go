@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/Dark-modem/quantum-protocol"
+	protocol "github.com/Dark-modem/quantum-protocol"
 )
 
 // r6Desired builds a one-tunnel DesiredV2 with an optional Self stamp.
