@@ -225,7 +225,7 @@ func TestFRPIntegration(t *testing.T) {
 	// The hermetic TestMain stubs the infra.Runner seam; the integration test
 	// needs REAL host commands (iptables counters, config probes).
 	origRunner := infra.Runner
-	infra.Runner = execRunner
+	infra.Runner = infra.ExecRunner
 	t.Cleanup(func() { infra.Runner = origRunner })
 
 	// Ports.

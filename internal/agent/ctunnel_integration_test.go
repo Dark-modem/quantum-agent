@@ -412,12 +412,12 @@ func TestCtunnelIntegration(t *testing.T) {
 	// The payload counter view: the TUN lives in the CLIENT namespace —
 	// route the netdev seam there (the parse logic under test is the
 	// driver's; the /proc read is namespace plumbing).
-	origNetDev := agentReadNetDev
-	agentReadNetDev = func() (string, error) {
+	origNetDev := infra.AgentReadNetDev
+	infra.AgentReadNetDev = func() (string, error) {
 		out, err := exec.Command("sudo", "ip", "netns", "exec", ctNSB, "cat", "/proc/net/dev").CombinedOutput()
 		return string(out), err
 	}
-	t.Cleanup(func() { agentReadNetDev = origNetDev })
+	t.Cleanup(func() { infra.AgentReadNetDev = origNetDev })
 
 	origIdent := frpLoadIdentity
 	frpLoadIdentity = func() (agentIdentity, bool) {

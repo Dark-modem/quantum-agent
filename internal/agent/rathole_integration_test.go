@@ -230,7 +230,7 @@ func TestRatholeIntegration(t *testing.T) {
 	engineArtifactPubKeyB64 = pubB64
 	t.Cleanup(func() { engineArtifactPubKeyB64 = origKey })
 	origRunner := infra.Runner
-	infra.Runner = execRunner
+	infra.Runner = infra.ExecRunner
 	t.Cleanup(func() { infra.Runner = origRunner })
 
 	// Spawn seam: each instance respawns in ITS OWN namespace forever —
