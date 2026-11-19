@@ -538,25 +538,8 @@ func TestXrayTLSAndCDN(t *testing.T) {
 		t.Error("CDN over mKCP")
 	}
 
-	// The bundle carries the key only to the end that serves TLS.
-	l.Keys.PrivateKey = ""
-	bd, err := makeXrayBundle(l, "203.0.113.9")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fb, _ := parseXrayBundle(bd)
-	if !xrayKeyOK(fb.Keys.TLSKey) {
-		t.Error("direct: the foreign server (TLS server) did not get the key")
-	}
-	r := xrayTLSLink(t, "ws", xrayModeReverse, xraySideIran)
-	bd, err = makeXrayBundle(r, "203.0.113.9")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rb, _ := parseXrayBundle(bd)
-	if rb.Keys.TLSKey != "" || rb.Keys.TLSCert == "" {
-		t.Error("reverse: the foreign server (dialing) got the TLS key, or no certificate to pin")
-	}
+	// The bundle key-distribution section (makeXrayBundle/parseXrayBundle)
+	// went with the legacy bundle machinery in §6.A3.
 	// Reality links carry no certificate.
 	if g := xrayTestLink(t, "reality", xrayModeDirect, xraySideIran); g.Keys.TLSCert != "" {
 		t.Error("a Reality link has a TLS certificate")
