@@ -20,6 +20,15 @@
 //	ENG45_STATUS=/status/status.txt where health/traffic results land
 //	ENG45_PUBKEY=...                base64 DER SPKI of the signing key
 //	ENG45_CLI_PORT / ENG45_SRV_PORT etc. — port allocations
+//
+// The orchestrator runs the phases (wstunnel → chisel → mixed) BACK-TO-BACK
+// in the SAME netns as each phase's server side finishes. The client legs
+// are therefore PHASE-SCOPED: each exits when the server side reports its
+// scenario done (eng45PhaseDone) and tears its echo/iperf3 targets down via
+// t.Cleanup (eng45ClientTargets) — the pre-AGENT-25 harness slept a fixed
+// 10 minutes and left the phase's ports and iperf3 children bound/running
+// into the next phase, which is why the mixed phase's echo binds failed
+// EADDRINUSE ("echo targets failed", REFACTOR-A1 §3.6 flag 6).
 
 package agent
 
@@ -32,6 +41,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,32 +150,200 @@ func eng45EchoServer(port int) (net.Listener, error) {
 	return ln, nil
 }
 
-// eng45SwapTarget watches cmdFile; when it contains "iperf", the echo
-// target is swapped for iperf3 -s for one measurement window, then the
-// echo target comes back. Runs until the process dies.
-func eng45SwapTarget(cmdFile string, echoLn net.Listener, echoPort, iperfPort int) {
-	echoOpen := true
-	var iperf *exec.Cmd
+// eng45Target is one client-side tunnel target for a phase: an echo server
+// on port, swapped for a transient iperf3 -s while cmd says "iperf".
+type eng45Target struct {
+	cmd  string // the measuring end writes "iperf" to open the window, removes it to close it
+	port int    // echo/iperf3 port on THIS container
+}
+
+// eng45TargetState is one target's live state (one swap-loop goroutine per
+// target; the teardown func mutates under mu).
+type eng45TargetState struct {
+	tg      eng45Target
+	mu      sync.Mutex
+	echo    net.Listener
+	iperf   *exec.Cmd
+	stop    chan struct{}
+	stopped bool
+}
+
+// eng45FreeEchoPort frees a client target port a previous phase may still
+// hold: the pre-AGENT-25 harness left each phase's iperf3 -s child running
+// (orphaned at test-process exit) with the echo port bound INTO the next
+// phase — the mixed phase's echo binds then failed EADDRINUSE ("echo
+// targets failed"). Kill the exact stray server, then wait for the port
+// to come free.
+func eng45FreeEchoPort(t *testing.T, port int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
 	for {
-		data, err := os.ReadFile(cmdFile)
-		if err == nil && strings.TrimSpace(string(data)) == "iperf" && echoOpen {
-			echoLn.Close()
-			echoOpen = false
-			iperf = eng45IperfServer(iperfPort)
-			os.Remove(cmdFile)
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			ln.Close()
+			return
 		}
-		if !echoOpen && iperf != nil {
-			if iperf.ProcessState != nil || iperf.Process == nil {
-				iperf = nil
-				nl, err := eng45EchoServer(echoPort)
-				if err == nil {
-					echoLn = nl
-					echoOpen = true
+		if time.Now().After(deadline) {
+			eng45Status(t, fmt.Sprintf("echo port %d still busy after 10s: %v", port, err))
+			return
+		}
+		_ = exec.Command("pkill", "-f", fmt.Sprintf("iperf3 -s -p %d", port)).Run()
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// eng45ClientTargets binds the phase's echo targets and swaps each for
+// iperf3 -s while its cmd file says "iperf" (window semantics: the
+// measuring end removes the file to close the window; the iperf3 child is
+// killed and the echo listener comes back). Each port is freed first
+// (eng45FreeEchoPort). The teardown (listeners closed, iperf3 children
+// killed and reaped) is registered with t.Cleanup BEFORE any bind, so even
+// a partial bind failure frees what did bind — the ports must never
+// outlive the phase (the mixed phase re-binds the wstunnel/chisel ports).
+func eng45ClientTargets(t *testing.T, targets ...eng45Target) {
+	t.Helper()
+	sts := make([]*eng45TargetState, 0, len(targets))
+	t.Cleanup(func() {
+		for _, st := range sts {
+			st.mu.Lock()
+			st.stopped = true
+			ln, ip := st.echo, st.iperf
+			st.echo, st.iperf = nil, nil
+			st.mu.Unlock()
+			close(st.stop)
+			if ln != nil {
+				ln.Close()
+			}
+			eng45KillIperf(ip)
+		}
+	})
+	for _, tg := range targets {
+		eng45FreeEchoPort(t, tg.port)
+		ln, err := eng45EchoServer(tg.port)
+		if err != nil {
+			eng45Status(t, fmt.Sprintf("echo target bind %d ERROR %v", tg.port, err))
+			t.Fatalf("echo target bind %d: %v", tg.port, err)
+		}
+		sts = append(sts, &eng45TargetState{tg: tg, echo: ln, stop: make(chan struct{})})
+	}
+	for _, st := range sts {
+		go eng45SwapLoop(st)
+	}
+}
+
+// eng45SwapLoop watches one target's cmd file: while it says "iperf" the
+// echo listener is swapped for iperf3 -s; when the window closes (the file
+// is removed by the measuring end) the iperf3 child is killed and the echo
+// listener comes back. The loop exits on stop and never leaves a listener
+// or an iperf3 child behind after teardown.
+func eng45SwapLoop(st *eng45TargetState) {
+	for {
+		select {
+		case <-st.stop:
+			return
+		default:
+		}
+		data, err := os.ReadFile(st.tg.cmd)
+		want := err == nil && strings.TrimSpace(string(data)) == "iperf"
+		st.mu.Lock()
+		echoOpen := st.echo != nil
+		iperfUp := st.iperf != nil
+		st.mu.Unlock()
+		switch {
+		case want && echoOpen:
+			st.mu.Lock()
+			ln := st.echo
+			st.echo = nil
+			stopped := st.stopped
+			st.mu.Unlock()
+			if ln != nil {
+				ln.Close()
+			}
+			ip := eng45IperfServer(st.tg.port)
+			st.mu.Lock()
+			if stopped || st.stopped {
+				st.mu.Unlock()
+				eng45KillIperf(ip)
+				return
+			}
+			st.iperf = ip
+			st.mu.Unlock()
+		case !want && iperfUp:
+			st.mu.Lock()
+			ip := st.iperf
+			st.iperf = nil
+			st.mu.Unlock()
+			eng45KillIperf(ip)
+			if nl, err := eng45EchoServer(st.tg.port); err == nil {
+				st.mu.Lock()
+				if st.stopped {
+					st.mu.Unlock()
+					nl.Close()
+					return
 				}
+				st.echo = nl
+				st.mu.Unlock()
+			}
+		case !echoOpen && !iperfUp:
+			// iperf3 failed to spawn (or a rebind did) — restore the
+			// echo target so probes keep working.
+			if nl, err := eng45EchoServer(st.tg.port); err == nil {
+				st.mu.Lock()
+				if st.stopped {
+					st.mu.Unlock()
+					nl.Close()
+					return
+				}
+				st.echo = nl
+				st.mu.Unlock()
 			}
 		}
-		time.Sleep(time.Second)
+		select {
+		case <-st.stop:
+			return
+		case <-time.After(time.Second):
+		}
 	}
+}
+
+// eng45KillIperf kills one spawned iperf3 child and reaps it.
+func eng45KillIperf(ip *exec.Cmd) {
+	if ip == nil || ip.Process == nil {
+		return
+	}
+	_ = ip.Process.Kill()
+	_ = ip.Wait()
+}
+
+// eng45DoneMarker records the server-side scenario completion for the
+// client end (see eng45PhaseDone).
+func eng45DoneMarker(phase string) {
+	_ = os.WriteFile("/status/done-"+phase+".txt", []byte("done\n"), 0o600)
+}
+
+// eng45PhaseDone waits for the phase's server-side scenario to finish (the
+// server end writes the marker file at its SCENARIO-DONE) — the client end
+// must exit when its phase is done. The pre-AGENT-25 harness slept a fixed
+// 10 minutes instead, so the client process, its engine binary and its
+// echo/iperf3 targets stayed alive INTO the next phase (the orchestrator
+// runs the phases back-to-back in the SAME netns) — that is the mixed-phase
+// "echo targets failed" squat. A dedicated marker file is used because the
+// orchestrator truncates status.txt between phases (a status-line marker
+// would race the truncation). On cap the client exits anyway — teardown
+// still frees the ports, and a hung server side is the orchestrator's
+// TIMEOUT verdict, not the client's.
+func eng45PhaseDone(t *testing.T, phase string, maxWait time.Duration) {
+	t.Helper()
+	marker := "/status/done-" + phase + ".txt"
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			eng45Status(t, phase+" client: scenario done — phase-scoped exit")
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	eng45Status(t, phase+" client: scenario-done marker never seen after "+maxWait.String()+" — exiting anyway")
 }
 
 // eng45IperfClient pushes bytes through host:port (iperf3 takes the host
@@ -294,12 +472,11 @@ func TestEngines45WstunnelEnd(t *testing.T) {
 		// DETERMINISTIC kill: after 15s the client kills its OWN wstunnel
 		// binary — the supervisor restarts it (capped backoff, hermetic-
 		// proven) — the server observes down→up with no host coordination.
-		echoLn, err := eng45EchoServer(p.LocalPort)
-		if err != nil {
-			eng45Status(t, "wst echo target ERROR "+err.Error())
-			t.Fatal(err)
-		}
-		go eng45SwapTarget("/status/cmd-wst.txt", echoLn, p.LocalPort, p.LocalPort)
+		// Phase-scoped: the targets are torn down by t.Cleanup and the
+		// leg exits when the server side reports its scenario done — the
+		// old fixed 10-minute sleep kept this process and the port alive
+		// into the next phase (the mixed-phase echo squat).
+		eng45ClientTargets(t, eng45Target{cmd: "/status/cmd-wst.txt", port: p.LocalPort})
 		eng45Status(t, "wst client target up")
 		go func() {
 			time.Sleep(15 * time.Second)
@@ -308,7 +485,7 @@ func TestEngines45WstunnelEnd(t *testing.T) {
 				eng45Status(t, "wst self-kill: "+err.Error()+" "+strings.TrimSpace(string(out)))
 			}
 		}()
-		time.Sleep(10 * time.Minute)
+		eng45PhaseDone(t, "wstunnel", 8*time.Minute)
 		return
 	}
 	// SERVER end: wait for the tunnel (relay probe), then scenario.
@@ -358,6 +535,7 @@ func TestEngines45WstunnelEnd(t *testing.T) {
 	}
 	os.Remove("/status/cmd-wst.txt")
 	eng45Status(t, "wst SCENARIO-DONE")
+	eng45DoneMarker("wstunnel")
 }
 
 // TestEngines45ChiselEnd — the same scenario for chisel (TCP only).
@@ -381,19 +559,16 @@ func TestEngines45ChiselEnd(t *testing.T) {
 	if role != "client" {
 		// (server-side scenario continues below)
 	} else {
-		echoLn, err := eng45EchoServer(p.LocalPort)
-		if err != nil {
-			eng45Status(t, "chisel echo target ERROR "+err.Error())
-			t.Fatal(err)
-		}
-		go eng45SwapTarget("/status/cmd-ch.txt", echoLn, p.LocalPort, p.LocalPort)
+		// Phase-scoped target (see the wstunnel leg): torn down by
+		// t.Cleanup; the leg exits when the server side reports done.
+		eng45ClientTargets(t, eng45Target{cmd: "/status/cmd-ch.txt", port: p.LocalPort})
 		eng45Status(t, "chisel client target up")
 		go func() {
 			time.Sleep(15 * time.Second)
 			eng45Status(t, "chisel KILL-CLIENT (self)")
 			_ = exec.Command("pkill", "-f", "engines/chisel").Run()
 		}()
-		time.Sleep(10 * time.Minute)
+		eng45PhaseDone(t, "chisel", 8*time.Minute)
 		return
 	}
 	deadline := time.Now().Add(60 * time.Second)
@@ -443,6 +618,7 @@ func TestEngines45ChiselEnd(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	eng45Status(t, "chisel SCENARIO-DONE")
+	eng45DoneMarker("chisel")
 }
 
 // TestEngines45MixedManager drives frp + wstunnel + chisel + matrix
@@ -485,23 +661,26 @@ func TestEngines45MixedManager(t *testing.T) {
 		t.Fatalf("reconcile errors: %v", res.Errors)
 	}
 	eng45Status(t, fmt.Sprintf("mixed reconciled: running=%d", mgr.RunningCount()))
+	// Phase-scoped teardown: the engines this reconcile started must not
+	// outlive the test process (the client end exits when the scenario is
+	// done, not on a fixed sleep).
+	t.Cleanup(func() { _ = mgr.Reconcile(context.Background(), engines, nil) })
 
 	if role != "client" {
 		// (server-side scenario continues below)
 	} else {
-		// Echo targets for every engine's relay in the mixed phase.
-		ln1, e1 := eng45EchoServer(wst.LocalPort)
-		ln2, e2 := eng45EchoServer(ch.LocalPort)
-		ln3, e3 := eng45EchoServer(fr.LocalPort)
-		if e1 != nil || e2 != nil || e3 != nil {
-			eng45Status(t, "mixed echo targets ERROR")
-			t.Fatal("echo targets failed")
-		}
-		go eng45SwapTarget("/status/cmd-mwst.txt", ln1, wst.LocalPort, wst.LocalPort)
-		go eng45SwapTarget("/status/cmd-mch.txt", ln2, ch.LocalPort, ch.LocalPort)
-		go eng45SwapTarget("/status/cmd-mfrp.txt", ln3, fr.LocalPort, fr.LocalPort)
+		// Echo targets for every engine's relay in the mixed phase —
+		// phase-scoped: each port is freed first and everything is torn
+		// down by t.Cleanup (the old fixed-sleep legs kept the
+		// wstunnel/chisel echo ports bound from their own phases and the
+		// binds here failed EADDRINUSE — "echo targets failed").
+		eng45ClientTargets(t,
+			eng45Target{cmd: "/status/cmd-mwst.txt", port: wst.LocalPort},
+			eng45Target{cmd: "/status/cmd-mch.txt", port: ch.LocalPort},
+			eng45Target{cmd: "/status/cmd-mfrp.txt", port: fr.LocalPort},
+		)
 		eng45Status(t, "mixed client targets up")
-		time.Sleep(10 * time.Minute)
+		eng45PhaseDone(t, "mixed", 8*time.Minute)
 		return
 	}
 	// SERVER side: traffic through EACH real engine's forwarded port.
@@ -524,4 +703,5 @@ func TestEngines45MixedManager(t *testing.T) {
 		time.Sleep(2 * time.Second)
 	}
 	eng45Status(t, "mixed SCENARIO-DONE")
+	eng45DoneMarker("mixed")
 }
