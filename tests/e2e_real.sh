@@ -1074,9 +1074,14 @@ else
   # Diagnose (never mask): a portless map element (`0-29 : IP . 0`) passes
   # the re-render grep but the kernel no-ops it — conns fall through to
   # the local listener, connect_ok stays 10000, sinks count 0. Dump the
-  # live ruleset + the agent's own runtime view for post-mortem.
+  # live ruleset + the agent's own runtime view for post-mortem. The FULL
+  # table (not the map-only grep) also shows the base chain's HOOK line:
+  # a table whose map renders but whose hook went missing falls through
+  # to the local listener with the same signature (AGENT-23).
   echo "[e2e] nft table at failure:"
   nft_map | grep -E 'map|dnat|elements' | head -8 | sed 's/^/[e2e]   /'
+  echo "[e2e] nft table FULL (hook/chain lines included):"
+  nft_map | sed 's/^/[e2e]   /'
   echo "[e2e] agent runtime view:"
   sudo ip netns exec q-ir-drak-1 env GRE_PANEL_DIR=$LAB/agents/ir-drak-1 \
     $LAB/quantum-agent balancer status 2>/dev/null | head -30 | sed 's/^/[e2e]   /'
