@@ -212,9 +212,10 @@ func (l *labFakeDriver) Start(ctx context.Context, inst engine.Instance) error {
 	// flake needed exactly this trail (run logs are the only observer of
 	// the running agent's sink counters).
 	if old, existed := l.payload[inst.TunnelID]; existed {
-		log.Printf("[lab] sink %s: RESTART resets the counter (old value %d)", inst.TunnelID, old.Load())
+		log.Printf("[lab] sink %s: RESTART resets the counter (old value %d; params now %s)",
+			inst.TunnelID, old.Load(), string(inst.Params))
 	} else {
-		log.Printf("[lab] sink %s: first bind on :%d", inst.TunnelID, p.LabPort)
+		log.Printf("[lab] sink %s: first bind on :%d (params %s)", inst.TunnelID, p.LabPort, string(inst.Params))
 	}
 	l.sinks[inst.TunnelID] = ln
 	l.payload[inst.TunnelID] = counter

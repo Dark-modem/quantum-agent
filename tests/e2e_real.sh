@@ -710,6 +710,42 @@ PYEOF
   diag_log "sink probe live agent view after 95s:"
   diag_agents_runtime ir-drak-1
 }
+# AGENT-23 (the FIX, test-only): after a panel restart every agent
+# re-plays its journaled revision at reconnect and the lab sinks RESTART
+# — the counter resets (the [lab]/[engine] trails prove it: run 2 wiped
+# 1105009/858000 counted bytes at the reconnect). A WB→WA delta whose
+# window straddles that reset loses the pre-reset bytes forever (the
+# store's deltaUint refuses to invent them) — that IS the phase16/
+# AGENT-22 "0 of 0 — want ~30/70" distribution-leg flake. So the
+# weight-change window must OPEN only after every reporting sink agent
+# has reconnected AND re-reported. Ground truth the harness can see: the
+# panel's LIVE per-agent view (/api/mesh/agents → runtime[]) is IN-MEMORY
+# and wiped by the restart, so a row re-appearing there with
+# payload_known=true IS the agent's first post-reconnect heartbeat —
+# the reset is already done. Both drak sink agents reporting ⇒ safe to
+# open the window; one extra heartbeat cadence (31 s) then guarantees
+# the post-reset samples are in the store before WB is taken.
+wait_counter_rebaseline() { # wait_counter_rebaseline [TIMEOUT_S]
+  local deadline=$(( $(date +%s) + ${1:-120} )) ok
+  while [ $(date +%s) -lt $deadline ]; do
+    ok=$(diag_agents_runtime ir-drak-1 2>/dev/null | python3 -c "
+import sys
+agents = set()
+for l in sys.stdin:
+    l = l.strip()
+    if 'pknown=True' in l and '-b' in l:
+        agents.add(l.split()[0])
+print('YES' if len(agents) >= 2 else 'NO')" 2>/dev/null)
+    if [ "$ok" = "YES" ]; then
+      sleep 31 # one full heartbeat cadence: the reset samples are stored
+      diag_log "counter rebaseline: both sink agents re-reported post-reconnect (window safe to open)"
+      return 0
+    fi
+    sleep 3
+  done
+  diag_log "counter rebaseline wait TIMED OUT (${1:-120}s) — measuring anyway (resets may straddle the window)"
+  return 1
+}
 wait_usage_diag() { # wait_usage_diag BEFORE FROM_TS — wait_usage's poll
   # semantics verbatim, plus a probe trail: every ~15 s it appends the
   # store view AND the live agent view to $LAB/dist-diag.log, so a 0-delta
@@ -1035,6 +1071,10 @@ while [ $(date +%s) -lt $DEADLINE ]; do
   sleep 0.3
 done
 if [ "$FLIPPED" = "1" ]; then ok "weight change re-rendered the nft map (30/70 ranges)"; else bad "weight change did not re-render the nft map"; fi
+# AGENT-23: open the measurement window only after the reconnect counter
+# resets are done (see wait_counter_rebaseline) — a WB taken while an
+# agent is still reconnecting measures the reset, not the traffic.
+wait_counter_rebaseline 120 || true
 WB=$(fake_tunnel_usage)
 WB_TS=$(date +%s)
 send_conns 10000
