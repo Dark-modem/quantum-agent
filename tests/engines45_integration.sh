@@ -77,7 +77,7 @@ STATUS_WIN="$(cygpath -m "$STATUS_DIR" 2>/dev/null || echo "$STATUS_DIR")"
 docker run -d --name "$CT" --privileged -v "${STATUS_WIN}:/status" ubuntu:24.04 sleep 7200 >/dev/null
 docker cp tests/.eng45.test "$CT":/eng45.test && docker exec "$CT" bash -c 'chmod 755 /eng45.test'
 docker exec "$CT" bash -c "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq iperf3 python3 iproute2 curl >/dev/null 2>&1"
-MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -- bash -c 'cd /var/tmp/eng45-art/pub && tar -cf - .' | docker exec -i "$CT" bash -c 'tar -xf - -C /pub && echo "artifacts in container: $(ls /pub/pk/api/agent/artifact | wc -l)"'
+MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -- bash -c 'cd /var/tmp/eng45-art/pub && tar -cf - .' | docker exec -i "$CT" bash -c 'mkdir -p /pub && tar -xf - -C /pub && echo "artifacts in container: $(ls /pub/pk/api/agent/artifact | wc -l)"'
 docker exec "$CT" bash -c 'ip netns add nsa && ip netns add nsb && ip link add veth-a type veth peer name veth-b && ip link set veth-a netns nsa && ip link set veth-b netns nsb && ip netns exec nsa ip addr add 10.200.0.1/24 dev veth-a && ip netns exec nsa ip link set veth-a up && ip netns exec nsa ip link set lo up && ip netns exec nsb ip addr add 10.200.0.2/24 dev veth-b && ip netns exec nsb ip link set veth-b up && ip netns exec nsb ip link set lo up && echo netns-ok'
 docker exec "$CT" bash -c 'test -x /eng45.test || exit 1; test -f /pub/pk/api/agent/artifact/frp-0.61.1-linux-amd64.tar.gz || exit 1; echo preflight-ok' || exit 1
 
