@@ -120,7 +120,22 @@ rm -rf $LAB; mkdir -p $LAB
 # this fresh config dir and fight the new panel (observed as RSTs).
 sudo pkill -x quantum-panel 2>/dev/null
 sleep 1
-cd "$REPO_ROOT/../quantum-panel" || exit 1
+# B-AG3 (AGENT-22, test-only): the panel is normally built from the SIBLING
+# checkout's CURRENT state (it sits on ui/live and churns), so a lab verdict
+# says nothing about WHICH panel source produced it. E2E_PANEL_SRC=<dir>
+# pins the panel source: when set, the panel builds from that directory
+# (an exported snapshot / throwaway clone at a known SHA) instead, making
+# lab verdicts reproducible. UNSET = the default behavior, unchanged.
+PANEL_SRC="$REPO_ROOT/../quantum-panel"
+if [ -n "${E2E_PANEL_SRC:-}" ]; then
+  PANEL_SRC="$E2E_PANEL_SRC"
+  echo "panel source PINNED via E2E_PANEL_SRC: $PANEL_SRC"
+fi
+if [ ! -f "$PANEL_SRC/cmd/quantum-panel/main.go" ]; then
+  echo "panel source has no cmd/quantum-panel/main.go: $PANEL_SRC"
+  exit 1
+fi
+cd "$PANEL_SRC" || exit 1
 GOFLAGS="-trimpath -buildvcs=false" go build -o $LAB/quantum-panel ./cmd/quantum-panel || { echo "panel build failed"; exit 1; }
 cd "$REPO_ROOT" || exit 1
 GOFLAGS="-trimpath -buildvcs=false" go build -o $LAB/quantum-agent ./cmd/quantum-agent || { echo "agent build failed"; exit 1; }
