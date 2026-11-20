@@ -1,47 +1,69 @@
 #!/usr/bin/env bash
 ###############################################################################
 # tests/engines45_integration.sh — REAL wstunnel v10.1.9 + chisel v1.10.1 +
-# frp 0.61.1 through the REAL drivers, two containers (quantum-test-eng45-a
-# = foreign/server, quantum-test-eng45-b = iran/client) on a private docker
-# network, artifacts over real HTTP (R5 manifest + files), iperf3 THROUGH
-# the tunnels, kill → Health fails → supervisor restart → traffic again,
-# and the mixed-engine Manager phase (frp + wstunnel + chisel + matrix).
-# Containers and the network are REMOVED afterwards with proof.
+# frp 0.61.1 through the REAL drivers, ONE privileged container
+# (quantum-test-eng45) with TWO network namespaces inside (nsa =
+# foreign/server, nsb = iran/client), artifacts over real HTTP (R5 manifest
+# + files), iperf3 THROUGH the tunnels, kill → Health fails → supervisor
+# restart → traffic again, and the mixed-engine Manager phase (frp +
+# wstunnel + chisel + matrix). Phases run BACK-TO-BACK in the same netns;
+# the client legs are phase-scoped (see engines45_integration_test.go).
+# The container is REMOVED afterwards with proof.
+#
+# AGENT-25 harness repairs (all pre-existing drift):
+#   - the artifacts step ran the script through `tr -d "\n"`, which makes
+#     it a ONE-LINE COMMENT (no-op) — the lab silently ran on stale pins +
+#     a stale /var/tmp/eng45-art for generations; now run BY PATH.
+#   - the runner was built from a hardcoded phase-7-era worktree path
+#     (wt-p7-engines); now from THIS repo.
+#   - the preflight checked the upstream frp name (underscores) while the
+#     repacked artifact is dash-named — preflight could never pass.
+#   - the WSL build env used GOSUMDB=off (blocks the pinned toolchain's
+#     verification) and a /tmp/goproxy that does not survive a WSL
+#     restart; now the backend19-gates.sh env pattern.
+#   - the runner-start docker exec lines carry POSIX paths in -e values
+#     without MSYS_NO_PATHCONV=1 — Git Bash rewrote ENG45_STATUS to a
+#     Windows path, status writes went nowhere, and every phase "ended"
+#     via the 8-minute TIMEOUT branch (the predecessors' eng45 evidence
+#     shows exactly that; the mixed-B FAIL was only ever visible in the
+#     runner-B log tail).
 ###############################################################################
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-A=quantum-test-eng45-a; B=quantum-test-eng45-b; NET=quantum-test-eng45-n
+CT=quantum-test-eng45
 STATUS_DIR="$(pwd)/tests/.eng45-status.d"; rm -rf "$STATUS_DIR"; mkdir -p "$STATUS_DIR"
 STATUS="$STATUS_DIR/status.txt"
-# ART persists across runs (upstream downloads are slow); fetch() reuses
-# files already present.
-ART="$(pwd)/tests/.eng45-art"; mkdir -p "$ART"
 WSVER=10.1.9; CHVER=1.10.1; FRVER=0.61.1
 
 cleanup() {
-    docker rm -f "$A" "$B" >/dev/null 2>&1 || true
-    docker network rm "$NET" >/dev/null 2>&1 || true
-    echo "== proof: no quantum-test-* resources remain =="
-    docker ps -a --format '{{.Names}}' | grep '^quantum-test' && echo "LEFTOVER!" || echo "containers: none ✓"
+    docker rm -f "$CT" >/dev/null 2>&1 || true
+    echo "== proof: no quantum-test-eng45 resources remain =="
+    docker ps -a --format '{{.Names}}' | grep '^quantum-test-eng45' && echo "LEFTOVER!" || echo "containers: none ✓"
 }
 trap cleanup EXIT
 
 DOCKER="docker"; command -v docker >/dev/null 2>&1 || DOCKER=docker.exe
 
 echo "== 1-4. fetch + repack + sign + manifest (WSL-native /tmp) =="
-MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -- bash -c 'tr -d "
-" < /mnt/c/Users/-Mahdi/Downloads/Quantum/01-REPOSITORIES/wt-p7-engines/tests/engines45_artifacts.sh > /tmp/art.sh && bash /tmp/art.sh' || exit 1
+REPO_WIN="$(cygpath -m "$(pwd)" 2>/dev/null || echo "$(pwd)")"
+WSL_REPO="/mnt/c/${REPO_WIN#*:}"
+# Run the artifacts script BY PATH and let it write the pins into THIS
+# repo's tests/ (gitignored). The old `tr -d "\n"` "copy" made the script
+# a one-line comment (silent no-op — the lab ran on stale pins for
+# generations); see the header.
+MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -- bash -c "bash '$WSL_REPO/tests/engines45_artifacts.sh' '$WSL_REPO/tests/.eng45-env.sh'" || exit 1
 eval "$(cat tests/.eng45-env.sh)"
 [ -n "${PUB_B64:-}" ] && [ -n "${WS_SHA_AMD:-}" ] && [ -n "${FR_SHA_AMD:-}" ] || { echo "FATAL: pins incomplete"; exit 1; }
 echo "  pins loaded (pub ${PUB_B64:0:20}…)"
 
 echo "== 5. build the runner test binary (linux/amd64, key pinned) =="
-
-echo "== 5. build the runner test binary (linux/amd64, key pinned) =="
 # ALWAYS build in WSL with the linux toolchain; output to the /mnt/c path
 # (a Windows-form -o path silently produced a PE binary once — never again).
-MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -- bash -c 'source /mnt/c/Users/-Mahdi/Downloads/Quantum/01-REPOSITORIES/wt-p7-engines/tests/.eng45-env.sh; export GOFLAGS=-mod=mod GOPROXY=file:///tmp/goproxy,https://proxy.golang.org GOSUMDB=off GOPRIVATE=github.com/Dark-modem/* GOPATH=$HOME/go; export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$HOME/go/bin; cd /mnt/c/Users/-Mahdi/Downloads/Quantum/01-REPOSITORIES/wt-p7-engines && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -tags integration -ldflags "-X github.com/Dark-modem/quantum-agent/internal/agent.engineArtifactPubKeyB64=$PUB_B64" -o /mnt/c/Users/-Mahdi/Downloads/Quantum/01-REPOSITORIES/wt-p7-engines/tests/.eng45.test ./internal/agent/' || exit 1
+# Gate env = the backend19-gates.sh pattern (GOTOOLCHAIN pinned, GOPROXY=off
+# over the synced module cache): GOSUMDB=off BLOCKS the pinned toolchain's
+# verification, and /tmp/goproxy does not survive a WSL restart.
+MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -- bash -c "source '$WSL_REPO/tests/.eng45-env.sh'; export GOTOOLCHAIN=go1.26.9 GOFLAGS=-mod=mod GOPROXY=off GOPATH=\$HOME/go; export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$HOME/go/bin; cd '$WSL_REPO' && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -tags integration -ldflags \"-X github.com/Dark-modem/quantum-agent/internal/agent.engineArtifactPubKeyB64=\$PUB_B64\" -o '$WSL_REPO/tests/.eng45.test' ./internal/agent/" || exit 1
 head -c 4 tests/.eng45.test | od -A n -t x1 | grep -q "7f 45 4c 46" || { echo "FATAL: runner binary is not a linux ELF"; exit 1; }
 echo "  runner binary: linux ELF ok"
 # NOTE: the ldflags pin is best-effort (the /mnt/c source flakes under
@@ -50,16 +72,14 @@ echo "  runner binary: linux ELF ok"
 # mechanism (verified by the artifact signature checks in the scenario).
 
 echo "== 6. ONE privileged container, TWO network namespaces inside =="
-CT=quantum-test-eng45
 docker rm -f "$CT" >/dev/null 2>&1 || true
 STATUS_WIN="$(cygpath -m "$STATUS_DIR" 2>/dev/null || echo "$STATUS_DIR")"
-PUB_WIN="$(cygpath -m "$ART/pub" 2>/dev/null || echo "$ART/pub")"
-docker run -d --name "$CT" --privileged -v "${STATUS_WIN}:/status" -v "${PUB_WIN}:/pub" ubuntu:24.04 sleep 7200 >/dev/null
+docker run -d --name "$CT" --privileged -v "${STATUS_WIN}:/status" ubuntu:24.04 sleep 7200 >/dev/null
 docker cp tests/.eng45.test "$CT":/eng45.test && docker exec "$CT" bash -c 'chmod 755 /eng45.test'
 docker exec "$CT" bash -c "apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq iperf3 python3 iproute2 curl >/dev/null 2>&1"
-MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -- bash -c 'cd /var/tmp/eng45-art/pub && tar -cf - .' | docker exec -i "$CT" bash -c 'tar -xf - -C /pub && echo "artifacts in container: $(ls /pub/pk/api/agent/artifact | wc -l)"'
+MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu-24.04 -- bash -c 'cd /var/tmp/eng45-art/pub && tar -cf - .' | docker exec -i "$CT" bash -c 'mkdir -p /pub && tar -xf - -C /pub && echo "artifacts in container: $(ls /pub/pk/api/agent/artifact | wc -l)"'
 docker exec "$CT" bash -c 'ip netns add nsa && ip netns add nsb && ip link add veth-a type veth peer name veth-b && ip link set veth-a netns nsa && ip link set veth-b netns nsb && ip netns exec nsa ip addr add 10.200.0.1/24 dev veth-a && ip netns exec nsa ip link set veth-a up && ip netns exec nsa ip link set lo up && ip netns exec nsb ip addr add 10.200.0.2/24 dev veth-b && ip netns exec nsb ip link set veth-b up && ip netns exec nsb ip link set lo up && echo netns-ok'
-docker exec "$CT" bash -c 'test -x /eng45.test || exit 1; test -f /pub/pk/api/agent/artifact/frp_0.61.1_linux_amd64.tar.gz || exit 1; echo preflight-ok'
+docker exec "$CT" bash -c 'test -x /eng45.test || exit 1; test -f /pub/pk/api/agent/artifact/frp-0.61.1-linux-amd64.tar.gz || exit 1; echo preflight-ok' || exit 1
 
 run_phase() { # phase testname
     local phase="$1" testname="$2"
@@ -83,9 +103,14 @@ run_phase() { # phase testname
     envcli+=(ENG45_ART_NAME_CHISEL=chisel-$CHVER-linux-{arch}.tar.gz ENG45_ART_SHA_CHISEL=$CH_SHA_AMD "ENG45_ART_SIG_CHISEL=$CH_SIG_AMD")
     envsrv+=(ENG45_ART_NAME_FRP=frp-$FRVER-linux-{arch}.tar.gz ENG45_ART_SHA_FRP=$FR_SHA_AMD "ENG45_ART_SIG_FRP=$FR_SIG_AMD")
     envcli+=(ENG45_ART_NAME_FRP=frp-$FRVER-linux-{arch}.tar.gz ENG45_ART_SHA_FRP=$FR_SHA_AMD "ENG45_ART_SIG_FRP=$FR_SIG_AMD")
-    docker exec -d "${envsrv[@]/#/-e}" "$CT" bash -c "ip netns exec nsa /eng45.test -test.run $testname -test.timeout 30m > /status/runner-A-$phase.log 2>&1"
+    # MSYS_NO_PATHCONV=1 — the -e values carry POSIX paths (/status/...);
+    # from Git Bash without it, MSYS rewrites them to Windows paths (the
+    # live repro caught ENG45_STATUS=C:/Program Files/Git/status/status.txt
+    # — every status write silently went nowhere, so NO phase ever saw its
+    # done marker and every phase "ended" via the 8-minute TIMEOUT branch).
+    MSYS_NO_PATHCONV=1 docker exec -d "${envsrv[@]/#/-e}" "$CT" bash -c "ip netns exec nsa /eng45.test -test.run $testname -test.timeout 30m > /status/runner-A-$phase.log 2>&1"
     sleep 2
-    docker exec -d "${envcli[@]/#/-e}" "$CT" bash -c "ip netns exec nsb /eng45.test -test.run $testname -test.timeout 30m > /status/runner-B-$phase.log 2>&1"
+    MSYS_NO_PATHCONV=1 docker exec -d "${envcli[@]/#/-e}" "$CT" bash -c "ip netns exec nsb /eng45.test -test.run $testname -test.timeout 30m > /status/runner-B-$phase.log 2>&1"
     local done_marker="$phase SCENARIO-DONE"
     for i in $(seq 1 240); do
         if grep -q "$done_marker" "$STATUS" 2>/dev/null; then echo "  $phase DONE"; return 0; fi
@@ -109,7 +134,10 @@ run_phase() { # phase testname
 echo "== 7. install runner + preflight (done above) =="
 echo "== 8. phases =="
 RC=0
-run_phase wstunnel "TestEngines45WstunnelEnd" || RC=1
+# Phase name "wst": the test's status line is "wst SCENARIO-DONE" — the
+# old "wstunnel" phase name's done marker never matched, so the wst phase
+# always burned the full 8-minute timeout before moving on.
+run_phase wst "TestEngines45WstunnelEnd" || RC=1
 run_phase chisel "TestEngines45ChiselEnd" || RC=1
 run_phase mixed "TestEngines45MixedManager" || RC=1
 

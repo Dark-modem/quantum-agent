@@ -4,7 +4,11 @@
 # upstream releases, repack into the agent extract shape (tarball WITH a
 # directory entry, ELF magic asserted), ship the upstream LICENSE, sign
 # with a dev ed25519 key (outside repos), and write the runner env pins.
+# Usage: engines45_artifacts.sh <env-out-path>  (the orchestrator passes
+# its own repo's tests/.eng45-env.sh — the old hardcoded phase-7-era
+# worktree path broke the pins handoff for any other checkout).
 set -uo pipefail
+ENV_OUT="${1:?usage: engines45_artifacts.sh <env-out-path>}"
 ART=/var/tmp/eng45-art; rm -rf "$ART"; mkdir -p "$ART/pub/pk/api/agent/artifact" "$ART/pub/pk/api/agent/engine-artifacts/file" "$ART/pub/lic"
 WSVER=10.1.9; CHVER=1.10.1; FRVER=0.61.1
 try3() { for i in 1 2 3; do "$@" && return 0; sleep 2; done; return 1; }
@@ -86,4 +90,4 @@ done
     echo "FR_SIG_AMD=$(cat "$ART/frp-$FRVER-linux-amd64.tar.gz.sig.b64")"
 } > /var/tmp/eng45-env.sh
 # host handoff: the small env file through /mnt/c (small writes are reliable)
-cp /var/tmp/eng45-env.sh /mnt/c/Users/-Mahdi/Downloads/Quantum/01-REPOSITORIES/wt-p7-engines/tests/.eng45-env.sh && echo "  pins written"
+cp /var/tmp/eng45-env.sh "$ENV_OUT" && echo "  pins written"
