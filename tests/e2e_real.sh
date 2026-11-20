@@ -126,6 +126,9 @@ sleep 1
 # pins the panel source: when set, the panel builds from that directory
 # (an exported snapshot / throwaway clone at a known SHA) instead, making
 # lab verdicts reproducible. UNSET = the default behavior, unchanged.
+# Invocation note: when the lab runs from Git Bash, wsl.exe only carries
+# Windows env vars listed in WSLENV — export WSLENV="E2E_PANEL_SRC"
+# alongside the variable (a direct WSL shell needs no WSLENV).
 PANEL_SRC="$REPO_ROOT/../quantum-panel"
 if [ -n "${E2E_PANEL_SRC:-}" ]; then
   PANEL_SRC="$E2E_PANEL_SRC"
