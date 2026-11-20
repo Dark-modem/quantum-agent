@@ -7,6 +7,7 @@ package agent
 // state, its progress and the last controller-connection status all survive.
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -101,11 +102,22 @@ func agentMutateState(fn func(*agentPersistedState)) error {
 	st := agentLoadStateLocked()
 	fn(&st)
 	st.UpdatedAt = time.Now().Unix()
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
+	// AGENT-24: the state file must round-trip the journaled DesiredV2Raw
+	// BYTE-IDENTICAL. MarshalIndent re-indents nested RawMessage content
+	// (Go re-indents embedded JSON) and HTML-escapes it, so the journal
+	// used to hold byte-different engine_params than the wire — the boot
+	// replay then compared different bytes against the running instances
+	// and restarted EVERY tunnel on EVERY reconnect (AGENT-24 report). A
+	// compact, non-HTML-escaping encoder writes the RawMessage verbatim.
+	// Readers are format-agnostic (json.Unmarshal); legacy pretty files
+	// load fine.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(st); err != nil {
 		return err
 	}
-	return agentAtomicWrite(agentStatePath(), append(b, '\n'), 0600)
+	return agentAtomicWrite(agentStatePath(), buf.Bytes(), 0600)
 }
 
 // agentAtomicWrite writes data to path via a temp file + rename, so a crash
