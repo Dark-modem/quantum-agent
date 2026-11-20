@@ -55,7 +55,7 @@ cleanup() {
   if [ -d "$LAB" ]; then
     LOGDIR="${E2E_LOGS:-$REPO_ROOT/tests/e2e-logs}"
     mkdir -p "$LOGDIR"
-    cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LOGDIR"/ 2>/dev/null
+    cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LAB"/dist-diag.log "$LOGDIR"/ 2>/dev/null
   fi
   [ -n "${PANEL_PID:-}" ] && kill "$PANEL_PID" 2>/dev/null
   # The panel's SIGTERM graceful shutdown can hang while agent sessions
@@ -605,6 +605,180 @@ wait_usage() { # wait_usage BEFORE_SNAPSHOT — poll until the totals grow past
   [ "$grew" = "1" ] && return 0
   return 1
 }
+# AGENT-23 diagnostics (test-only, never verdict-affecting): ground-truth
+# probes for the distribution-leg "0 of 0" flake. The store view
+# (fake_tunnel_usage) is the MEASUREMENT; these probes read the OTHER two
+# observation points of the same counter chain so a 0-delta run can say
+# WHERE it died:
+#   diag_agents_runtime — the panel's LIVE per-agent heartbeat view
+#     (/api/mesh/agents → runtime[]: the last report's counters). Grows
+#     while the store does not → the sample-write path; stale/missing →
+#     the agent stopped heartbeating or the session died.
+#   diag_store_windows — the store's payload_rx for the same tunnels over
+#     (0,now] AND (from_ts,now]: distinguishes "no new samples at all"
+#     from "samples exist but the summed deltas are zero".
+diag_log() { diag_log_ts=$(date +%s); echo "[diag $diag_log_ts] $*" >> "$LAB/dist-diag.log"; }
+diag_agents_runtime() { # diag_agents_runtime KEY_SUBSTR
+python3 - "$PANEL_PORT" "$PANEL_BASE" "$LAB/admin.cookies" "$CSRF" "$1" <<'PYEOF'
+import json, sys, urllib.request
+port, base, jar, csrf, key = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+cookie = ""
+for line in open(jar):
+    if line.startswith("#HttpOnly_"):
+        line = line[len("#HttpOnly_"):]
+    elif line.startswith("#") or not line.strip():
+        continue
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) >= 7:
+        cookie += f"{parts[5]}={parts[6]}; "
+req = urllib.request.Request(f"http://127.0.0.1:{port}{base}/api/mesh/agents")
+req.add_header("Cookie", cookie.rstrip("; "))
+req.add_header("X-CSRF-Token", csrf)
+for a in json.load(urllib.request.urlopen(req))["agents"]:
+    rt = a.get("runtime") or []
+    if not rt:
+        print(f"agent={a['id']} status={a.get('status')} last_seen={a.get('last_seen')} runtime=NONE")
+        continue
+    for r in rt:
+        if key in r.get("tunnel_id", ""):
+            print(f"agent={a['id']} status={a.get('status')} last_seen={a.get('last_seen')} "
+                  f"tunnel={r.get('tunnel_id')} up={r.get('up')} prx={r.get('payload_rx', 0)} "
+                  f"pknown={r.get('payload_known')} wknown={r.get('wire_known')} err={r.get('last_error', '')}")
+PYEOF
+}
+diag_store_windows() { # diag_store_windows FROM_TS KEY_SUBSTR
+python3 - "$PANEL_PORT" "$PANEL_BASE" "$LAB/admin.cookies" "$CSRF" "$1" "$2" <<'PYEOF'
+import json, sys, urllib.request
+port, base, jar, csrf = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+from_ts, key = sys.argv[5], sys.argv[6]
+cookie = ""
+for line in open(jar):
+    if line.startswith("#HttpOnly_"):
+        line = line[len("#HttpOnly_"):]
+    elif line.startswith("#") or not line.strip():
+        continue
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) >= 7:
+        cookie += f"{parts[5]}={parts[6]}; "
+def call(path):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{base}{path}")
+    req.add_header("Cookie", cookie.rstrip("; "))
+    req.add_header("X-CSRF-Token", csrf)
+    return json.load(urllib.request.urlopen(req))
+topo = [t for t in call("/api/mesh/topologies")["topologies"] if t["name"] == "drak-hz"][0]
+full = call(f"/api/mesh/topologies/{topo['id']}")
+for t in full.get("tunnels", []):
+    if t["engine"] == "fake" and key in t["tunnel_key"]:
+        all_u = call(f"/api/mesh/usage?tunnel_id={t['id']}")["usage"]
+        try:
+            win_u = call(f"/api/mesh/usage?tunnel_id={t['id']}&from={from_ts}")["usage"]
+            win = win_u.get("payload_rx", 0)
+        except Exception as e:
+            win = f"ERR({e})"
+        print(f"tunnel={t['tunnel_key']} all_prx={all_u.get('payload_rx', 0)} "
+              f"window_prx={win} window_from={from_ts}")
+PYEOF
+}
+dist_sink_probe() { # dist_sink_probe — the decisive chain test, run ONLY
+  # on a failed distribution verdict: push 1000 bytes straight into each
+  # sink (bypassing the balancer map entirely), wait across two full
+  # heartbeats, then read the store windows again. A store view that grew
+  # by the probe bytes proves the sink-counting → agent-heartbeat →
+  # panel-sample-write chain WORKS (so the failure was delivery: the
+  # balancer path); a still store view proves the CHAIN itself broke
+  # panel-side (or agent-side reporting) — evidence for the architect.
+  local p1 p2 ts
+  p1=$(jq_get $LAB/sink_ports.json "d.get('tun-drak-hz-ir-drak-1-hz-fra-1-b', 0)")
+  p2=$(jq_get $LAB/sink_ports.json "d.get('tun-drak-hz-ir-drak-1-hz-fra-2-b', 0)")
+  ts=$(date +%s)
+  diag_log "sink probe: direct 1000B → 10.200.0.21:$p1 (hz-fra-1-b) and 10.200.0.22:$p2 (hz-fra-2-b) at $ts"
+  python3 - "$p1" "$p2" <<'PYEOF'
+import socket, sys
+for name, ip, port in (("hz-fra-1-b", "10.200.0.21", int(sys.argv[1])),
+                       ("hz-fra-2-b", "10.200.0.22", int(sys.argv[2]))):
+    try:
+        s = socket.create_connection((ip, port), timeout=3)
+        s.sendall(b"P" * 1000)
+        s.close()
+        print(f"probe {name} {ip}:{port}: sent 1000B")
+    except Exception as e:
+        print(f"probe {name} {ip}:{port}: FAILED: {e}")
+PYEOF
+  sleep 95 # > two 30 s heartbeats + margin — the probe bytes MUST surface
+  diag_log "sink probe store windows after 95s (expect +1000 per tunnel when the chain works):"
+  diag_store_windows "$ts" ir-drak-1
+  diag_log "sink probe live agent view after 95s:"
+  diag_agents_runtime ir-drak-1
+}
+# AGENT-23 (the FIX, test-only): after a panel restart every agent
+# re-plays its journaled revision at reconnect and the lab sinks RESTART
+# — the counter resets (the [lab]/[engine] trails prove it: run 2 wiped
+# 1105009/858000 counted bytes at the reconnect). A WB→WA delta whose
+# window straddles that reset loses the pre-reset bytes forever (the
+# store's deltaUint refuses to invent them) — that IS the phase16/
+# AGENT-22 "0 of 0 — want ~30/70" distribution-leg flake. So the
+# weight-change window must OPEN only after every reporting sink agent
+# has reconnected AND re-reported. Ground truth the harness can see: the
+# panel's LIVE per-agent view (/api/mesh/agents → runtime[]) is IN-MEMORY
+# and wiped by the restart, so a row re-appearing there with
+# payload_known=true IS the agent's first post-reconnect heartbeat —
+# the reset is already done. Both drak sink agents reporting ⇒ safe to
+# open the window; one extra heartbeat cadence (31 s) then guarantees
+# the post-reset samples are in the store before WB is taken.
+wait_counter_rebaseline() { # wait_counter_rebaseline [TIMEOUT_S]
+  local deadline=$(( $(date +%s) + ${1:-120} )) ok
+  while [ $(date +%s) -lt $deadline ]; do
+    ok=$(diag_agents_runtime ir-drak-1 2>/dev/null | python3 -c "
+import sys
+agents = set()
+for l in sys.stdin:
+    l = l.strip()
+    if 'pknown=True' in l and '-b' in l:
+        agents.add(l.split()[0])
+print('YES' if len(agents) >= 2 else 'NO')" 2>/dev/null)
+    if [ "$ok" = "YES" ]; then
+      sleep 31 # one full heartbeat cadence: the reset samples are stored
+      diag_log "counter rebaseline: both sink agents re-reported post-reconnect (window safe to open)"
+      return 0
+    fi
+    sleep 3
+  done
+  diag_log "counter rebaseline wait TIMED OUT (${1:-120}s) — measuring anyway (resets may straddle the window)"
+  return 1
+}
+wait_usage_diag() { # wait_usage_diag BEFORE FROM_TS — wait_usage's poll
+  # semantics verbatim, plus a probe trail: every ~15 s it appends the
+  # store view AND the live agent view to $LAB/dist-diag.log, so a 0-delta
+  # run records whether the agents kept heartbeating and what their last
+  # reported counters were while the store stayed still.
+  local before="$1" from_ts="$2" deadline=$(( $(date +%s) + 150 )) sum prev="" grew=0 polls=0
+  while [ $(date +%s) -lt $deadline ]; do
+    sum=$(fake_tunnel_usage | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)
+    polls=$((polls+1))
+    if [ -n "$sum" ] && [ "$sum" -gt "$before" ]; then
+      grew=1
+      if [ -n "$prev" ] && [ "$sum" = "$prev" ]; then
+        diag_log "poll=$polls sum=$sum STABLE (window complete)"
+        return 0 # unchanged across a 31 s gap: the window is complete
+      fi
+      diag_log "poll=$polls sum=$sum GREW (prev=${prev:-none})"
+      prev=$sum
+      sleep 31
+      continue
+    fi
+    if [ $((polls % 5)) = "0" ]; then
+      diag_log "poll=$polls sum=${sum:-EMPTY} still<=before=$before; live agent view:"
+      diag_agents_runtime ir-drak-1 >> "$LAB/dist-diag.log" 2>&1
+      diag_store_windows "$from_ts" ir-drak-1 >> "$LAB/dist-diag.log" 2>&1
+    fi
+    sleep 3
+  done
+  diag_log "TIMEOUT after 150s grew=$grew — final live agent view:"
+  diag_agents_runtime ir-drak-1 >> "$LAB/dist-diag.log" 2>&1
+  diag_store_windows "$from_ts" ir-drak-1 >> "$LAB/dist-diag.log" 2>&1
+  [ "$grew" = "1" ] && return 0
+  return 1
+}
 fake_tunnel_usage() { # → "tunnel_key:payload_rx ..." for ir-drak-1's fake tunnels
 python3 - "$PANEL_PORT" "$PANEL_BASE" "$LAB/admin.cookies" "$CSRF" <<'PYEOF'
 import json, sys, urllib.request
@@ -897,9 +1071,14 @@ while [ $(date +%s) -lt $DEADLINE ]; do
   sleep 0.3
 done
 if [ "$FLIPPED" = "1" ]; then ok "weight change re-rendered the nft map (30/70 ranges)"; else bad "weight change did not re-render the nft map"; fi
+# AGENT-23: open the measurement window only after the reconnect counter
+# resets are done (see wait_counter_rebaseline) — a WB taken while an
+# agent is still reconnecting measures the reset, not the traffic.
+wait_counter_rebaseline 120 || true
 WB=$(fake_tunnel_usage)
+WB_TS=$(date +%s)
 send_conns 10000
-wait_usage "$(echo "$WB" | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)" || true
+wait_usage_diag "$(echo "$WB" | tr ' ' '\n' | cut -d: -f2 | tr -cd 0-9)" "$WB_TS" || true
 WA=$(fake_tunnel_usage)
 W1=$(comm_delta "$WA" "$WB" 'hz-fra-1'); W2=$(comm_delta "$WA" "$WB" 'hz-fra-2')
 WT=$(( ${W1:-0} + ${W2:-0} ))
@@ -908,12 +1087,41 @@ if [ "$WT" -gt 0 ] && [ "$WP1" -ge 28 ] && [ "$WP1" -le 32 ]; then
   ok "distribution followed the weight change (${WP1}%/$((100-WP1))% of $WT bytes — want 30/70)"
 else
   bad "distribution did not follow the weight change (hz-fra-1=${W1:-0} hz-fra-2=${W2:-0} of $WT — want ~30/70)"
+  # AGENT-23: evidence dump for the "0 of 0" flake. Three observation
+  # points of the same counter chain, in order:
+  #   1. the store windows + the LIVE agent heartbeat view (what the
+  #      agents last REPORTED vs what the store kept),
+  #   2. a DIRECT sink probe — 1000 bytes straight into each sink,
+  #      bypassing the balancer map entirely, then ~2 heartbeats of store
+  #      polling: store grows by the probe bytes → the counter chain
+  #      works and the balancer path never delivered; store stays still →
+  #      the chain (sink counting → agent heartbeat → panel sample write)
+  #      itself broke,
+  #   3. the panel/agent logs' tails.
+  echo "[e2e] distribution-leg evidence (also in $LAB/dist-diag.log):"
+  {
+    diag_log "=== failure evidence: measured W1=${W1:-0} W2=${W2:-0} WT=${WT:-0} (WB=$WB / WA=$WA) ==="
+    diag_log "--- live agent heartbeat view + store windows (ir-drak-1 tunnels):"
+    diag_agents_runtime ir-drak-1
+    diag_store_windows "$WB_TS" ir-drak-1
+    diag_log "--- direct sink probe (bypasses the balancer map):"
+    dist_sink_probe
+    diag_log "--- panel.log tail:"
+    tail -25 "$LAB/panel.log" 2>/dev/null
+    diag_log "--- api.log tail:"
+    tail -10 "$LAB/api.log" 2>/dev/null
+  } | sed 's/^/[e2e]   /' | tee -a "$LAB/dist-diag.log"
   # Diagnose (never mask): a portless map element (`0-29 : IP . 0`) passes
   # the re-render grep but the kernel no-ops it — conns fall through to
   # the local listener, connect_ok stays 10000, sinks count 0. Dump the
-  # live ruleset + the agent's own runtime view for post-mortem.
+  # live ruleset + the agent's own runtime view for post-mortem. The FULL
+  # table (not the map-only grep) also shows the base chain's HOOK line:
+  # a table whose map renders but whose hook went missing falls through
+  # to the local listener with the same signature (AGENT-23).
   echo "[e2e] nft table at failure:"
   nft_map | grep -E 'map|dnat|elements' | head -8 | sed 's/^/[e2e]   /'
+  echo "[e2e] nft table FULL (hook/chain lines included):"
+  nft_map | sed 's/^/[e2e]   /'
   echo "[e2e] agent runtime view:"
   sudo ip netns exec q-ir-drak-1 env GRE_PANEL_DIR=$LAB/agents/ir-drak-1 \
     $LAB/quantum-agent balancer status 2>/dev/null | head -30 | sed 's/^/[e2e]   /'
@@ -929,7 +1137,17 @@ E2E_RC=$FAIL
 if [ -d "$LAB" ]; then
   LOGDIR="${E2E_LOGS:-$REPO_ROOT/tests/e2e-logs}"
   mkdir -p "$LOGDIR"
-  cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LAB"/enroll-*.log "$LOGDIR"/ 2>/dev/null
+  cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LAB"/enroll-*.log "$LAB"/dist-diag.log "$LOGDIR"/ 2>/dev/null
+  # AGENT-23: the agents' journaled desired state (applied/pending
+  # revisions) — the counter-reset trail needs to know WHICH document
+  # each agent re-applied at reconnect. Root-owned (agents run via
+  # netns sudo): copy with sudo, never silently.
+  for st in "$LAB"/agents/*/agent-state.json; do
+    if [ -f "$st" ]; then
+      sudo cp -f "$st" "$LOGDIR/agent-state-$(basename "$(dirname "$st")").json" 2>/dev/null || \
+        echo "[e2e] WARNING: could not copy $st into $LOGDIR"
+    fi
+  done
 fi
 for f in "${FAILED_CHECKS[@]}"; do echo "[e2e]   FAILED: $f"; done
 [ $FAIL -eq 0 ] || exit 1

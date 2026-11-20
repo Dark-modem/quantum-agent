@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 )
@@ -196,6 +197,12 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 			continue // keep the slot; a later reconcile retries the stop
 		}
 		delete(m.running, id)
+		// AGENT-23: same counter-reset correlation as the restart path.
+		if !ok {
+			log.Printf("[engine] tunnel %s: stopped: gone from desired state", id)
+		} else {
+			log.Printf("[engine] tunnel %s: stopped: disabled or engine disabled", id)
+		}
 		res.Stopped = append(res.Stopped, id)
 		m.maybeUninstall(ctx, slot.drv, &res)
 	}
@@ -269,6 +276,10 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 				continue
 			}
 			delete(m.running, t.ID)
+			// AGENT-23: a tunnel restart resets in-memory engine counters
+			// (the lab sink's included) — log WHY, so a measurement leg or
+			// an operator can correlate a counter drop with the restart.
+			log.Printf("[engine] tunnel %s: restarting (%s driver): params changed", t.ID, drv.ID())
 			if err := drv.Start(ctx, next); err != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("tunnel %s: restart-start: %v", t.ID, err))
 				continue

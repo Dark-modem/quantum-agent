@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -192,6 +193,7 @@ func (l *labFakeDriver) Start(ctx context.Context, inst engine.Instance) error {
 	l.running[inst.TunnelID] = inst
 	l.mu.Unlock()
 	if !labOwnsAddr(p.LabAddr) {
+		log.Printf("[lab] sink %s: near end (lab_addr %s not ours) — no listener, no counter", inst.TunnelID, p.LabAddr)
 		return nil // near end: no listener; health probes the far end
 	}
 
@@ -204,6 +206,17 @@ func (l *labFakeDriver) Start(ctx context.Context, inst engine.Instance) error {
 	}
 	counter := &atomic.Uint64{}
 	l.mu.Lock()
+	// AGENT-23 diagnostics (lab-only): every counter lifecycle transition
+	// logs, so an e2e run can tell a counter RESET (fresh Start over an
+	// existing entry) from a first bind — the distribution-leg "0 of 0"
+	// flake needed exactly this trail (run logs are the only observer of
+	// the running agent's sink counters).
+	if old, existed := l.payload[inst.TunnelID]; existed {
+		log.Printf("[lab] sink %s: RESTART resets the counter (old value %d; params now %s)",
+			inst.TunnelID, old.Load(), string(inst.Params))
+	} else {
+		log.Printf("[lab] sink %s: first bind on :%d (params %s)", inst.TunnelID, p.LabPort, string(inst.Params))
+	}
 	l.sinks[inst.TunnelID] = ln
 	l.payload[inst.TunnelID] = counter
 	l.mu.Unlock()
@@ -229,6 +242,7 @@ func (l *labFakeDriver) Stop(inst engine.Instance) error {
 	if ln, ok := l.sinks[inst.TunnelID]; ok {
 		ln.Close()
 		delete(l.sinks, inst.TunnelID)
+		log.Printf("[lab] sink %s: stopped (listener closed)", inst.TunnelID) // AGENT-23 lab diag
 	}
 	delete(l.running, inst.TunnelID)
 	l.mu.Unlock()
@@ -279,12 +293,17 @@ func (l *labFakeDriver) Counters(inst engine.Instance) engine.Counters {
 // Uninstall implements Driver: close every sink (lab keeps no binaries).
 func (l *labFakeDriver) Uninstall(ctx context.Context) error {
 	l.mu.Lock()
-	for _, ln := range l.sinks {
+	n := len(l.sinks)
+	for id, ln := range l.sinks {
 		ln.Close()
+		delete(l.sinks, id)
+		log.Printf("[lab] sink %s: uninstalled (listener closed)", id) // AGENT-23 lab diag
 	}
-	l.sinks = map[string]net.Listener{}
 	l.running = map[string]engine.Instance{}
 	l.mu.Unlock()
+	if n > 0 {
+		log.Printf("[lab] fake driver uninstall: %d sink(s) closed", n) // AGENT-23 lab diag
+	}
 	return nil
 }
 
