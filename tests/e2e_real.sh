@@ -1098,6 +1098,12 @@ if [ -d "$LAB" ]; then
   LOGDIR="${E2E_LOGS:-$REPO_ROOT/tests/e2e-logs}"
   mkdir -p "$LOGDIR"
   cp -f "$LAB"/run-*.log "$LAB"/panel.log "$LAB"/api.log "$LAB"/enroll-*.log "$LAB"/dist-diag.log "$LOGDIR"/ 2>/dev/null
+  # AGENT-23: the agents' journaled desired state (applied/pending
+  # revisions) — the counter-reset trail needs to know WHICH document
+  # each agent re-applied at reconnect.
+  for st in "$LAB"/agents/*/agent-state.json; do
+    [ -f "$st" ] && cp -f "$st" "$LOGDIR/agent-state-$(basename "$(dirname "$st")").json" 2>/dev/null
+  done
 fi
 for f in "${FAILED_CHECKS[@]}"; do echo "[e2e]   FAILED: $f"; done
 [ $FAIL -eq 0 ] || exit 1
