@@ -37,7 +37,6 @@ package agent
 // the holder, so the operator can judge and adjust.
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -154,10 +153,13 @@ func agentPreflightV2(mgr *engine.Manager, engs []engine.EngineSpec, specs []eng
 
 // preflightRunningSame reports whether the Manager already runs this
 // tunnel with EXACTLY these params (the same equality Manager.Reconcile
-// uses for its no-op path).
+// uses for its no-op path). AGENT-24: canonicalized — see
+// engine.ParamsEqual; a legacy journal's re-serialized params must not
+// read as a change and push a running tunnel through the full checks an
+// idempotent re-apply exists to skip.
 func preflightRunningSame(mgr *engine.Manager, t engine.TunnelSpec) bool {
 	inst, running := mgr.Instance(t.ID)
-	return running && bytes.Equal(bytes.TrimSpace(inst.Params), bytes.TrimSpace(t.Params))
+	return running && engine.ParamsEqual(inst.Params, t.Params)
 }
 
 // preflightParamPorts scans engine_params for integer port fields: keys

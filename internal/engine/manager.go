@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -260,7 +259,9 @@ func (m *Manager) Reconcile(ctx context.Context, engines []EngineSpec, tunnels [
 			res.Started = append(res.Started, t.ID)
 			continue
 		}
-		if bytes.Equal(bytes.TrimSpace(slot.inst.Params), bytes.TrimSpace(t.Params)) {
+		// AGENT-24: canonicalized comparison (see params_equal.go) — a
+		// legacy journal's re-serialized params must not read as a change.
+		if ParamsEqual(slot.inst.Params, t.Params) {
 			continue // already running with exactly these params
 		}
 		next := slot.inst
