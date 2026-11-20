@@ -352,6 +352,87 @@ while True:
 	if err := dServer.Start(context.Background(), serverInst); err != nil {
 		t.Fatalf("server Start: %v", err)
 	}
+
+	// Both harness seams BEFORE the client exists: the through-tunnel probe
+	// and the statsquery both live inside xrNSA (the server end's netns)
+	// while the test process sits in the host netns, so route the SAME
+	// production calls through the server netns — the probe exactly the way
+	// the warmup gate drives it, statsquery the way Health/Counters run it
+	// (in production the agent and its drivers share one netns, so the
+	// un-routed dials are correct there; B-AG5 documented this topology gap
+	// on 2026-11-19 — failed identically at the A1 tip 4452c88 and the
+	// pre-A1 base f78d2e3).
+	origProbeFn := xrayProbeFn
+	xrayProbeFn = func(int) error {
+		out, err := runNS(xrNSA, "sh", "-c",
+			fmt.Sprintf("printf 'GET /probe HTTP/1.0\\r\\nHost: probe.quantum\\r\\n\\r\\n' | timeout 3 nc 127.0.0.1 %d 2>/dev/null | head -c 5", 21599+1))
+		if err == nil && strings.HasPrefix(out, "HTTP/") {
+			return nil
+		}
+		return fmt.Errorf("probe: %q %v", out, err)
+	}
+	t.Cleanup(func() { xrayProbeFn = origProbeFn })
+	origStats := execCommandJSON
+	execCommandJSON = func(apiPort int, prefix string) (uint64, uint64, bool) {
+		out, err := runNS(xrNSA, realBin, "api", "statsquery",
+			fmt.Sprintf("--server=127.0.0.1:%d", apiPort))
+		if err != nil {
+			return 0, 0, false
+		}
+		var parsed struct {
+			Stats []struct {
+				Name  string `json:"name"`
+				Value int64  `json:"value"`
+			} `json:"stat"` // SINGULAR — real CLI shape (B-AG4 layer 3)
+		}
+		if json.Unmarshal([]byte(out), &parsed) != nil {
+			return 0, 0, false
+		}
+		var up, down uint64
+		for _, s := range parsed.Stats {
+			if !strings.HasPrefix(s.Name, prefix) {
+				continue
+			}
+			switch {
+			case strings.HasSuffix(s.Name, ">>>uplink"):
+				up = uint64(s.Value)
+			case strings.HasSuffix(s.Name, ">>>downlink"):
+				down = uint64(s.Value)
+			}
+		}
+		return up, down, true
+	}
+	t.Cleanup(func() { execCommandJSON = origStats })
+
+	// B-AG4 proof (AGENT-22), SERVER END ALONE: the api-in StatsService
+	// must answer. Pre-fix this dial died in the rendered BLACKHOLE "api"
+	// outbound (xray_driver.go B-AG4) and the family integration was red
+	// at exactly this gate ("stats API not answering").
+	sDeadline := time.Now().Add(15 * time.Second)
+	statsUp := false
+	for time.Now().Before(sDeadline) {
+		if _, _, ok := execCommandJSON(21599, "inbound>>>"); ok {
+			statsUp = true
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if !statsUp {
+		t.Fatalf("stats gate never answered on the server end (B-AG4); server log: %s", bhIntTail(t, dir, "server"))
+	}
+	t.Logf("lab-loopback stats gate: StatsService answers on the server end (api-in reachable)")
+	// Warmup gate (PHASE8 1b), BEFORE the client exists: no reverse channel
+	// can carry the probe yet, so Health must NOT be OK even though the
+	// stats gate passes. (Pre-AGENT-22 this check sat after the client
+	// start and only ever passed because the stats gate failed FIRST —
+	// with the fix the real ordering becomes observable, and on the fast
+	// loopback underlay the channel can register before the old position
+	// was ever reached.)
+	if h := dServer.Health(serverInst); h.OK {
+		t.Fatalf("health reported OK before any reverse channel could exist: %+v", h)
+	}
+	t.Logf("lab-loopback warmup gate: Health correctly unhealthy before the probe")
+
 	// The CLIENT end inside xrNSB dials the carrier; its identity differs.
 	frpLoadIdentity = func() (agentIdentity, bool) {
 		return agentIdentity{Server: artURL, BasePath: "", Name: "iran-1"}, true
@@ -387,66 +468,10 @@ while True:
 		t.Fatalf("carrier never came up; server log: %s", bhIntTail(t, dir, "server"))
 	}
 
-	// Warmup gate (PHASE8 1b): route the driver's through-tunnel probe
-	// into the SERVER namespace (the probe port lives inside xrNSA) and
-	// expect the bridge's HTTP answer — the REAL round trip.
-	origProbeFn := xrayProbeFn
-	xrayProbeFn = func(int) error {
-		out, err := runNS(xrNSA, "sh", "-c",
-			fmt.Sprintf("printf 'GET /probe HTTP/1.0\\r\\nHost: probe.quantum\\r\\n\\r\\n' | timeout 3 nc 127.0.0.1 %d 2>/dev/null | head -c 5", 21599+1))
-		if err == nil && strings.HasPrefix(out, "HTTP/") {
-			return nil
-		}
-		return fmt.Errorf("probe: %q %v", out, err)
-	}
-	t.Cleanup(func() { xrayProbeFn = origProbeFn })
-	// The driver's stats gate and Counters run `xray api statsquery`
-	// against the api-in listener — which lives INSIDE xrNSA (the server
-	// end's netns). From the test process (host netns) that loopback dial
-	// can never answer, so route the SAME production query through the
-	// server netns, exactly the way xrayProbeFn routes the warmup probe
-	// (both exercise the real listener; in production the agent and its
-	// drivers share one netns, so the un-routed dial is correct there).
-	// Discovered 2026-11-19: this leg failed identically at the A1 tip
-	// (4452c88) and the pre-A1 base (f78d2e3) — a test-harness topology
-	// gap, not a driver regression.
-	origStats := execCommandJSON
-	execCommandJSON = func(apiPort int, prefix string) (uint64, uint64, bool) {
-		out, err := runNS(xrNSA, realBin, "api", "statsquery",
-			fmt.Sprintf("--server=127.0.0.1:%d", apiPort))
-		if err != nil {
-			return 0, 0, false
-		}
-		var parsed struct {
-			Stats []struct {
-				Name  string `json:"name"`
-				Value int64  `json:"value"`
-			} `json:"stats"`
-		}
-		if json.Unmarshal([]byte(out), &parsed) != nil {
-			return 0, 0, false
-		}
-		var up, down uint64
-		for _, s := range parsed.Stats {
-			if !strings.HasPrefix(s.Name, prefix) {
-				continue
-			}
-			switch {
-			case strings.HasSuffix(s.Name, ">>>uplink"):
-				up = uint64(s.Value)
-			case strings.HasSuffix(s.Name, ">>>downlink"):
-				down = uint64(s.Value)
-			}
-		}
-		return up, down, true
-	}
-	t.Cleanup(func() { execCommandJSON = origStats })
-	// EARLY in the warmup the tunnel must NOT be reported healthy: the
-	// balancer must not route to a tunnel whose channel pool is not up.
-	if h := dServer.Health(serverInst); h.OK {
-		t.Fatalf("health reported OK before the through-tunnel probe: %+v", h)
-	}
-	t.Logf("lab-loopback warmup gate: Health correctly unhealthy before the probe")
+	// (The probe/stats seams and the pre-client warmup gate moved ABOVE the
+	// client start — AGENT-22: the early not-OK check needs a state where
+	// no reverse channel can exist, and the stats-gate poll must run on the
+	// server end alone.)
 
 	// iperf3 target on the IRAN end (the tunnel carries connections from
 	// the foreign dokodemo INTO this listener).
@@ -510,6 +535,17 @@ while True:
 	}
 	t.Logf("lab-loopback XRAY REVERSE (-R, Iran→foreign data direction): %s", strings.TrimSpace(reverse))
 
+	// B-AG4 proof (AGENT-22): the StatsService must actually ANSWER — the
+	// driver's Counters read the payload pair from the real statsquery
+	// through the seam above; after the traffic legs both directions carry
+	// bytes. Pre-fix this stayed empty (api-in was routed to a blackhole).
+	cnt := dServer.Counters(serverInst)
+	if !cnt.PayloadKnown || cnt.PayloadTx+cnt.PayloadRx == 0 {
+		t.Fatalf("payload counters empty after traffic — StatsService unreachable (B-AG4): %+v", cnt)
+	}
+	t.Logf("lab-loopback xray payload counters from the StatsService: tx=%d rx=%d (wire known=%v)",
+		cnt.PayloadTx, cnt.PayloadRx, cnt.WireKnown)
+
 	// Health through the driver (server end, api in the same ns as the
 	// process — but the test process is in the host ns; use the ns curl).
 	stats, serr := runNS(xrNSA, "curl", "-s", fmt.Sprintf("http://127.0.0.1:%d/stats", 21599))
@@ -521,8 +557,14 @@ while True:
 
 	// Kill the server process → Health fails → supervisor restarts →
 	// traffic again. The supervisor respawns INSIDE the same namespace
-	// (the spawn seam is namespace-scoped).
-	if out, err := runNS(xrNSA, "pkill", "-f", "xray"); err != nil {
+	// (the spawn seam is namespace-scoped). The pattern is the xray
+	// COMMAND shape ("<…>/xray run -c <cfg>"), not a bare "xray": pkill
+	// sees the GLOBAL process table (netns does not isolate pids) and a
+	// bare pattern also hits any unrelated process whose cmdline merely
+	// mentions xray (runner scripts, log paths — AGENT-22: the bare
+	// pattern killed this test's own runner the first time the leg was
+	// ever reached, pre-fix the stats gate always failed first).
+	if out, err := runNS(xrNSA, "pkill", "-f", "xray run -c"); err != nil {
 		t.Logf("pkill note: %v: %s", err, out)
 	}
 	time.Sleep(2 * time.Second)

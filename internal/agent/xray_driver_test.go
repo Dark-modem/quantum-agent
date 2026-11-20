@@ -315,6 +315,85 @@ func TestXrayRenderConfigShapes(t *testing.T) {
 	}
 }
 
+// TestXrayAPIPortUnsetRenderByteIdentical locks the PRODUCTION rendering:
+// with api_port unset (0 — how the panel deploys xray) the branch under
+// B-AG4 never renders, so the whole config must stay BYTE-IDENTICAL to the
+// pre-fix render (golden captured at the AGENT-22 base 2561454, before the
+// api.tag/blackhole change). Any drift here is a production regression.
+func TestXrayAPIPortUnsetRenderByteIdentical(t *testing.T) {
+	p := xrayTestParams()
+	p.APIPort = 0
+	sj, _ := json.Marshal(xrayBuildConfig(engineSideServer, p))
+	cj, _ := json.Marshal(xrayBuildConfig(engineSideClient, p))
+	const goldenServer = `{"reverse":{"portals":[{"tag":"rev-portal","domain":"quantum.rev.internal"}]},"log":{"loglevel":"warning"},"inbounds":[{"tag":"vless-in","listen":"0.0.0.0","port":2443,"protocol":"vless","settings":{"clients":[{"id":"b831381d-6324-4d53-ad4f-8cda48b30811","level":0,"encryption":""}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"show":false,"dest":"www.microsoft.com:443","xver":0,"serverNames":["www.microsoft.com"],"privateKey":"qJmA9N5S_9fNnE2wC8bXlQ0V0kL2wE8dG7fH6jK5lM0","shortIds":["0123abcd"]}},"sniffing":{"enabled":true,"destOverride":["http","tls"]}},{"tag":"dokodemo-5201","listen":"0.0.0.0","port":5201,"protocol":"dokodemo-door","settings":{"address":"127.0.0.1","port":5202,"network":"tcp"}}],"outbounds":[{"tag":"direct","protocol":"freedom"}],"routing":{"domainStrategy":"","rules":[{"type":"field","inboundTag":["vless-in"],"outboundTag":"rev-portal"},{"type":"field","inboundTag":["dokodemo-5201"],"outboundTag":"rev-portal"}]}}`
+	const goldenClient = `{"reverse":{"bridges":[{"tag":"rev-bridge","domain":"quantum.rev.internal"}]},"log":{"loglevel":"warning"},"inbounds":null,"outbounds":[{"tag":"carrier-out","protocol":"vless","settings":{"vnext":[{"address":"203.0.113.9","port":2443,"users":[{"id":"b831381d-6324-4d53-ad4f-8cda48b30811","level":0,"encryption":"none"}]}]},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"show":false,"fingerprint":"chrome","serverName":"www.microsoft.com","publicKey":"i0TZbrs0j3aiB2e8J4j0DqM-uEHoOmQna8a0yaU3Mhc","shortId":"0123abcd","spiderX":""}}},{"tag":"local","protocol":"freedom"},{"tag":"probe","protocol":"blackhole","settings":{"response":{"type":"http"}}}],"routing":{"domainStrategy":"","rules":[{"type":"field","inboundTag":["rev-bridge"],"domain":["full:quantum.rev.internal"],"outboundTag":"carrier-out"},{"type":"field","inboundTag":["rev-bridge"],"domain":["full:probe.quantum"],"outboundTag":"probe"},{"type":"field","inboundTag":["rev-bridge"],"outboundTag":"local"}]}}`
+	if string(sj) != goldenServer {
+		t.Fatalf("api_port-UNSET server render drifted from the pre-fix golden:\n got: %s\nwant: %s", sj, goldenServer)
+	}
+	if string(cj) != goldenClient {
+		t.Fatalf("api_port-UNSET client render drifted from the pre-fix golden:\n got: %s\nwant: %s", cj, goldenClient)
+	}
+}
+
+// TestXrayAPIPortOnSaneShape locks the B-AG4 fix (AGENT-22): with
+// api_port>0 the api-in traffic must reach the StatsService. Xray-core's
+// Commander registers the API as an OUTBOUND tagged api.tag and the
+// routing rule must hand the api-in inbound to that tag — api.tag aligns
+// with the rule's outboundTag ("api") and NO blackhole outbound exists on
+// the server end (the old shape blackholed every stats dial).
+func TestXrayAPIPortOnSaneShape(t *testing.T) {
+	p := xrayTestParams()
+	p.APIPort = 21599
+	cfg := xrayBuildConfig(engineSideServer, p)
+	// api.tag aligned with the routing rule's outboundTag.
+	if cfg.API == nil || cfg.API.Tag != "api" {
+		t.Fatalf("api.tag must be \"api\" (aligned with the routing rule; Commander serves it as an outbound): %+v", cfg.API)
+	}
+	if len(cfg.API.Services) != 1 || cfg.API.Services[0] != "StatsService" {
+		t.Fatalf("StatsService missing from the API services: %+v", cfg.API)
+	}
+	// The rule: api-in -> "api" (the Commander's gRPC outbound).
+	ruleOK := false
+	for _, r := range cfg.Routing.Rules {
+		if r.OutboundTag == "api" && len(r.InboundTag) == 1 && r.InboundTag[0] == "api-in" {
+			ruleOK = true
+		}
+	}
+	if !ruleOK {
+		t.Fatalf("api-in -> api routing rule missing: %+v", cfg.Routing.Rules)
+	}
+	// NO blackhole "api" outbound on the server end (B-AG4's bug).
+	for _, o := range cfg.Outbounds {
+		if o.Tag == "api" || o.Protocol == "blackhole" {
+			t.Fatalf("server end renders a %q outbound — stats dials die there: %+v", o.Tag, cfg.Outbounds)
+		}
+	}
+	// The api-in inbound itself + the stats app + policy stays.
+	apiIn := false
+	for _, in := range cfg.Inbounds {
+		if in.Tag == "api-in" && in.Port == p.APIPort && in.Listen == "127.0.0.1" {
+			apiIn = true
+		}
+	}
+	if !apiIn {
+		t.Fatalf("api-in inbound missing/wrong: %+v", cfg.Inbounds)
+	}
+	if cfg.Stats == nil || cfg.Policy == nil {
+		t.Fatal("stats/policy objects missing (StatsService needs them)")
+	}
+	// The system policy must flip the per-inbound counter registration
+	// (xray-core getStatCounter gates on policy.ForSystem().Stats.*);
+	// without it the API answers but every stats list is EMPTY.
+	if cfg.Policy.System == nil || !cfg.Policy.System.StatsInboundUplink || !cfg.Policy.System.StatsInboundDownlink {
+		t.Fatalf("policy.system.statsInbound{Uplink,Downlink} missing — counters stay empty: %+v", cfg.Policy)
+	}
+	// The client end never carries the API block (rendering unaffected).
+	clientCfg := xrayBuildConfig(engineSideClient, p)
+	if clientCfg.API != nil || clientCfg.Stats != nil || clientCfg.Policy != nil {
+		t.Fatal("client end carries API/stats objects")
+	}
+}
+
 // TestXrayReverseCarrierRules locks in the two reverse-channel fixes found
 // in the 2026-11-08 lab (xray v24.12.31):
 //   - the bridge's FIRST routing rule must be scoped to the internal

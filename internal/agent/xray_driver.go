@@ -288,11 +288,22 @@ type xrayRouting struct {
 
 type xrayPolicy struct {
 	Levels map[string]xrayPolicyLevel `json:"levels"`
+	System *xraySystemPolicy          `json:"system,omitempty"`
 }
 
 type xrayPolicyLevel struct {
 	StatsUserUplink   bool `json:"statsUserUplink,omitempty"`
 	StatsUserDownlink bool `json:"statsUserDownlink,omitempty"`
+}
+
+// xraySystemPolicy carries the system-scope policy flags. Without
+// statsInboundUplink/Downlink, Xray-core's getStatCounter (v24.12.31
+// app/proxyman/inbound/always.go) never registers the per-inbound traffic
+// counters — statsquery answers with an EMPTY stats list and Counters
+// would stay zero even with the API reachable (B-AG4, second half).
+type xraySystemPolicy struct {
+	StatsInboundUplink   bool `json:"statsInboundUplink"`
+	StatsInboundDownlink bool `json:"statsInboundDownlink"`
 }
 
 type xrayReverse struct {
@@ -378,13 +389,31 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 				Settings:       &xrayInboundSettings{Address: "127.0.0.1"},
 				StreamSettings: &xrayStreamSettings{Network: "tcp"},
 			})
-			cfg.API = &xrayAPI{Tag: "api-in", Services: []string{"StatsService"}}
+			// B-AG4 (AGENT-22): the API is NOT a regular outbound — the
+			// Commander app (Xray-core v24.12.31 app/commander/commander.go
+			// Start) registers its internal gRPC listener as an OUTBOUND
+			// tagged with api.tag, and connections reach it only through a
+			// routing rule whose outboundTag equals that tag. api.tag is
+			// therefore aligned with the rule below ("api"). The old shape
+			// (api.tag="api-in" + a BLACKHOLE outbound named "api") fed
+			// every stats dial into the blackhole — StatsService never
+			// answered, the stats gate failed and Counters stayed empty
+			// (dormant in production: the panel leaves api_port unset, so
+			// this branch never rendered; the family integration sets it).
+			// No "api" outbound is rendered here anymore. The system policy
+			// flips the per-inbound counter registration (see
+			// xraySystemPolicy) — without it the StatsService answers but
+			// every stats list comes back EMPTY (B-AG4's "Counters stay
+			// empty" second half).
+			cfg.API = &xrayAPI{Tag: "api", Services: []string{"StatsService"}}
 			cfg.Stats = &struct{}{}
-			cfg.Policy = &xrayPolicy{Levels: map[string]xrayPolicyLevel{"0": {}}}
+			cfg.Policy = &xrayPolicy{
+				Levels: map[string]xrayPolicyLevel{"0": {}},
+				System: &xraySystemPolicy{StatsInboundUplink: true, StatsInboundDownlink: true},
+			}
 			cfg.Routing.Rules = append(cfg.Routing.Rules, xrayRoutingRule{
 				Type: "field", InboundTag: []string{"api-in"}, OutboundTag: "api",
 			})
-			cfg.Outbounds = append(cfg.Outbounds, xrayOutbound{Tag: "api", Protocol: "blackhole"})
 		}
 		return cfg
 	}
@@ -794,11 +823,18 @@ var execCommandJSON = func(apiPort int, prefix string) (uint64, uint64, bool) {
 	if err != nil {
 		return 0, 0, false
 	}
+	// The CLI's response is proto-flavored JSON: the list key is "stat"
+	// (SINGULAR — StatsQueryResponse.Stat, v24.12.31
+	// app/stats/command/command.pb.go) with numeric values, e.g.
+	// {"stat":[{"name":"inbound>>>api-in>>>traffic>>>uplink","value":170}]}
+	// (verified against the real binary). The old "stats" key never
+	// matched anything, so Counters parsed empty even when the API
+	// answered — B-AG4's third layer.
 	var parsed struct {
 		Stats []struct {
 			Name  string `json:"name"`
 			Value int64  `json:"value"`
-		} `json:"stats"`
+		} `json:"stat"`
 	}
 	if json.Unmarshal(out, &parsed) != nil {
 		return 0, 0, false
