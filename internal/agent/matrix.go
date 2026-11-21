@@ -43,7 +43,13 @@ const (
 	// first one, every one of them a fully disjoint tinc network: its own
 	// qmx interface, systemd unit, firewall chain prefix and a /30 mesh
 	// subnet carved out by octet() — never colliding with the pathtest
-	// probe nets 10.254.77.0/30 and 10.254.78.0/30. Mirrored in the panel.
+	// probe nets 10.254.77.0/30 and 10.254.78.0/30.
+	// NOTE (AGENT-27 adjudication of 98d19070): the panel is NOT yet mirrored —
+	// it still runs the old scheme (cap 16, hub 10.254.(230+N).1). The two
+	// schemes agree byte-for-byte for n <= 25, so every instance the panel can
+	// provision today (cap 16 → n <= 17) resolves identically on both sides.
+	// Lifting the panel's cap REQUIRES the octet() mirror first (BACKEND-39
+	// candidate), or the panel would emit invalid 10.254.256.x for n >= 26.
 	matrixMaxInstances = 250
 )
 
@@ -117,8 +123,9 @@ func (in matrixInstance) subnet() string {
 // (matrix2..matrix25 on 10.254.232..255) keeps its addresses forever; later
 // instances continue from 10.254.0.0/30 upward, skipping the pathtest probe
 // nets 77 and 78. The three ranges never overlap and never touch 231, which
-// stays reserved for the legacy instance. Mirrored in the panel — both sides
-// must derive identical addresses for the same instance id.
+// stays reserved for the legacy instance. The panel side must derive identical
+// addresses for the same instance id — NOT yet mirrored (the panel still runs
+// the 16-cap 230+N scheme, byte-identical for n <= 25); BACKEND-39 candidate.
 func (in matrixInstance) octet() int {
 	n := in.num()
 	if n <= 25 {
