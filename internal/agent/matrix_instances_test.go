@@ -210,8 +210,9 @@ func TestMatrixSecondInstanceCoexistsWithLegacy(t *testing.T) {
 // Every instance in the whole pool derives a disjoint mesh /30, hub IP and
 // peer IP; the historic block (matrix2..matrix25) keeps its original
 // addresses, and nothing ever lands on the pathtest probe nets (77, 78) or
-// the legacy octet 231. Mirrors the panel's pool sweep — both sides must
-// derive identical addresses for the same instance id.
+// the legacy octet 231. The panel's pool must sweep identically — NOT yet
+// mirrored there (panel runs the 16-cap 230+N scheme, identical for n <= 25);
+// BACKEND-39 candidate.
 func TestMatrixInstanceOctetsUniqueAcrossWholePool(t *testing.T) {
 	seen := map[int]string{}
 	check := func(in matrixInstance, wantSubnet string) {
