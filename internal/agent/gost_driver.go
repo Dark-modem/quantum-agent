@@ -35,8 +35,40 @@ package agent
 // plain set, and the ingress param (socks5|http|socks4) flips the data
 // port to the IRAN end (local proxy exit through the carrier). The raw
 // icmp carrier stays out (CAP_NET_RAW niche; udp2raw's icmp mode covers
-// the sealed-carrier shape), and tun/tap/redirect/sni/dns/masque stay
-// out by design (node-level infra services, not per-tunnel shapes).
+// the sealed-carrier shape).
+//
+// OVERNIGHT-A3 (morning human order — the curated won't-expose verdicts
+// are OVERRIDDEN): the five remaining gost service families are exposed
+// through the additive `service` param ("" = the historical relay tunnel;
+// every previous param keeps its meaning and default). Shapes verified
+// against go-gost/x v0.28.1 (the pinned binary's module) + go-gost/docs:
+//
+//   tap          L2 bridge over UDP frames (docs/tutorials/tuntap.md):
+//                server `tap://:<port>?net=<srv>&name=&mtu=&gw=&route=`
+//                client `tap://:0/<server>:<port>?net=<cli>&...` — the
+//                tap listener IS a UDP-frame service (listener resolves
+//                the addr as UDP; frames ride raw UDP, no relay).
+//   redirect-tcp transparent TCP proxy (SO_ORIGINAL_DST — handler/
+//                redirect/tcp/handler_linux.go): client
+//                `redirect://:<port>` + -F relay chain; the host's nat
+//                REDIRECT rules are installed by THIS driver, additive
+//                and comment-tagged gostdrv-<tunnelid> (upstream's own
+//                e2e pre-installs the same rules).
+//   redirect-udp UDP transparent proxy (TPROXY — listener_linux.go sets
+//                IP_TRANSPARENT+IP_RECVORIGDSTADDR): client `redu://:<port>`
+//                + -F relay chain + mangle TPROXY / ip-rule / ip-route
+//                rules, same tagged additive discipline.
+//   sni          SNI/Host routing proxy (docs/tutorials/protocols/sni.md
+//                `gost -L sni://:443`): client `sni://:<port>` + -F relay
+//                chain — targets dialed from the foreign end.
+//   masque       MASQUE over HTTP/3 (handler/masque doc comment: "must be
+//                paired with an HTTP/3 listener (registered as h3)";
+//                connectors/masque + dialers/h3-masque docs): server
+//                `masque+h3://:port?certFile=&keyFile=` (QUIC+TLS —
+//                certs REQUIRED), client
+//                `-L socks5://:<port> -F masque+h3-masque://<server>` —
+//                CONNECT (TCP) and CONNECT-UDP (RFC 9298) both client-
+//                supported upstream.
 //
 // Strictly typed args (no shell, no config file): the CLI form above is
 // fully specified by four typed fields, built with fmt.Sprintf and passed
@@ -108,6 +140,29 @@ type gostParams struct {
 	// OUT through the carrier (the foreign relay dials arbitrary targets):
 	// the classic gost proxy-exit shape.
 	Ingress string `json:"ingress,omitempty"` // "" | socks5 | http | socks4
+	// OVERNIGHT-A3 service families (all optional; "" = the historical
+	// relay tunnel above, fully backward compatible). See the header
+	// comment for the upstream-verified shape of each.
+	Service string `json:"service,omitempty"` // "" | tap | redirect-tcp | redirect-udp | sni | masque
+	// tap service: the two ends' TAP device config (the tap bridge rides
+	// raw UDP frames between the devices — docs/tutorials/tuntap.md).
+	TapNet         string `json:"tap_net,omitempty"`          // client-end device CIDR, e.g. 10.66.0.1/24
+	TapNetServer   string `json:"tap_net_server,omitempty"`   // server-end device CIDR, e.g. 10.66.0.2/24
+	TapName        string `json:"tap_name,omitempty"`         // device name (default gost's system preset)
+	TapMTU         int    `json:"tap_mtu,omitempty"`          // device MTU (upstream default 1420)
+	TapGW          string `json:"tap_gw,omitempty"`           // device gateway IP (optional)
+	TapRoute       string `json:"tap_route,omitempty"`        // client-end route CIDRs, comma-separated
+	TapRouteServer string `json:"tap_route_server,omitempty"` // server-end route CIDRs
+	// redirect-tcp/udp service: the transparent-proxy firewall scope.
+	// The gost listener is rendered regardless; the REDIRECT/TPROXY rules
+	// are installed ONLY when RedirectIface names an interface (additive,
+	// tagged gostdrv-<tunnelid>, recorded-spec teardown — never OUTPUT,
+	// so the host's own traffic is never hijacked; documented).
+	RedirectIface string `json:"redirect_iface,omitempty"`
+	// masque service: optional HTTP Basic auth (handler/masque supports
+	// proxy authentication; the client dials with URL userinfo).
+	MasqueUser     string `json:"masque_user,omitempty"`
+	MasquePassword string `json:"masque_password,omitempty"`
 }
 
 // gostAllowedTransports is the relay-carrier allowlist (OVERNIGHT-A
@@ -142,6 +197,19 @@ var gostSSHCarriers = map[string]bool{
 // gostIngressSchemes maps the Ingress param to gost listener schemes.
 var gostIngressSchemes = map[string]string{
 	"socks5": "socks5", "http": "http", "socks4": "socks4",
+}
+
+// gostAllowedServices is the OVERNIGHT-A3 service-family allowlist
+// ("" = the historical relay tunnel).
+var gostAllowedServices = map[string]bool{
+	"": true, "tap": true, "redirect-tcp": true, "redirect-udp": true,
+	"sni": true, "masque": true,
+}
+
+// gostServiceUDP reports the services whose carrier/listen socket is UDP
+// (tap frames ride raw UDP; masque rides QUIC).
+func gostServiceUDP(service string) bool {
+	return service == "tap" || service == "masque"
 }
 
 // gostUDPCarrier reports the transports whose carrier socket is UDP.
@@ -214,25 +282,136 @@ func gostValidateParams(p gostParams) error {
 			return fmt.Errorf("gost: transport ss needs ss_method (e.g. aes-256-gcm) and ss_password")
 		}
 	}
-	if ing := strings.ToLower(strings.TrimSpace(p.Ingress)); ing != "" {
+	ing := strings.ToLower(strings.TrimSpace(p.Ingress))
+	if ing != "" {
 		if _, ok := gostIngressSchemes[ing]; !ok {
 			return fmt.Errorf("gost: ingress %q not supported (socks5|http|socks4)", p.Ingress)
 		}
 	}
 	// (the raw icmp carrier is not in the allowlist — the generic error
 	// above names the honest alternative)
+	svc := strings.ToLower(strings.TrimSpace(p.Service))
+	if !gostAllowedServices[svc] {
+		return fmt.Errorf("gost: service %q not supported (empty=relay tunnel|tap|redirect-tcp|redirect-udp|sni|masque)", p.Service)
+	}
+	if ing != "" && svc != "" {
+		return fmt.Errorf("gost: ingress and service are mutually exclusive (service %q renders its own data shape)", p.Service)
+	}
+	// OVERNIGHT-A3 per-service requirements. Every string below lands in
+	// a gost URL or an iptables arg — the same CLI-safe charset discipline
+	// as the historical params (argv-only exec, never a shell).
+	switch svc {
+	case "tap":
+		// each end needs its own device CIDR; the UDP "carrier" is the tap
+		// frame socket (relay params like Transport are unused here).
+		if err := gostValidateCIDR("tap_net", p.TapNet); err != nil {
+			return err
+		}
+		if err := gostValidateCIDR("tap_net_server", p.TapNetServer); err != nil {
+			return err
+		}
+		if p.TapName != "" && (len(p.TapName) > 15 || strings.ContainsAny(p.TapName, "\"'/\\\n\r ") ||
+			!gostHostnameSafe(p.TapName)) {
+			return fmt.Errorf("gost: tap_name must be a ≤15-char device-name-safe string")
+		}
+		if p.TapMTU != 0 && (p.TapMTU < 576 || p.TapMTU > 9000) {
+			return fmt.Errorf("gost: tap_mtu out of range (576-9000; upstream default 1420)")
+		}
+		if p.TapGW != "" {
+			if ip := net.ParseIP(p.TapGW); ip == nil || len(p.TapGW) > 45 || strings.ContainsAny(p.TapGW, "\"'\n\r") {
+				return fmt.Errorf("gost: tap_gw must be an IP address")
+			}
+		}
+		if err := gostValidateRouteList("tap_route", p.TapRoute); err != nil {
+			return err
+		}
+		if err := gostValidateRouteList("tap_route_server", p.TapRouteServer); err != nil {
+			return err
+		}
+	case "redirect-tcp", "redirect-udp":
+		if p.RedirectIface != "" && (len(p.RedirectIface) > 15 || strings.ContainsAny(p.RedirectIface, "\"'/\\\n\r ;&|$") ||
+			!gostHostnameSafe(p.RedirectIface)) {
+			return fmt.Errorf("gost: redirect_iface must be a ≤15-char interface name (iptables-safe)")
+		}
+	case "masque":
+		if strings.TrimSpace(p.TLSCert) == "" || strings.TrimSpace(p.TLSKey) == "" {
+			return fmt.Errorf("gost: service masque is QUIC+TLS — tls_cert and tls_key are required (the h3 listener terminates TLS)")
+		}
+		for _, a := range []struct{ label, v string }{{"masque_user", p.MasqueUser}, {"masque_password", p.MasquePassword}} {
+			if a.v != "" && (len(a.v) > 128 || strings.ContainsAny(a.v, "\"'@:/\n\r?&#")) {
+				return fmt.Errorf("gost: %s must be ≤128 URL-safe chars (no quotes/@/:/?/#)", a.label)
+			}
+		}
+	}
 	if _, port, err := net.SplitHostPort(strings.TrimSpace(p.CarrierAddr)); err != nil || port == "" {
 		return fmt.Errorf("gost: carrier_addr must be host:port")
 	}
 	if p.CarrierAddr != strings.TrimSpace(p.CarrierAddr) || strings.ContainsAny(p.CarrierAddr, "\"'\\\n\r") {
 		return fmt.Errorf("gost: carrier_addr not CLI-safe")
 	}
-	if p.PublicPort <= 0 || p.PublicPort > 65535 {
+	// public_port: required by the relay tunnel (rtcp/rudp listen) and by
+	// the redirect/sni/masque local service port; unused by tap (both ends
+	// bind the carrier UDP socket from carrier_addr).
+	needPublic := svc == "" || svc == "redirect-tcp" || svc == "redirect-udp" || svc == "sni" || svc == "masque"
+	if needPublic && (p.PublicPort <= 0 || p.PublicPort > 65535) {
 		return fmt.Errorf("gost: public_port out of range")
 	}
-	if _, _, err := net.SplitHostPort(strings.TrimSpace(p.LocalAddr)); err != nil ||
-		p.LocalAddr != strings.TrimSpace(p.LocalAddr) || strings.ContainsAny(p.LocalAddr, "\"'\\\n\r") {
-		return fmt.Errorf("gost: local_addr must be a CLI-safe host:port")
+	// local_addr is the tunnel shape's client-side target only — the
+	// redirect/sni/masque services dial arbitrary targets through the
+	// relay and tap has no L4 target at all.
+	if svc == "" {
+		if _, _, err := net.SplitHostPort(strings.TrimSpace(p.LocalAddr)); err != nil ||
+			p.LocalAddr != strings.TrimSpace(p.LocalAddr) || strings.ContainsAny(p.LocalAddr, "\"'\\\n\r") {
+			return fmt.Errorf("gost: local_addr must be a CLI-safe host:port")
+		}
+	}
+	return nil
+}
+
+// gostHostnameSafe reports a hostname/iface/device-name-safe charset.
+func gostHostnameSafe(s string) bool {
+	for _, r := range s {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '-' || r == '_' || r == '.'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// gostValidateCIDR checks an addr/CIDR param for the tap device config.
+func gostValidateCIDR(label, v string) error {
+	if strings.TrimSpace(v) == "" {
+		return fmt.Errorf("gost: %s required (the tap device's addr/CIDR, e.g. 10.66.0.1/24)", label)
+	}
+	if len(v) > 43 || strings.ContainsAny(v, "\"\\\n\r ") {
+		return fmt.Errorf("gost: %s must be a ≤43-char CIDR without quotes/whitespace", label)
+	}
+	if _, _, err := net.ParseCIDR(v); err != nil {
+		if ip := net.ParseIP(v); ip == nil {
+			return fmt.Errorf("gost: %s must be a CIDR or IP", label)
+		}
+	}
+	return nil
+}
+
+// gostValidateRouteList checks a comma-separated CIDR route list.
+func gostValidateRouteList(label, v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > 256 || strings.ContainsAny(v, "\"'\\\n\r ") {
+		return fmt.Errorf("gost: %s must be ≤256 chars of comma-separated CIDRs without quotes/whitespace", label)
+	}
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(part); err != nil {
+			return fmt.Errorf("gost: %s entry %q must be a CIDR", label, part)
+		}
 	}
 	return nil
 }
@@ -270,7 +449,7 @@ func (d *GostDriver) ID() string { return gostID }
 
 func (d *GostDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: gostID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","carrier_addr":"0.0.0.0:23344","public_port":0,"local_addr":"127.0.0.1:5201","transport":"ws|tcp|dtls|quic|grpc|http2|kcp|obfs-http|obfs-tls|ftcp|mws|pht|tls|mtls|h2|http3|h3|wt|utls|ssh|sshd|ss","mode":"tcp|udp","tls_cert":"","tls_key":"","ssh_user":"","ssh_password":"","ss_method":"aes-256-gcm","ss_password":"","utls_fingerprint":"chrome","ingress":""}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","carrier_addr":"0.0.0.0:23344","public_port":0,"local_addr":"127.0.0.1:5201","transport":"ws|tcp|dtls|quic|grpc|http2|kcp|obfs-http|obfs-tls|ftcp|mws|pht|tls|mtls|h2|http3|h3|wt|utls|ssh|sshd|ss","mode":"tcp|udp","tls_cert":"","tls_key":"","ssh_user":"","ssh_password":"","ss_method":"aes-256-gcm","ss_password":"","utls_fingerprint":"chrome","ingress":"","service":"|tap|redirect-tcp|redirect-udp|sni|masque","tap_net":"10.66.0.1/24","tap_net_server":"10.66.0.2/24","tap_name":"","tap_mtu":1420,"tap_gw":"","tap_route":"","redirect_iface":"","masque_user":"","masque_password":""}`)}
 }
 
 func (d *GostDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
@@ -369,10 +548,11 @@ func gostCarrierScheme(p gostParams) string {
 func gostURLQuery(role, transport string, p gostParams) string {
 	var q []string
 	// bind=true arms the relay for reverse (rtcp/rudp) listeners; in
-	// ingress mode the client chains OUT (no reverse registration), so
-	// the server is a plain relay — no bind.
+	// ingress mode and the redirect/sni services the client chains OUT
+	// (no reverse registration), so the server is a plain relay — no bind.
 	isIngress := gostIngressSchemes[strings.ToLower(strings.TrimSpace(p.Ingress))] != ""
-	if role == "server" && transport != "ss" && !isIngress {
+	svc := strings.ToLower(strings.TrimSpace(p.Service))
+	if role == "server" && transport != "ss" && !isIngress && svc != "redirect-tcp" && svc != "redirect-udp" && svc != "sni" {
 		q = append(q, "bind=true")
 	}
 	if gostCertCarriers[transport] {
@@ -419,7 +599,19 @@ func gostHostPort(role, transport string, p gostParams) string {
 // the URL query; transport=ss swaps the relay composition for the
 // shadowsocks URL shape; ingress modes replace the client's rtcp/rudp
 // listener with the local ingress proxy (the classic gost exit shape).
+// OVERNIGHT-A3: the service families take over the whole render (see the
+// header comment for each shape's upstream citation).
 func gostArgs(role, transport string, p gostParams) []string {
+	switch strings.ToLower(strings.TrimSpace(p.Service)) {
+	case "tap":
+		return gostTapArgs(role, p)
+	case "redirect-tcp", "redirect-udp":
+		return gostRedirectArgs(role, transport, p)
+	case "sni":
+		return gostSNIArgs(role, transport, p)
+	case "masque":
+		return gostMasqueArgs(role, p)
+	}
 	host := gostHostPort(role, transport, p)
 	q := gostURLQuery(role, transport, p)
 	if role == "server" {
@@ -453,6 +645,103 @@ func gostArgs(role, transport string, p gostParams) []string {
 		forward += "?fingerprint=" + fp
 	}
 	return []string{"-L", listen, "-F", forward}
+}
+
+// ---- OVERNIGHT-A3 service families --------------------------------------
+
+// gostTapQuery renders the shared tap metadata (docs/tutorials/tuntap.md:
+// net/name/mtu/gw/route — the tap listener resolves the addr as UDP and
+// bridges the device's frames).
+func gostTapQuery(net_ string, p gostParams) string {
+	q := []string{"net=" + net_}
+	if p.TapName != "" {
+		q = append(q, "name="+p.TapName)
+	}
+	if p.TapMTU > 0 {
+		q = append(q, "mtu="+fmt.Sprint(p.TapMTU))
+	}
+	if p.TapGW != "" {
+		q = append(q, "gw="+p.TapGW)
+	}
+	return strings.Join(q, "&")
+}
+
+// gostTapArgs renders the L2 tap bridge: the server binds the UDP frame
+// socket (`tap://:port?...`), the client's device forwards its frames to
+// the server's socket (`tap://:0/server:port?...` — the URL path IS the
+// upstream forward target).
+func gostTapArgs(role string, p gostParams) []string {
+	host := strings.TrimSpace(p.CarrierAddr)
+	port := enginePortOf(p.CarrierAddr)
+	if role == "server" {
+		q := gostTapQuery(p.TapNetServer, p)
+		if p.TapRouteServer != "" {
+			q += "&route=" + p.TapRouteServer
+		}
+		return []string{"-L", fmt.Sprintf("tap://:%d?%s", port, q)}
+	}
+	q := gostTapQuery(p.TapNet, p)
+	if p.TapRoute != "" {
+		q += "&route=" + p.TapRoute
+	}
+	return []string{"-L", fmt.Sprintf("tap://:0/%s?%s", host, q)}
+}
+
+// gostRedirectArgs renders the transparent-proxy services: the client
+// runs the red/redu listener locally and chains OUT through the relay
+// (the SO_ORIGINAL_DST/TPROXY original destination is dialed from the
+// foreign end); the server stays a plain relay (no bind — no reverse
+// registration, same semantics as ingress mode).
+func gostRedirectArgs(role, transport string, p gostParams) []string {
+	scheme := "redirect"
+	if strings.EqualFold(strings.TrimSpace(p.Service), "redirect-udp") {
+		scheme = "redu"
+	}
+	if role == "server" {
+		return []string{"-L", fmt.Sprintf("relay+%s://:%d", transport, enginePortOf(p.CarrierAddr))}
+	}
+	listen := fmt.Sprintf("%s://:%d", scheme, p.PublicPort)
+	forward := fmt.Sprintf("relay+%s://%s", transport, strings.TrimSpace(p.CarrierAddr))
+	return []string{"-L", listen, "-F", forward}
+}
+
+// gostSNIArgs renders the SNI/Host routing proxy (docs/tutorials/
+// protocols/sni.md `gost -L sni://:443` — handler sni on the tcp
+// listener): the client routes by ClientHello SNI / HTTP Host and dials
+// the target through the relay chain.
+func gostSNIArgs(role, transport string, p gostParams) []string {
+	if role == "server" {
+		return []string{"-L", fmt.Sprintf("relay+%s://:%d", transport, enginePortOf(p.CarrierAddr))}
+	}
+	return []string{"-L", fmt.Sprintf("sni://:%d", p.PublicPort),
+		"-F", fmt.Sprintf("relay+%s://%s", transport, strings.TrimSpace(p.CarrierAddr))}
+}
+
+// gostMasqueArgs renders the MASQUE-over-HTTP/3 pair. LAB-VERIFIED
+// (2026-11-22, gost v3.3.3 in netns): the registry name "h3" is the PHT
+// listener in x v0.28.1 and 404s every CONNECT — the masque-capable
+// HTTP/3 listener (the one that injects the http.Request/ResponseWriter
+// metadata handler/masque consumes, listener/http3/listener.go
+// handleFunc) registers as "http3". The handler/masque doc comment's
+// "registered as h3" is stale upstream. Server:
+// `masque+http3://:port?certFile=&keyFile=` (QUIC+TLS, operator cert
+// pair in the URL query); client `socks5://:<port>` →
+// `-F masque+h3-masque://server:port` (connectors/masque +
+// dialers/h3-masque; CONNECT-TCP + CONNECT-UDP both client-supported).
+// Optional HTTP Basic auth rides URL userinfo on both ends; secure=false
+// skips operator-cert verification (self-signed pairs are the norm here).
+func gostMasqueArgs(role string, p gostParams) []string {
+	host := strings.TrimSpace(p.CarrierAddr)
+	var userinfo string
+	if p.MasqueUser != "" {
+		userinfo = p.MasqueUser + ":" + p.MasquePassword + "@"
+	}
+	if role == "server" {
+		return []string{"-L", fmt.Sprintf("masque+http3://%s:%d?certFile=%s&keyFile=%s",
+			userinfo, enginePortOf(p.CarrierAddr), p.TLSCert, p.TLSKey)}
+	}
+	return []string{"-L", fmt.Sprintf("socks5://:%d", p.PublicPort),
+		"-F", fmt.Sprintf("masque+h3-masque://%s%s?secure=false", userinfo, host)}
 }
 
 // Start implements engine.Driver.
@@ -501,11 +790,22 @@ func (d *GostDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if role == "server" {
 		if port := enginePortOf(p.CarrierAddr); port > 0 {
 			proto := "tcp"
-			if gostUDPCarrier(p.Transport) {
+			if gostUDPCarrier(p.Transport) || gostServiceUDP(strings.ToLower(strings.TrimSpace(p.Service))) {
 				proto = "udp"
 			}
 			if err := acctWireRulesAddProto(acctChainsDriver, inst.TunnelID, port, port, proto); err != nil {
 				fmt.Fprintf(os.Stderr, "gost: wire accounting unavailable: %v\n", err)
+			}
+		}
+	}
+	// OVERNIGHT-A3: the transparent-proxy firewall leg lives on the CLIENT
+	// end (the red/redu listener + the iptables REDIRECT/TPROXY rules are
+	// a pair). Install only when the operator scoped an interface.
+	if role == "client" && p.RedirectIface != "" {
+		svc := strings.ToLower(strings.TrimSpace(p.Service))
+		if svc == "redirect-tcp" || svc == "redirect-udp" {
+			if err := gostRedirectRulesAdd(inst.TunnelID, svc, p.RedirectIface, p.PublicPort); err != nil {
+				fmt.Fprintf(os.Stderr, "gost: redirect rules unavailable: %v\n", err)
 			}
 		}
 	}
@@ -529,10 +829,17 @@ func (d *GostDriver) Stop(inst engine.Instance) error {
 		if st.role == "server" {
 			if port := enginePortOf(st.params.CarrierAddr); port > 0 {
 				proto := "tcp"
-				if gostUDPCarrier(st.params.Transport) {
+				if gostUDPCarrier(st.params.Transport) || gostServiceUDP(strings.ToLower(strings.TrimSpace(st.params.Service))) {
 					proto = "udp"
 				}
 				_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, port, port, proto)
+			}
+		}
+		// the redirect firewall leg mirrors the process (client end).
+		if st.role == "client" && st.params.RedirectIface != "" {
+			svc := strings.ToLower(strings.TrimSpace(st.params.Service))
+			if svc == "redirect-tcp" || svc == "redirect-udp" {
+				gostRedirectRulesDel(inst.TunnelID, svc, st.params.RedirectIface, st.params.PublicPort)
 			}
 		}
 	})
@@ -574,9 +881,13 @@ func (d *GostDriver) Health(inst engine.Instance) engine.Health {
 	// it; the process-alive check stays the honest signal (OVERNIGHT-A).
 	// Ingress mode (OVERNIGHT-A2) binds the public port on the CLIENT end
 	// — the server end has no data port to dial; process-alive it is.
+	// Service families (OVERNIGHT-A3): tap/masque ride UDP sockets (dial
+	// N/A), redirect/sni put the data port on the CLIENT end (plain relay
+	// server — dial N/A).
 	if strings.EqualFold(strings.TrimSpace(st.params.Mode), "udp") ||
-		gostIngressSchemes[strings.ToLower(strings.TrimSpace(st.params.Ingress))] != "" {
-		return engine.Health{OK: true, Detail: "gost server running (rudp/ingress mode; dial gate N/A)", LatencyMs: -1}
+		gostIngressSchemes[strings.ToLower(strings.TrimSpace(st.params.Ingress))] != "" ||
+		strings.TrimSpace(st.params.Service) != "" {
+		return engine.Health{OK: true, Detail: "gost server running (" + strings.ToLower(strings.TrimSpace(st.params.Service)) + " service; dial gate N/A)", LatencyMs: -1}
 	}
 	start := time.Now()
 	delays := []time.Duration{0, 300 * time.Millisecond, 800 * time.Millisecond}

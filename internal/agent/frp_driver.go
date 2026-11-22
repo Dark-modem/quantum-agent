@@ -82,6 +82,31 @@ type frpParams struct {
 	// shared secretKey of the proxy AND the foreign-end visitor (upstream
 	// STCPProxyConfig/XTCPProxyConfig secretKey + VisitorBaseConfig).
 	SecretKey string `json:"secret_key,omitempty"`
+	// OVERNIGHT-A3 vhost family (proxy_type http|https|tcpmux — the
+	// morning human order lifted the vhost "next wave" hold). Server-side
+	// frps config (pkg/config/v1/server.go): VhostHTTPPort /
+	// VhostHTTPSPort / TCPMuxHTTPConnectPort / TCPMuxPassthrough /
+	// SubDomainHost. Client-side proxy blocks (pkg/config/v1/proxy.go):
+	// HTTPProxyConfig (DomainConfig + Locations + HTTPUser/HTTPPassword +
+	// HostHeaderRewrite), HTTPSProxyConfig (DomainConfig — TLS passthrough
+	// routed by SNI), TCPMuxProxyConfig (DomainConfig + Multiplexer
+	// "httpconnect" + HTTPUser/HTTPPassword). The vhost proxies carry NO
+	// remotePort — frps routes by domain on the vhost ports.
+	VhostHTTPPort     int    `json:"vhost_http_port,omitempty"`  // frps vhostHTTPPort (0 = off)
+	VhostHTTPSPort    int    `json:"vhost_https_port,omitempty"` // frps vhostHTTPSPort
+	TCPMuxPort        int    `json:"tcpmux_http_connect_port,omitempty"`
+	TCPMuxPassthrough bool   `json:"tcpmux_passthrough,omitempty"`
+	SubDomainHost     string `json:"sub_domain_host,omitempty"` // frps subDomainHost
+	// DomainConfig (customDomains[] + subdomain) — at least one is
+	// required for the vhost family.
+	CustomDomains []string `json:"custom_domains,omitempty"`
+	SubDomain     string   `json:"subdomain,omitempty"`
+	// http-only knobs.
+	Locations         []string `json:"locations,omitempty"`
+	HostHeaderRewrite string   `json:"host_header_rewrite,omitempty"`
+	// http + tcpmux basic auth.
+	HTTPUser     string `json:"http_user,omitempty"`
+	HTTPPassword string `json:"http_password,omitempty"`
 }
 
 // frpSecretProxy reports the proxy types that need the foreign-end
@@ -96,11 +121,36 @@ func frpSecretProxy(pt string) bool {
 }
 
 // frpAllowedProxyTypes mirrors upstream ProxyType entries the two-end
-// tunnel shape can drive today (tcp/udp); http/https/tcpmux/stcp/sudp/
-// xtcp need vhost routing, visitors or P2P — documented next wave.
+// tunnel shape can drive. OVERNIGHT-A3 adds the vhost family (http/
+// https/tcpmux — frps vhost ports + domain routing, verified against
+// pkg/config/v1/proxy.go; the A2-era "next wave" hold is lifted by the
+// morning human order).
 var frpAllowedProxyTypes = map[string]bool{
 	"": true, "tcp": true, "udp": true,
 	"stcp": true, "sudp": true, "xtcp": true,
+	"http": true, "https": true, "tcpmux": true,
+}
+
+// frpVhostProxy reports the vhost-routed proxy types (no remotePort —
+// frps routes by domain on the vhost ports).
+func frpVhostProxy(pt string) bool {
+	switch strings.ToLower(strings.TrimSpace(pt)) {
+	case "http", "https", "tcpmux":
+		return true
+	}
+	return false
+}
+
+// frpHostnameSafe is the domain/hostname charset (renders into TOML).
+func frpHostnameSafe(s string) bool {
+	for _, r := range s {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '-' || r == '_' || r == '.'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // frpAllowedTransports mirrors upstream SupportedTransportProtocols
@@ -181,7 +231,55 @@ func frpValidateParams(p frpParams) error {
 	}
 	pt := strings.ToLower(strings.TrimSpace(p.ProxyType))
 	if !frpAllowedProxyTypes[pt] {
-		return fmt.Errorf("frp: proxy_type %q not supported (tcp|udp|stcp|sudp|xtcp; http/https/tcpmux need vhost routing — next wave)", p.ProxyType)
+		return fmt.Errorf("frp: proxy_type %q not supported (tcp|udp|stcp|sudp|xtcp|http|https|tcpmux)", p.ProxyType)
+	}
+	// OVERNIGHT-A3 vhost family: the frps side must open the matching
+	// vhost port and the proxy needs a routing domain.
+	if frpVhostProxy(pt) {
+		switch pt {
+		case "http":
+			if p.VhostHTTPPort <= 0 || p.VhostHTTPPort > 65535 {
+				return fmt.Errorf("frp: proxy_type http needs vhost_http_port 1-65535 (frps vhostHTTPPort)")
+			}
+		case "https":
+			if p.VhostHTTPSPort <= 0 || p.VhostHTTPSPort > 65535 {
+				return fmt.Errorf("frp: proxy_type https needs vhost_https_port 1-65535 (frps vhostHTTPSPort)")
+			}
+		case "tcpmux":
+			if p.TCPMuxPort <= 0 || p.TCPMuxPort > 65535 {
+				return fmt.Errorf("frp: proxy_type tcpmux needs tcpmux_http_connect_port 1-65535 (frps TCPMuxHTTPConnectPort)")
+			}
+		}
+		if len(p.CustomDomains) == 0 && strings.TrimSpace(p.SubDomain) == "" {
+			return fmt.Errorf("frp: proxy_type %s needs custom_domains or subdomain (frps routes by domain — DomainConfig)", p.ProxyType)
+		}
+		if len(p.CustomDomains) > 16 {
+			return fmt.Errorf("frp: custom_domains accepts at most 16 entries")
+		}
+		for _, d := range p.CustomDomains {
+			if strings.TrimSpace(d) == "" || len(d) > 253 || !frpHostnameSafe(d) {
+				return fmt.Errorf("frp: custom_domains entries must be hostname-safe ≤253-char strings (got %q)", d)
+			}
+		}
+		if p.SubDomain != "" && (len(p.SubDomain) > 63 || !frpHostnameSafe(p.SubDomain)) {
+			return fmt.Errorf("frp: subdomain must be a hostname-safe ≤63-char label (joined with frps subDomainHost)")
+		}
+		if p.SubDomainHost != "" && (len(p.SubDomainHost) > 253 || !frpHostnameSafe(p.SubDomainHost)) {
+			return fmt.Errorf("frp: sub_domain_host must be a hostname-safe ≤253-char string")
+		}
+		for _, loc := range p.Locations {
+			if len(loc) > 128 || !strings.HasPrefix(loc, "/") || strings.ContainsAny(loc, "\"'\\\n\r ") {
+				return fmt.Errorf("frp: locations entries must be /-rooted ≤128-char paths without quotes/whitespace")
+			}
+		}
+		if p.HostHeaderRewrite != "" && (len(p.HostHeaderRewrite) > 253 || !frpHostnameSafe(p.HostHeaderRewrite)) {
+			return fmt.Errorf("frp: host_header_rewrite must be a hostname-safe ≤253-char string")
+		}
+		for _, a := range []struct{ label, v string }{{"http_user", p.HTTPUser}, {"http_password", p.HTTPPassword}} {
+			if a.v != "" && (len(a.v) > 128 || strings.ContainsAny(a.v, "\"\\ \t\n\r")) {
+				return fmt.Errorf("frp: %s must be 1-128 chars without quotes, backslash or whitespace", a.label)
+			}
+		}
 	}
 	if frpSecretProxy(pt) {
 		if len(p.SecretKey) < 8 || len(p.SecretKey) > 128 || strings.ContainsAny(p.SecretKey, "\"\\ \t\n\r") {
@@ -363,7 +461,7 @@ func (d *FRPDriver) ID() string { return frpID }
 // Describe implements engine.Describer (PROTOCOL-REQUESTS R3).
 func (d *FRPDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: frpID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"role":"server|client","version":"","artifact":"","sha256":"","signature":"","server_addr":"","server_port":0,"token":"","remote_port":0,"local_addr":"","local_port":0,"dashboard_port":0,"allow_port_min":0,"allow_port_max":0,"proxy_type":"tcp|udp|stcp|sudp|xtcp","transport":"tcp|kcp|quic|websocket","use_encryption":false,"use_compression":false,"secret_key":""}`)}
+		ParamsSchema: json.RawMessage(`{"role":"server|client","version":"","artifact":"","sha256":"","signature":"","server_addr":"","server_port":0,"token":"","remote_port":0,"local_addr":"","local_port":0,"dashboard_port":0,"allow_port_min":0,"allow_port_max":0,"proxy_type":"tcp|udp|stcp|sudp|xtcp|http|https|tcpmux","transport":"tcp|kcp|quic|websocket","use_encryption":false,"use_compression":false,"secret_key":"","vhost_http_port":0,"vhost_https_port":0,"tcpmux_http_connect_port":0,"tcpmux_passthrough":false,"sub_domain_host":"","custom_domains":["app.example.com"],"subdomain":"app","locations":["/api"],"host_header_rewrite":"","http_user":"","http_password":""}`)}
 }
 
 // EnsureBinary implements engine.Driver: downloads and verifies the
@@ -437,6 +535,24 @@ func frpRenderConfig(tunnelID, role string, p frpParams) string {
 		fmt.Fprintf(&b, "webServer.user = \"quantum\"\n")
 		fmt.Fprintf(&b, "webServer.password = \"%s\"\n", frpDashSecret(tunnelID, p))
 		fmt.Fprintf(&b, "allowPorts = [{ start = %d, end = %d }]\n", p.AllowMin, p.AllowMax)
+		// OVERNIGHT-A3 vhost family: frps opens the vhost ports the
+		// client's http/https/tcpmux proxies ride (pkg/config/v1/
+		// server.go field names verbatim).
+		if p.VhostHTTPPort > 0 {
+			fmt.Fprintf(&b, "vhostHTTPPort = %d\n", p.VhostHTTPPort)
+		}
+		if p.VhostHTTPSPort > 0 {
+			fmt.Fprintf(&b, "vhostHTTPSPort = %d\n", p.VhostHTTPSPort)
+		}
+		if p.TCPMuxPort > 0 {
+			fmt.Fprintf(&b, "tcpmuxHTTPConnectPort = %d\n", p.TCPMuxPort)
+		}
+		if p.TCPMuxPassthrough {
+			b.WriteString("tcpmuxPassthrough = true\n")
+		}
+		if p.SubDomainHost != "" {
+			fmt.Fprintf(&b, "subDomainHost = \"%s\"\n", p.SubDomainHost)
+		}
 	case "client":
 		fmt.Fprintf(&b, "serverAddr = \"%s\"\n", p.ServerAddr)
 		fmt.Fprintf(&b, "serverPort = %d\n", p.ServerPort)
@@ -449,7 +565,44 @@ func frpRenderConfig(tunnelID, role string, p frpParams) string {
 		fmt.Fprintf(&b, "type = \"%s\"\n", proxyType)
 		fmt.Fprintf(&b, "localIP = \"%s\"\n", p.LocalAddr)
 		fmt.Fprintf(&b, "localPort = %d\n", p.LocalPort)
-		fmt.Fprintf(&b, "remotePort = %d\n", p.RemotePort)
+		if frpVhostProxy(proxyType) {
+			// vhost family: frps routes by domain — the proxy carries
+			// DomainConfig, NOT remotePort (upstream HTTPProxyConfig/
+			// HTTPSProxyConfig/TCPMuxProxyConfig).
+			if len(p.CustomDomains) > 0 {
+				quoted := make([]string, 0, len(p.CustomDomains))
+				for _, d := range p.CustomDomains {
+					quoted = append(quoted, fmt.Sprintf("%q", d))
+				}
+				fmt.Fprintf(&b, "customDomains = [%s]\n", strings.Join(quoted, ", "))
+			}
+			if p.SubDomain != "" {
+				fmt.Fprintf(&b, "subdomain = \"%s\"\n", p.SubDomain)
+			}
+			if proxyType == "http" {
+				if len(p.Locations) > 0 {
+					quoted := make([]string, 0, len(p.Locations))
+					for _, l := range p.Locations {
+						quoted = append(quoted, fmt.Sprintf("%q", l))
+					}
+					fmt.Fprintf(&b, "locations = [%s]\n", strings.Join(quoted, ", "))
+				}
+				if p.HostHeaderRewrite != "" {
+					fmt.Fprintf(&b, "hostHeaderRewrite = \"%s\"\n", p.HostHeaderRewrite)
+				}
+			}
+			if proxyType == "http" || proxyType == "tcpmux" {
+				if p.HTTPUser != "" {
+					fmt.Fprintf(&b, "httpUser = \"%s\"\n", p.HTTPUser)
+					fmt.Fprintf(&b, "httpPassword = \"%s\"\n", p.HTTPPassword)
+				}
+			}
+			if proxyType == "tcpmux" {
+				fmt.Fprintf(&b, "multiplexer = \"httpconnect\"\n")
+			}
+		} else {
+			fmt.Fprintf(&b, "remotePort = %d\n", p.RemotePort)
+		}
 		if frpSecretProxy(proxyType) {
 			// the proxy name IS the visitor's serverName (upstream
 			// naming.BuildTargetServerProxyName resolves it user-less).
@@ -509,6 +662,16 @@ func (d *FRPDriver) ForwardAddress(inst engine.Instance) (string, int, bool) {
 	st := d.runs.peek(inst.TunnelID)
 	if st == nil {
 		return "", 0, false
+	}
+	// OVERNIGHT-A3 vhost family: the data port is the matching frps vhost
+	// port (remotePort is not bound for http/https/tcpmux).
+	if frpVhostProxy(st.params.ProxyType) {
+		if ports := frpVhostPorts(st.params); len(ports) == 1 {
+			if st.role == "server" {
+				return "127.0.0.1", ports[0], true
+			}
+			return st.params.ServerAddr, ports[0], true
+		}
 	}
 	if st.role == "server" {
 		return "127.0.0.1", st.params.RemotePort, true
@@ -626,6 +789,34 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 				fmt.Fprintf(os.Stderr, "frp: visitor accounting unavailable: %v\n", err)
 			}
 		}
+		// OVERNIGHT-A3 vhost family: the vhost ports ARE the data ports
+		// (the client's proxy rides them; frps routes by domain).
+		if frpVhostProxy(p.ProxyType) {
+			for _, vp := range frpVhostPorts(p) {
+				if err := acctWireRulesAddProto(acctChainsDriver, inst.TunnelID, vp, vp, "tcp"); err != nil {
+					fmt.Fprintf(os.Stderr, "frp: vhost accounting unavailable: %v\n", err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// frpVhostPorts lists the vhost ports this tunnel's proxy type rides.
+func frpVhostPorts(p frpParams) []int {
+	switch strings.ToLower(strings.TrimSpace(p.ProxyType)) {
+	case "http":
+		if p.VhostHTTPPort > 0 {
+			return []int{p.VhostHTTPPort}
+		}
+	case "https":
+		if p.VhostHTTPSPort > 0 {
+			return []int{p.VhostHTTPSPort}
+		}
+	case "tcpmux":
+		if p.TCPMuxPort > 0 {
+			return []int{p.TCPMuxPort}
+		}
 	}
 	return nil
 }
@@ -666,6 +857,11 @@ func (d *FRPDriver) Stop(inst engine.Instance) error {
 					udpProto = "tcp"
 				}
 				_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, st.params.RemotePort, st.params.RemotePort, udpProto)
+			}
+			if frpVhostProxy(st.params.ProxyType) {
+				for _, vp := range frpVhostPorts(st.params) {
+					_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, vp, vp, "tcp")
+				}
 			}
 		}
 	})
