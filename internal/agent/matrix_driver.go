@@ -233,6 +233,11 @@ func NewAgentEngines() (*engine.Registry, error) {
 	if err := reg.Register(NewWaterwallDriver()); err != nil {
 		return nil, err
 	}
+	// OVERNIGHT-A7: the EasyTier mesh driver (the vendored dual-arch
+	// v2.7.1 core, LGPL-3.0 — the last implementable method).
+	if err := reg.Register(NewEasytierDriver()); err != nil {
+		return nil, err
+	}
 	if err := RegisterLabEngines(reg); err != nil {
 		return nil, err
 	}
