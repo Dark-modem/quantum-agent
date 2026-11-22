@@ -220,6 +220,14 @@ func NewAgentEngines() (*engine.Registry, error) {
 	if err := reg.Register(NewCtunnelDriver()); err != nil {
 		return nil, err
 	}
+	// OVERNIGHT-C vendored cores (AGENT-31): hysteria + sing-box drivers
+	// over the released cores (hysteria-v2.14.0 / sing-box-v1.14.4).
+	if err := reg.Register(NewHysteriaDriver()); err != nil {
+		return nil, err
+	}
+	if err := reg.Register(NewSingboxDriver()); err != nil {
+		return nil, err
+	}
 	if err := RegisterLabEngines(reg); err != nil {
 		return nil, err
 	}
