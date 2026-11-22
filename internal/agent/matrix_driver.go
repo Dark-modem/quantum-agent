@@ -228,6 +228,11 @@ func NewAgentEngines() (*engine.Registry, error) {
 	if err := reg.Register(NewSingboxDriver()); err != nil {
 		return nil, err
 	}
+	// OVERNIGHT-A5: the WaterWall driver over the vendored dual-arch core
+	// (quantum-cores waterwall/ v1.6.0, MPL-2.0 — 18-method node-chain engine).
+	if err := reg.Register(NewWaterwallDriver()); err != nil {
+		return nil, err
+	}
 	if err := RegisterLabEngines(reg); err != nil {
 		return nil, err
 	}

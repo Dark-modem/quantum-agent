@@ -73,6 +73,26 @@ type xrayParams struct {
 	// GrpcServiceName is the grpcSettings serviceName (default
 	// "quantum-reverse"; both ends must match).
 	GrpcServiceName string `json:"grpc_service_name,omitempty"`
+	// OVERNIGHT-A5: the carrier family. "" (default) = the historical
+	// VLESS+Reality bridge/portal reverse topology — every existing param
+	// keeps its meaning. "hysteria2" = the QUIC carrier pair (probe-proven
+	// on the vendored v26.3.27 core: hysteria2 inbound+outbound
+	// Configuration OK; the v24.12.31 core rejects protocol hysteria — the
+	// cores upgrade ships xray-v26.3.27 as latest): SERVER (foreign)
+	// renders the hysteria2 inbound (version 2, users auth, QUIC+TLS) +
+	// freedom outbound (dials requested targets from its network); CLIENT
+	// (iran) renders the hysteria2 outbound (version 2, auth) + the local
+	// socks/http inbounds riding it (SocksPort/HTTPPort). The Reality/
+	// dokodemo/reverse machinery does NOT render in this family (dead
+	// fields are refused — fail closed).
+	Carrier string `json:"carrier,omitempty"` // "" | hysteria2
+	// hysteria2 carrier auth (the shared password; HysteriaUserConfig.auth).
+	HysteriaAuth string `json:"hysteria_auth,omitempty"`
+	// hysteria2 cert pair (the inbound is QUIC+TLS; self-signed ok — the
+	// client-side outbound renders the probe-proven default shape).
+	// Additive — dead on the default Reality carrier.
+	TLSCert string `json:"tls_cert,omitempty"`
+	TLSKey  string `json:"tls_key,omitempty"`
 	// OVERNIGHT-A3 (morning human order): optional SOCKS/HTTP ingress
 	// inbounds on the CLIENT end. Probe-proven against the vendored
 	// v24.12.31 binary (`xray run -test` accepts protocol socks with
@@ -99,6 +119,45 @@ func (p xrayParams) xrayArtifactPin() (name, sha256Hex, sigB64 string, err error
 // xrayValidateParams checks the union shape. Secrets are shape-checked
 // only (printable ASCII, bounded) — never logged with their value.
 func xrayValidateParams(p xrayParams) error {
+	// OVERNIGHT-A5: the carrier family gate. "hysteria2" is the QUIC
+	// carrier pair over the upgraded v26.3.27 core (probe-proven);
+	// the Reality fields are dead weight there — refused, fail closed.
+	carrier := strings.ToLower(strings.TrimSpace(p.Carrier))
+	switch carrier {
+	case "":
+	case "hysteria2":
+		if strings.TrimSpace(p.TLSCert) == "" || strings.TrimSpace(p.TLSKey) == "" {
+			return fmt.Errorf("xray: carrier hysteria2 is QUIC+TLS — tls_cert and tls_key are required")
+		}
+		if err := engineVerifySecretShape("xray hysteria_auth", p.HysteriaAuth, 8, 128); err != nil {
+			return err
+		}
+		for _, a := range []struct {
+			label, v string
+		}{{"server_name", p.ServerName}, {"dest", p.Dest}, {"short_id", p.ShortID},
+			{"reality_public_key", p.RealityPublicKey}, {"reality_private_key", p.RealityPrivateKey},
+			{"uuid", p.UUID}, {"flow", p.Flow}, {"local_addr", p.LocalAddr}} {
+			if strings.TrimSpace(a.v) != "" {
+				return fmt.Errorf("xray: %s is dead weight for carrier hysteria2 (the Reality/dokodemo family does not render)", a.label)
+			}
+		}
+		if p.PublicPort != 0 || p.LocalPort != 0 {
+			return fmt.Errorf("xray: public_port/local_port are dead weight for carrier hysteria2 (the client's socks_port/http_port are the ingress)")
+		}
+		if p.Transport != "" || p.XHTTPPath != "" || p.GrpcServiceName != "" {
+			return fmt.Errorf("xray: transport/xhttp/grpc settings are dead weight for carrier hysteria2")
+		}
+		// the dial host (RemoteAddr doubles as the carrier host here).
+		if strings.TrimSpace(p.RemoteAddr) == "" || strings.ContainsAny(p.RemoteAddr, "\"'\n\r\\") {
+			return fmt.Errorf("xray: remote_addr required for carrier hysteria2 (the foreign host)")
+		}
+		// the client needs an ingress or the tunnel carries nothing.
+		if p.SocksPort == 0 && p.HTTPPort == 0 {
+			return fmt.Errorf("xray: carrier hysteria2 needs socks_port or http_port (the iran-end ingress)")
+		}
+	default:
+		return fmt.Errorf("xray: carrier %q not supported (empty=reality-reverse|hysteria2)", p.Carrier)
+	}
 	if strings.TrimSpace(p.ServerSide) == "" || len(p.ServerSide) > 128 {
 		return fmt.Errorf("xray: server_side required")
 	}
@@ -117,36 +176,44 @@ func xrayValidateParams(p xrayParams) error {
 			return fmt.Errorf("xray: signature pin must be base64 (64-512 chars)")
 		}
 	}
-	if p.CarrierPort <= 0 || p.CarrierPort > 65535 || p.PublicPort <= 0 || p.PublicPort > 65535 {
-		return fmt.Errorf("xray: carrier_port/public_port out of range")
+	// CarrierPort is the carrier listen/dial port on BOTH families.
+	if p.CarrierPort <= 0 || p.CarrierPort > 65535 {
+		return fmt.Errorf("xray: carrier_port out of range")
 	}
-	if strings.TrimSpace(p.LocalAddr) == "" || strings.ContainsAny(p.LocalAddr, "\"'\n\r\\") ||
-		p.LocalPort <= 0 || p.LocalPort > 65535 {
-		return fmt.Errorf("xray: local_addr/local_port invalid")
-	}
-	if strings.TrimSpace(p.RemoteAddr) == "" || strings.ContainsAny(p.RemoteAddr, "\"'\n\r\\") {
-		return fmt.Errorf("xray: remote_addr invalid")
-	}
-	if err := engineVerifySecretShape("xray server_name", p.ServerName, 1, 253); err != nil {
-		return err
-	}
-	if err := engineVerifySecretShape("xray dest", p.Dest, 3, 253); err != nil {
-		return err
-	}
-	if len(p.ShortID) > 16 || strings.ContainsAny(p.ShortID, "\"'\n\r\\ ") {
-		return fmt.Errorf("xray: short_id must be <=16 chars without quotes")
-	}
-	if _, err := hex.DecodeString(p.ShortID); err != nil && p.ShortID != "" {
-		return fmt.Errorf("xray: short_id must be hex")
-	}
-	if err := engineVerifySecretShape("xray reality_public_key", p.RealityPublicKey, 32, 64); err != nil {
-		return err
-	}
-	if err := engineVerifySecretShape("xray reality_private_key", p.RealityPrivateKey, 32, 64); err != nil {
-		return err
-	}
-	if err := engineVerifySecretShape("xray uuid", p.UUID, 16, 64); err != nil {
-		return err
+	// The Reality/dokodemo family checks run on the DEFAULT carrier only —
+	// carrier=hysteria2 refuses those fields outright (above).
+	if carrier == "" {
+		if p.PublicPort <= 0 || p.PublicPort > 65535 {
+			return fmt.Errorf("xray: public_port out of range")
+		}
+		if strings.TrimSpace(p.LocalAddr) == "" || strings.ContainsAny(p.LocalAddr, "\"'\n\r\\") ||
+			p.LocalPort <= 0 || p.LocalPort > 65535 {
+			return fmt.Errorf("xray: local_addr/local_port invalid")
+		}
+		if strings.TrimSpace(p.RemoteAddr) == "" || strings.ContainsAny(p.RemoteAddr, "\"'\n\r\\") {
+			return fmt.Errorf("xray: remote_addr invalid")
+		}
+		if err := engineVerifySecretShape("xray server_name", p.ServerName, 1, 253); err != nil {
+			return err
+		}
+		if err := engineVerifySecretShape("xray dest", p.Dest, 3, 253); err != nil {
+			return err
+		}
+		if len(p.ShortID) > 16 || strings.ContainsAny(p.ShortID, "\"'\n\r\\ ") {
+			return fmt.Errorf("xray: short_id must be <=16 chars without quotes")
+		}
+		if _, err := hex.DecodeString(p.ShortID); err != nil && p.ShortID != "" {
+			return fmt.Errorf("xray: short_id must be hex")
+		}
+		if err := engineVerifySecretShape("xray reality_public_key", p.RealityPublicKey, 32, 64); err != nil {
+			return err
+		}
+		if err := engineVerifySecretShape("xray reality_private_key", p.RealityPrivateKey, 32, 64); err != nil {
+			return err
+		}
+		if err := engineVerifySecretShape("xray uuid", p.UUID, 16, 64); err != nil {
+			return err
+		}
 	}
 	if strings.Contains(p.Flow, "\"") || strings.Contains(p.Flow, "\n") || len(p.Flow) > 64 {
 		return fmt.Errorf("xray: flow invalid")
@@ -288,13 +355,16 @@ type xraySockopt struct {
 }
 
 type xrayInbound struct {
-	Tag            string               `json:"tag"`
-	Listen         string               `json:"listen"`
-	Port           int                  `json:"port"`
-	Protocol       string               `json:"protocol"`
-	Settings       *xrayInboundSettings `json:"settings,omitempty"`
-	StreamSettings *xrayStreamSettings  `json:"streamSettings,omitempty"`
-	Sniffing       *xraySniffing        `json:"sniffing,omitempty"`
+	Tag      string `json:"tag"`
+	Listen   string `json:"listen"`
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
+	// Settings carries the per-protocol inbound settings:
+	// *xrayInboundSettings for vless/socks/http/dokodemo,
+	// *xrayHysteriaInboundSettings for the hysteria carrier (OVERNIGHT-A5).
+	Settings       any                 `json:"settings,omitempty"`
+	StreamSettings *xrayStreamSettings `json:"streamSettings,omitempty"`
+	Sniffing       *xraySniffing       `json:"sniffing,omitempty"`
 }
 
 type xraySniffing struct {
@@ -380,11 +450,35 @@ func xrayStreamClientTransport(s *xrayStreamClient, p xrayParams) {
 }
 
 type xrayOutbound struct {
-	Tag            string                `json:"tag"`
-	Protocol       string                `json:"protocol"`
-	Settings       *xrayOutboundSettings `json:"settings,omitempty"`
-	StreamSettings *xrayStreamClient     `json:"streamSettings,omitempty"`
-	Mux            *xrayMux              `json:"mux,omitempty"`
+	Tag      string `json:"tag"`
+	Protocol string `json:"protocol"`
+	// Settings carries the per-protocol settings block: *xrayOutboundSettings
+	// for vless/freedom/blackhole, *xrayHysteriaSettings for the hysteria
+	// carrier (OVERNIGHT-A5) — exactly one is set per rendered outbound.
+	Settings       any               `json:"settings,omitempty"`
+	StreamSettings *xrayStreamClient `json:"streamSettings,omitempty"`
+	Mux            *xrayMux          `json:"mux,omitempty"`
+}
+
+// xrayHysteriaSettings is the hysteria carrier's outbound settings
+// (HysteriaClientConfig: version REQUIRED = 2, server address/port, users
+// auth) — probe-proven on the vendored v26.3.27 core.
+type xrayHysteriaSettings struct {
+	Version int                `json:"version"`
+	Address string             `json:"address,omitempty"`
+	Port    int                `json:"port,omitempty"`
+	Users   []xrayHysteriaUser `json:"users,omitempty"`
+}
+
+type xrayHysteriaUser struct {
+	Auth string `json:"auth"`
+}
+
+// xrayHysteriaInboundSettings is the server-side hysteria2 inbound settings
+// (HysteriaServerConfig: version REQUIRED = 2, users auth).
+type xrayHysteriaInboundSettings struct {
+	Version int                `json:"version"`
+	Users   []xrayHysteriaUser `json:"users"`
 }
 
 type xrayMux struct {
@@ -471,6 +565,50 @@ const xrayPortalDomain = "quantum.rev.internal"
 // SERVER (foreign) = portal; CLIENT (iran) = bridge + the vless-out
 // carrier with Reality client settings.
 func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
+	// OVERNIGHT-A5: the hysteria2 carrier family (probe-proven on the
+	// upgraded v26.3.27 core — hysteria2 inbound+outbound Configuration OK).
+	// The QUIC carrier replaces the Reality reverse machinery: SERVER =
+	// hysteria2 inbound + freedom (dials requested targets from its
+	// network); CLIENT = hysteria2 outbound + the local socks/http
+	// inbounds riding it (first-outbound default route).
+	if strings.EqualFold(strings.TrimSpace(p.Carrier), "hysteria2") {
+		cfg := xrayConfig{Log: &xrayLog{LogLevel: "warning"}}
+		if role == engineSideServer {
+			cfg.Inbounds = []xrayInbound{{
+				Tag: "hysteria-in", Listen: "0.0.0.0", Port: p.CarrierPort, Protocol: "hysteria",
+				Settings: &xrayHysteriaInboundSettings{Version: 2,
+					Users: []xrayHysteriaUser{{Auth: p.HysteriaAuth}}},
+			}}
+			cfg.Outbounds = []xrayOutbound{{Tag: "direct", Protocol: "freedom"}}
+			return cfg
+		}
+		cfg.Outbounds = []xrayOutbound{{
+			Tag: "carrier-out", Protocol: "hysteria",
+			Settings: &xrayHysteriaSettings{Version: 2,
+				Address: p.RemoteAddr,
+				Port:    p.CarrierPort,
+				Users:   []xrayHysteriaUser{{Auth: p.HysteriaAuth}}},
+		}}
+		cfg.Routing = &xrayRouting{Rules: []xrayRoutingRule{}}
+		if p.SocksPort > 0 {
+			cfg.Inbounds = append(cfg.Inbounds, xrayInbound{
+				Tag: "socks-in", Listen: "127.0.0.1", Port: p.SocksPort, Protocol: "socks",
+				Settings: &xrayInboundSettings{Auth: "noauth", UDP: true},
+			})
+			cfg.Routing.Rules = append(cfg.Routing.Rules, xrayRoutingRule{
+				Type: "field", InboundTag: []string{"socks-in"}, OutboundTag: "carrier-out",
+			})
+		}
+		if p.HTTPPort > 0 {
+			cfg.Inbounds = append(cfg.Inbounds, xrayInbound{
+				Tag: "http-in", Listen: "127.0.0.1", Port: p.HTTPPort, Protocol: "http",
+			})
+			cfg.Routing.Rules = append(cfg.Routing.Rules, xrayRoutingRule{
+				Type: "field", InboundTag: []string{"http-in"}, OutboundTag: "carrier-out",
+			})
+		}
+		return cfg
+	}
 	cfg := xrayConfig{Log: &xrayLog{LogLevel: "warning"}}
 	if role == engineSideServer {
 		// Portal: the Reality carrier inbound feeds the reverse portal;
@@ -803,7 +941,11 @@ func (d *XrayDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == engineSideServer {
-			_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort)
+			if strings.EqualFold(strings.TrimSpace(st.params.Carrier), "hysteria2") {
+				_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort, "udp")
+			} else {
+				_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, st.params.CarrierPort, st.params.CarrierPort)
+			}
 		}
 	})
 	return nil
