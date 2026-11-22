@@ -691,7 +691,6 @@ func ctLogTail(t *testing.T, dir, tag string) string {
 	return strings.Join(lines, " | ")
 }
 
-
 // TestCtunnelIntegrationKernelLegs — REAL kernel-direct family legs over
 // the same lab topology shape (a veth carrier between two namespaces):
 //
@@ -888,9 +887,9 @@ func TestCtunnelIntegrationKernelLegs(t *testing.T) {
 		p := ctunnelParams{
 			ServerSide: "germany", Method: method, Direction: "direct",
 			ForeignAddr: fmt.Sprintf("%s:%d", kIPB, carrierPort),
-			PeerAddr:   fmt.Sprintf("%s:%d", kIPA, carrierPort),
+			PeerAddr:    fmt.Sprintf("%s:%d", kIPA, carrierPort),
 			CarrierPort: carrierPort, PublicPort: ctPublic,
-			LocalAddr:   fmt.Sprintf("127.0.0.1:%d", ctTarget), Proto: "tcp",
+			LocalAddr: fmt.Sprintf("127.0.0.1:%d", ctTarget), Proto: "tcp",
 			Secret: strings.Repeat("3a", 32),
 		}
 		instA.Params = infra.MustJSON(p)
@@ -990,7 +989,7 @@ func TestCtunnelIntegrationKernelLegs(t *testing.T) {
 		Method: "icmp", Direction: "reverse",
 		ForeignAddr: fmt.Sprintf("%s:%d", kIPA, 0),
 		CarrierPort: 0, PublicPort: ctPublic,
-		LocalAddr:   fmt.Sprintf("127.0.0.1:%d", ctTarget), Proto: "tcp",
+		LocalAddr: fmt.Sprintf("127.0.0.1:%d", ctTarget), Proto: "tcp",
 		Secret: strings.Repeat("3a", 32), Padding: 16,
 	}
 	instA.Params = infra.MustJSON(p)

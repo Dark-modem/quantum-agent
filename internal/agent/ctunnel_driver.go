@@ -297,8 +297,8 @@ type ctunnelParams struct {
 	SHA256Arm   string `json:"sha256_arm64"`
 	SigAmd      string `json:"signature_amd64"`
 	SigArm      string `json:"signature_arm64"`
-	Method      string `json:"method"`    // any of the 49 ctMethods
-	Direction   string `json:"direction"` // "reverse" (default) | "direct" (L4 methods: reverse only)
+	Method      string `json:"method"`       // any of the 49 ctMethods
+	Direction   string `json:"direction"`    // "reverse" (default) | "direct" (L4 methods: reverse only)
 	ForeignAddr string `json:"foreign_addr"` // the PEER's carrier address "host:port" (the dialing end dials it)
 	CarrierPort int    `json:"carrier_port"` // carrier port, panel-allocated (0 for icmp; FOU wrap port for FOU-capable kernel methods when > 0)
 	PublicPort  int    `json:"public_port"`  // PUBLIC forwarded port on the server_side end, panel-allocated
@@ -869,14 +869,14 @@ func ctDefaultMTU(p ctunnelParams, spec ctMethodSpec) int {
 	return mtu
 }
 
-
 // ctRuleCheck renders the iptables EXISTENCE check for a rendered rule:
 // the table prefix (-t <t>) is preserved and the action (-A/-I) is swapped
 // for -C, keeping the rule spec intact — the exact-once discipline for
 // real iptables, not just the hermetic seam.
 func ctRuleCheck(add []string) []string {
 	if len(add) >= 3 && add[0] == "-t" {
-		out := []string{"-t", add[1], "-C"}; return append(out, add[3:]...)
+		out := []string{"-t", add[1], "-C"}
+		return append(out, add[3:]...)
 	}
 	return append([]string{"-C"}, add[1:]...)
 }
@@ -884,7 +884,8 @@ func ctRuleCheck(add []string) []string {
 // ctRuleDelete renders the rule REMOVAL (action swapped for -D).
 func ctRuleDelete(add []string) []string {
 	if len(add) >= 3 && add[0] == "-t" {
-		out := []string{"-t", add[1], "-D"}; return append(out, add[3:]...)
+		out := []string{"-t", add[1], "-D"}
+		return append(out, add[3:]...)
 	}
 	return append([]string{"-D"}, add[1:]...)
 }
@@ -2248,16 +2249,16 @@ func lineProtocolMatch(line string, protos map[string]bool) bool {
 // it holds the SECRET — then the interfaces/kernel objects).
 type ctInstState struct {
 	engineInst
-	params  ctunnelParams
-	spec    ctMethodSpec
-	role    string // ctunnel role: "iran" (server_side end) | "kharej"
-	dir     string
-	iface   string // the device the ENGINE opens (or "" for L4)
-	selfTun string
-	peerTun string
-	envPath string
-	relay   *ctRelay      // kharej end, interface families with forwards
-	kernel  *ctKernelState // kernel families (both directions)
+	params    ctunnelParams
+	spec      ctMethodSpec
+	role      string // ctunnel role: "iran" (server_side end) | "kharej"
+	dir       string
+	iface     string // the device the ENGINE opens (or "" for L4)
+	selfTun   string
+	peerTun   string
+	envPath   string
+	relay     *ctRelay       // kharej end, interface families with forwards
+	kernel    *ctKernelState // kernel families (both directions)
 	hasKernel bool
 }
 
@@ -2364,7 +2365,7 @@ func (d *CtunnelDriver) Describe() engine.EngineInfo {
 	schema := map[string]any{
 		"server_side": "", "version": ctPinnedVersion,
 		"artifact": "..{arch}..", "method": methods,
-		"direction": []string{"reverse", "direct"},
+		"direction":    []string{"reverse", "direct"},
 		"foreign_addr": "host:port", "carrier_port": 0, "public_port": 0,
 		"local_addr": "127.0.0.1:5201", "proto": []string{"tcp", "udp", "both"},
 		"secret": "64-hex", "padding": 0, "mtu": 1400,
@@ -2526,19 +2527,19 @@ func (d *CtunnelDriver) Start(ctx context.Context, inst engine.Instance) error {
 				fmt.Fprintf(os.Stderr, "ctunnel: forward rules unavailable: %v\n", err)
 			}
 			if p.CarrierPort > 0 && spec.supportsFOU {
-					// FOU-wrapped raw carriers ride kernel UDP on this port.
-					if err := ctWireRulesAdd(inst.TunnelID, "udp", p.CarrierPort); err != nil {
-						fmt.Fprintf(os.Stderr, "ctunnel: wire accounting unavailable: %v\n", err)
-					}
+				// FOU-wrapped raw carriers ride kernel UDP on this port.
+				if err := ctWireRulesAdd(inst.TunnelID, "udp", p.CarrierPort); err != nil {
+					fmt.Fprintf(os.Stderr, "ctunnel: wire accounting unavailable: %v\n", err)
 				}
-			} else {
-				if spec.id == 3 || spec.id == 8 {
-					if err := ctRelayInputRulesV6Add(inst.TunnelID, dir.iface, proto, ctTargetPort(p)); err != nil {
-						fmt.Fprintf(os.Stderr, "ctunnel: relay INPUT rule unavailable: %v\n", err)
-					}
-				} else if err := ctRelayInputRulesAdd(inst.TunnelID, dir.iface, proto, ctTargetPort(p)); err != nil {
+			}
+		} else {
+			if spec.id == 3 || spec.id == 8 {
+				if err := ctRelayInputRulesV6Add(inst.TunnelID, dir.iface, proto, ctTargetPort(p)); err != nil {
 					fmt.Fprintf(os.Stderr, "ctunnel: relay INPUT rule unavailable: %v\n", err)
 				}
+			} else if err := ctRelayInputRulesAdd(inst.TunnelID, dir.iface, proto, ctTargetPort(p)); err != nil {
+				fmt.Fprintf(os.Stderr, "ctunnel: relay INPUT rule unavailable: %v\n", err)
+			}
 			st.relay = ctStartRelay(st.stop, net.JoinHostPort(bindHostFor(spec, dir), fmt.Sprint(ctTargetPort(p))),
 				strings.TrimSpace(p.LocalAddr), proto)
 		}
