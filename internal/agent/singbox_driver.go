@@ -186,6 +186,19 @@ type singboxParams struct {
 	TailscaleHostname  string `json:"tailscale_hostname,omitempty"`
 	TailscaleEphemeral bool   `json:"tailscale_ephemeral,omitempty"`
 	TailscaleExitNode  string `json:"tailscale_exit_node,omitempty"`
+	// OVERNIGHT-A6: the L3/transparent ingress family (the D4 contract's
+	// runtime-proven shapes — tun/redirect/tproxy are registered
+	// UNCONDITIONALLY in v1.14.4's include/registry.go and `sing-box check`
+	// passed first-hand on the vendored binary). "tun" = the TUN device
+	// inbound (gvisor stack — with_gvisor is ON; auto_route); "redirect" =
+	// the Linux REDIRECT/SO_ORIGINAL_DST transparent proxy (agents are
+	// Linux); "tproxy" = the TPROXY inbound (network MUST be
+	// ["tcp","udp"]-or-a-single-string — NEVER "tcp+udp", the NetworkList
+	// FATALs on it). The ingress inbound replaces the mixed/direct client
+	// entry and the route rule pins it to the carrier outbound (no leak).
+	// Client-side only; dead on naive (client-blocked) and tor (the
+	// outbound-only shape has its own ingress via LocalMode).
+	Ingress string `json:"ingress,omitempty"` // "" | tun | redirect | tproxy
 }
 
 func (p singboxParams) singboxArtifactPin() (name, sha256Hex, sigB64 string, err error) {
@@ -390,6 +403,30 @@ func singboxValidateParams(p singboxParams) error {
 	if p.LocalPort <= 0 || p.LocalPort > 65535 {
 		return fmt.Errorf("singbox: local_port out of range")
 	}
+	// OVERNIGHT-A6: the L3/transparent ingress family (the D4 contract).
+	switch strings.ToLower(strings.TrimSpace(p.Ingress)) {
+	case "":
+	case "tun":
+		// the TUN device binds no listen port; LocalPort is unused for it.
+		if p.ForwardAddr != "" {
+			return fmt.Errorf("singbox: ingress tun replaces the forward entry — forward_addr is dead weight with it")
+		}
+	case "redirect", "tproxy":
+		// the transparent inbounds listen on local_port.
+	case "socks", "http", "mixed":
+		// explicit entry types (mixed is the local_mode=proxy shape made
+		// explicit; socks/http split the two protocols).
+	default:
+		return fmt.Errorf("singbox: ingress %q not supported (empty=local_mode machinery|tun|redirect|tproxy|socks|http|mixed)", p.Ingress)
+	}
+	if p.Ingress != "" {
+		if strings.EqualFold(strings.TrimSpace(p.Protocol), "tor") {
+			return fmt.Errorf("singbox: ingress is dead weight for protocol tor (its LocalMode=proxy shape IS the ingress)")
+		}
+		if strings.EqualFold(strings.TrimSpace(p.Protocol), "naive") {
+			return fmt.Errorf("singbox: ingress is dead weight for protocol naive (server-half only)")
+		}
+	}
 	return nil
 }
 
@@ -423,7 +460,7 @@ func (d *SingboxDriver) ID() string { return singboxID }
 
 func (d *SingboxDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: singboxID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:8388","protocol":"shadowsocks|vless|vmess|trojan|hysteria2|hysteria|tuic|anytls|shadowtls|snell|naive|tor|tailscale","uuid":"","password":"","ss_method":"aes-256-gcm","up_mbps":0,"down_mbps":0,"congestion":"cubic|new_reno|bbr","tls_cert":"","tls_key":"","sni":"","insecure":false,"local_mode":"proxy|forward","local_port":0,"forward_addr":"host:port","obfs":"","shadowtls_handshake":"www.apple.com:443","shadowtls_version":3,"snell_version":6,"tor_exec_path":"","naive_username":"","tailscale_auth_key":"","tailscale_state_dir":"","tailscale_hostname":"","tailscale_ephemeral":false,"tailscale_exit_node":""}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:8388","protocol":"shadowsocks|vless|vmess|trojan|hysteria2|hysteria|tuic|anytls|shadowtls|snell|naive|tor|tailscale","ingress":"|tun|redirect|tproxy|socks|http|mixed","uuid":"","password":"","ss_method":"aes-256-gcm","up_mbps":0,"down_mbps":0,"congestion":"cubic|new_reno|bbr","tls_cert":"","tls_key":"","sni":"","insecure":false,"local_mode":"proxy|forward","local_port":0,"forward_addr":"host:port","obfs":"","shadowtls_handshake":"www.apple.com:443","shadowtls_version":3,"snell_version":6,"tor_exec_path":"","naive_username":"","tailscale_auth_key":"","tailscale_state_dir":"","tailscale_hostname":"","tailscale_ephemeral":false,"tailscale_exit_node":""}`)}
 }
 
 func (d *SingboxDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
@@ -481,13 +518,21 @@ type sbHandshake struct {
 // sbEntry is one inbound/outbound: the protocol-specific fields ride the
 // generic map ONLY through charset-validated params (no free-form JSON).
 type sbEntry struct {
-	Type            string `json:"type"`
-	Tag             string `json:"tag"`
-	Listen          string `json:"listen,omitempty"`
-	ListenPort      uint16 `json:"listen_port,omitempty"`
-	Network         string `json:"network,omitempty"`
+	Type       string `json:"type"`
+	Tag        string `json:"tag"`
+	Listen     string `json:"listen,omitempty"`
+	ListenPort uint16 `json:"listen_port,omitempty"`
+	// Network is the tproxy/tun transport selector: a JSON array of
+	// "tcp"/"udp" OR a single string — NEVER "tcp+udp" (the NetworkList
+	// FATALs on it, option/types.go:18 — the D4 field trap).
+	Network         any    `json:"network,omitempty"`
 	OverrideAddress string `json:"override_address,omitempty"`
-	OverridePort    uint16 `json:"override_port,omitempty"`
+	// OVERNIGHT-A6: the tun inbound's fields (gvisor stack — with_gvisor
+	// is ON in the vendored build; auto_route installs the routes).
+	TunAddresses []string `json:"address,omitempty"`
+	TunAutoRoute bool     `json:"auto_route,omitempty"`
+	Stack        string   `json:"stack,omitempty"`
+	OverridePort uint16   `json:"override_port,omitempty"`
 	// OVERNIGHT-A3: the chained-inbound detour (shadowtls inbound → the
 	// inner shadowsocks inbound — docs/configuration/shared/listen.md
 	// #detour: "connections will be forwarded to the specified inbound").
@@ -779,7 +824,41 @@ func singboxRenderConfig(role string, p singboxParams) sbConfig {
 // outbounds (the FIRST outbound is sing-box's default route — proxy mode
 // has exactly one route target, forward mode pins its rule to the
 // outbound tagged "carrier-out"). extraRules ride after the ingress rule.
+// OVERNIGHT-A6: p.Ingress (tun|redirect|tproxy|socks|http|mixed) replaces
+// the mixed/direct entry with the L3/transparent/explicit inbound — the
+// runtime-proven D4 shapes.
 func singboxClientIngress(p singboxParams, cfg sbConfig, outbounds []sbEntry, extraRules []sbRouteRule) sbConfig {
+	if ing := strings.ToLower(strings.TrimSpace(p.Ingress)); ing != "" {
+		var in sbEntry
+		switch ing {
+		case "tun":
+			in = sbEntry{Type: "tun", Tag: "ingress-in",
+				TunAddresses: []string{"172.19.0.1/30"}, TunAutoRoute: true,
+				Stack: "mixed"}
+		case "redirect":
+			in = sbEntry{Type: "redirect", Tag: "ingress-in",
+				Listen: "0.0.0.0", ListenPort: uint16(p.LocalPort)}
+		case "tproxy":
+			in = sbEntry{Type: "tproxy", Tag: "ingress-in",
+				Listen: "::", ListenPort: uint16(p.LocalPort),
+				Network: []string{"tcp", "udp"}}
+		case "socks":
+			in = sbEntry{Type: "socks", Tag: "ingress-in",
+				Listen: "127.0.0.1", ListenPort: uint16(p.LocalPort)}
+		case "http":
+			in = sbEntry{Type: "http", Tag: "ingress-in",
+				Listen: "127.0.0.1", ListenPort: uint16(p.LocalPort)}
+		default: // "mixed"
+			in = sbEntry{Type: "mixed", Tag: "ingress-in",
+				Listen: "127.0.0.1", ListenPort: uint16(p.LocalPort)}
+		}
+		cfg.Inbounds = []sbEntry{in}
+		cfg.Outbounds = outbounds
+		cfg.Route = &sbRouteBlock{Rules: append(
+			[]sbRouteRule{{Inbound: []string{"ingress-in"}, Outbound: "carrier-out"}},
+			extraRules...)}
+		return cfg
+	}
 	if p.LocalMode == "proxy" {
 		cfg.Inbounds = []sbEntry{{Type: "mixed", Tag: "ingress-in",
 			Listen: "127.0.0.1", ListenPort: uint16(p.LocalPort)}}

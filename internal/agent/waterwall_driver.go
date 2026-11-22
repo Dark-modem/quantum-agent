@@ -112,6 +112,10 @@ type waterwallParams struct {
 	// explicit verify=false disables trust/name checks while retaining the
 	// encrypted handshake). Additive — dead on non-quic methods.
 	WWInsecure bool `json:"ww_insecure,omitempty"`
+	// reverse chain (method=reverse): the PUBLIC listener port on the
+	// foreign end (public users hit foreign:reverse_port; the traffic rides
+	// the Bridge-paired reverse channel to the iran-local target).
+	ReversePort int `json:"reverse_port,omitempty"`
 }
 
 // wwMethods is the 18-method allowlist (the cores MANIFEST methods[] ids,
@@ -143,6 +147,15 @@ var wwMethods = map[string]wwMethodSpec{
 	"connection-fisher": {carrier: "tcp"},
 	"connection-stripe": {carrier: "tcp", tls: true},
 	"mux":               {carrier: "tcp"},
+	// OVERNIGHT-A6: the reverse chain (tunnels/ReverseClient+ReverseServer
+	// + the Bridge pair — "Bridge → ReverseClient" adjacency is a chain
+	// DESIGN rule upstream: no node between them). Server: the carrier
+	// listener → ReverseServer → BridgeA, and TcpListener(:reverse_port) →
+	// BridgeB (pair A) — public users hit the foreign :reverse_port and the
+	// traffic rides the reverse channel to the iran-local target. Client:
+	// BridgeC → ReverseClient → carrier dial, and TcpConnector(local) →
+	// BridgeD (pair C) — the iran-local service stays behind NAT.
+	"reverse": {carrier: "tcp"},
 }
 
 func (p waterwallParams) wwArtifactPin() (name, sha256Hex, sigB64 string, err error) {
@@ -223,7 +236,7 @@ func waterwallValidateParams(p waterwallParams) error {
 	}
 	// required secrets per method
 	switch p.Method {
-	case "trojan", "reality", "bgp4", "fake-tcp":
+	case "trojan", "reality", "bgp4", "fake-tcp", "reverse":
 		if err := engineVerifySecretShape("waterwall auth_password", p.AuthPassword, 8, 128); err != nil {
 			return err
 		}
@@ -265,7 +278,7 @@ func waterwallValidateParams(p waterwallParams) error {
 	}
 	for _, f := range []fam{
 		{"auth", p.Method == "trojan" || p.Method == "reality" || p.Method == "bgp4" ||
-			p.Method == "fake-tcp" || p.Method == "http" || p.Method == "socks5"},
+			p.Method == "fake-tcp" || p.Method == "http" || p.Method == "socks5" || p.Method == "reverse"},
 		{"uuid", p.Method == "vless" || p.Method == "vmess"},
 		{"wg", p.Method == "wireguard"},
 		{"rtmp", p.Method == "rtmp"},
@@ -310,6 +323,15 @@ func waterwallValidateParams(p waterwallParams) error {
 	}
 	if p.FakeTCPPort != 0 && (p.FakeTCPPort < 1 || p.FakeTCPPort > 65535) {
 		return fmt.Errorf("waterwall: fake_tcp_port out of range")
+	}
+	// OVERNIGHT-A6: the reverse chain's public listener.
+	if p.Method == "reverse" {
+		if p.ReversePort <= 0 || p.ReversePort > 65535 {
+			return fmt.Errorf("waterwall: method reverse needs reverse_port 1-65535 (the foreign public listener)")
+		}
+		if p.ReversePort == p.LocalPort {
+			return fmt.Errorf("waterwall: reverse_port must differ from local_port (the two listeners collide)")
+		}
 	}
 	return nil
 }
@@ -615,6 +637,39 @@ func wwChain(role string, p waterwallParams) wwConfig {
 				wwNode{Name: "m", Type: "MuxClient", Next: carrierOut},
 				tcpDial(carrierHost, cPort))
 		}
+	case "reverse":
+		// OVERNIGHT-A6: the Bridge-paired reverse tunnel (tunnels/
+		// ReverseClient+ReverseServer: "Bridge → ReverseClient" adjacency;
+		// bridges point at each other by name). Two chain segments per
+		// config (multiple roots — the Bridge pair stitches them):
+		//   server: TcpListener(:carrier) → ReverseServer → BridgeA
+		//           TcpListener(:reverse_port) → BridgeB(pair A)
+		//   client: BridgeC(pair D) → ReverseClient → TcpConnector(carrier)
+		//           TcpConnector(local) → BridgeD(pair C)
+		// The reverse secret rides AuthPassword (reverse-secret).
+		secret := map[string]any{"reverse-secret": p.AuthPassword}
+		if role == "server" {
+			rev := wwNode{Name: "rev", Type: "ReverseServer", Next: "bridge-a", Settings: secret}
+			nodes = append(nodes,
+				wwNode{Name: entry, Type: "TcpListener",
+					Settings: map[string]any{"address": "0.0.0.0", "port": cPort}, Next: rev.Name},
+				rev,
+				wwNode{Name: "bridge-a", Type: "Bridge", Settings: map[string]any{"pair": "bridge-b"}},
+				wwNode{Name: "pub", Type: "TcpListener",
+					Settings: map[string]any{"address": "0.0.0.0", "port": p.ReversePort},
+					Next:     "bridge-b"},
+				wwNode{Name: "bridge-b", Type: "Bridge", Settings: map[string]any{"pair": "bridge-a"}})
+		} else {
+			rc := wwNode{Name: "rev", Type: "ReverseClient", Next: carrierOut, Settings: secret}
+			nodes = append(nodes,
+				wwNode{Name: "bridge-c", Type: "Bridge", Settings: map[string]any{"pair": "bridge-d"}, Next: rc.Name},
+				rc,
+				tcpDial(carrierHost, cPort),
+				wwNode{Name: "target", Type: "TcpConnector",
+					Settings: map[string]any{"address": host, "port": p.LocalPort},
+					Next:     "bridge-d"},
+				wwNode{Name: "bridge-d", Type: "Bridge", Settings: map[string]any{"pair": "bridge-c"}})
+		}
 	}
 	return wwConfig{Name: "quantum-" + p.Method + "-" + role, Nodes: nodes}
 }
@@ -729,7 +784,7 @@ func (d *WaterwallDriver) ID() string { return wwID }
 
 func (d *WaterwallDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: wwID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","method":"quic|kcp|enet|reality|trojan|vless|vmess|wireguard|rtmp|gns|bgp4|http|socks5|fake-tcp|obfuscator|connection-fisher|connection-stripe|mux","server_addr":"0.0.0.0:4433","local_addr":"127.0.0.1","local_port":0,"auth_password":"","auth_user":"","uuid":"","tls_cert":"","tls_key":"","sni":"","wg_private_key":"","wg_auth_secret":"","obfs_method":"xor","obfs_key":90,"send_mtu":0,"kcp_fec":false,"rtmp_app":"","rtmp_stream":"","no_auth":false,"fake_tcp_port":0}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","method":"quic|kcp|enet|reality|trojan|vless|vmess|wireguard|rtmp|gns|bgp4|http|socks5|fake-tcp|obfuscator|connection-fisher|connection-stripe|mux|reverse","server_addr":"0.0.0.0:4433","local_addr":"127.0.0.1","local_port":0,"auth_password":"","auth_user":"","uuid":"","tls_cert":"","tls_key":"","sni":"","wg_private_key":"","wg_auth_secret":"","obfs_method":"xor","obfs_key":90,"send_mtu":0,"kcp_fec":false,"rtmp_app":"","rtmp_stream":"","no_auth":false,"fake_tcp_port":0,"reverse_port":0}`)}
 }
 
 func (d *WaterwallDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
