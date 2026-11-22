@@ -21,12 +21,22 @@ package agent
 // Validate with a clear message (TLS cert management is a separate
 // slice; fail closed rather than ship an unencrypted-shaped surprise).
 //
-// OVERNIGHT-A gap-close update: the carrier allowlist now covers the
+// OVERNIGHT-A gap-close update: the carrier allowlist covers the
 // cert-free relay carriers of the shipped binary (ws|tcp|dtls|quic|grpc|
 // http2|kcp|obfs-http|obfs-tls|ftcp|mws — all verified against the
 // upstream cmd/gost/register.go registration list), and mode=tcp|udp
-// picks rtcp|rudp. Cert-bound schemes (tls/mtls/h2/utls/http3/wt/ssh)
-// remain rejected — operator cert delivery is the documented next wave.
+// picks rtcp|rudp.
+//
+// OVERNIGHT-A2 wave 2: the TLS-family carriers (tls|mtls|h2|http3|h3|
+// wt|utls) are exposed through operator cert paths (tls_cert/tls_key —
+// the e2e metadata keys certFile/keyFile), ssh/sshd through
+// ssh_user/ssh_password (URL userinfo), transport=ss is the
+// shadowsocks URL shape (ss_method/ss_password), relay+pht joins the
+// plain set, and the ingress param (socks5|http|socks4) flips the data
+// port to the IRAN end (local proxy exit through the carrier). The raw
+// icmp carrier stays out (CAP_NET_RAW niche; udp2raw's icmp mode covers
+// the sealed-carrier shape), and tun/tap/redirect/sni/dns/masque stay
+// out by design (node-level infra services, not per-tunnel shapes).
 //
 // Strictly typed args (no shell, no config file): the CLI form above is
 // fully specified by four typed fields, built with fmt.Sprintf and passed
@@ -77,26 +87,67 @@ type gostParams struct {
 	// "tcp" (default) = rtcp (public TCP port on the foreign host);
 	// "udp" = rudp (public UDP port). "" = tcp for backward compat.
 	Mode string `json:"mode,omitempty"`
+	// OVERNIGHT-A2 additions (all optional; "" preserves the wave-1 shape):
+	// operator-cert delivery for the TLS-family carriers (paths land in
+	// argv only — never a shell; gost reads them from disk):
+	TLSCert string `json:"tls_cert,omitempty"` // certFile metadata (PEM path)
+	TLSKey  string `json:"tls_key,omitempty"`  // keyFile metadata (PEM path)
+	// SSH-carrier auth (relay+ssh / relay+sshd — gost URL userinfo):
+	SSHUser     string `json:"ssh_user,omitempty"`
+	SSHPassword string `json:"ssh_password,omitempty"`
+	// shadowsocks carrier (transport=ss): the cipher method + password
+	// ride the ss:// URL userinfo (e2e-verified shape: handler/connector
+	// auth username=<method> password=<secret>).
+	SSMethod   string `json:"ss_method,omitempty"`
+	SSPassword string `json:"ss_password,omitempty"`
+	// uTLS client fingerprint for relay+utls (e2e metadata.fingerprint).
+	UTLSFingerprint string `json:"utls_fingerprint,omitempty"`
+	// Ingress flips the data-port end: "" (default) = reverse port
+	// forwarding (public port on the FOREIGN end, rtcp/rudp); a non-empty
+	// value makes the IRAN end run that ingress proxy locally and chain
+	// OUT through the carrier (the foreign relay dials arbitrary targets):
+	// the classic gost proxy-exit shape.
+	Ingress string `json:"ingress,omitempty"` // "" | socks5 | http | socks4
 }
 
 // gostAllowedTransports is the relay-carrier allowlist (OVERNIGHT-A
-// gap-close), mirrored from the shipped binary's registration list
-// (upstream cmd/gost/register.go): every entry below has a listener
-// package in go-gost/x and composes with the relay handler as
-// "relay+<scheme>". Cert/key-bound schemes (tls, mtls, h2, utls, http3,
-// wt, ssh, sshd, icmp, ws-with-TLS) stay out — no operator certs flow
-// through engine_params yet; they are the documented next wave. UDP
-// carriers (quic, kcp, dtls) switch the wire accounting to -p udp.
+// gap-close + OVERNIGHT-A2 wave 2), mirrored from the shipped binary's
+// registration list (upstream cmd/gost/register.go): every entry below
+// has a listener package in go-gost/x and composes with the relay
+// handler as "relay+<scheme>". Cert-family schemes (tls/mtls/h2/http3/
+// h3/wt/utls) are exposed ONLY with operator cert paths (tls_cert/
+// tls_key — verified against the e2e metadata keys); ssh/sshd with
+// ssh_user/ssh_password; pht is plain (no certs); "ss" is the
+// shadowsocks carrier (not a relay+ scheme — its own URL shape).
 var gostAllowedTransports = map[string]bool{
 	"ws": true, "tcp": true, "dtls": true, "quic": true, "grpc": true,
 	"http2": true, "kcp": true, "obfs-http": true, "obfs-tls": true,
-	"ftcp": true, "mws": true,
+	"ftcp": true, "mws": true, "pht": true,
+	"tls": true, "mtls": true, "h2": true, "http3": true, "h3": true,
+	"wt": true, "utls": true, "ssh": true, "sshd": true, "ss": true,
+}
+
+// gostCertCarriers need certFile/keyFile metadata at the LISTENING (server)
+// end. quic-family (http3/h3/wt) are quic+TLS; h2/utls ride TLS too.
+var gostCertCarriers = map[string]bool{
+	"tls": true, "mtls": true, "h2": true, "http3": true, "h3": true,
+	"wt": true, "utls": true,
+}
+
+// gostSSHCarriers authenticate through URL userinfo.
+var gostSSHCarriers = map[string]bool{
+	"ssh": true, "sshd": true,
+}
+
+// gostIngressSchemes maps the Ingress param to gost listener schemes.
+var gostIngressSchemes = map[string]string{
+	"socks5": "socks5", "http": "http", "socks4": "socks4",
 }
 
 // gostUDPCarrier reports the transports whose carrier socket is UDP.
 func gostUDPCarrier(transport string) bool {
 	switch strings.ToLower(strings.TrimSpace(transport)) {
-	case "quic", "kcp", "dtls":
+	case "quic", "kcp", "dtls", "http3", "h3", "wt":
 		return true
 	}
 	return false
@@ -129,13 +180,47 @@ func gostValidateParams(p gostParams) error {
 		t = "ws" // historical default (backward compatible)
 	}
 	if !gostAllowedTransports[t] {
-		return fmt.Errorf("gost: transport %q not supported yet (carrier allowlist: ws|tcp|dtls|quic|grpc|http2|kcp|obfs-http|obfs-tls|ftcp|mws; cert-bound tls/mtls/h2/utls/http3/wt/ssh are the next wave)", p.Transport)
+		return fmt.Errorf("gost: transport %q not supported (carrier allowlist: ws|tcp|dtls|quic|grpc|http2|kcp|obfs-http|obfs-tls|ftcp|mws|pht|tls|mtls|h2|http3|h3|wt|utls|ssh|sshd|ss)", p.Transport)
 	}
 	switch strings.ToLower(strings.TrimSpace(p.Mode)) {
 	case "", "tcp", "udp":
 	default:
 		return fmt.Errorf("gost: mode %q not supported (tcp|udp — rtcp|rudp)", p.Mode)
 	}
+	// OVERNIGHT-A2: per-carrier requirements + charset discipline for the
+	// new params (every one lands in argv or in a gost URL, never a shell).
+	needsCert := gostCertCarriers[t]
+	if needsCert {
+		if strings.TrimSpace(p.TLSCert) == "" || strings.TrimSpace(p.TLSKey) == "" {
+			return fmt.Errorf("gost: transport %q is a TLS-family carrier — tls_cert and tls_key (PEM paths on this host) are required", p.Transport)
+		}
+	}
+	for _, a := range []struct{ label, v string }{{"tls_cert", p.TLSCert}, {"tls_key", p.TLSKey}} {
+		if a.v != "" && (len(a.v) > 256 || strings.ContainsAny(a.v, "\"'`\n\r$;&|<>")) {
+			return fmt.Errorf("gost: %s must be a ≤256-char path without quotes/shell metacharacters", a.label)
+		}
+	}
+	if gostSSHCarriers[t] && (strings.TrimSpace(p.SSHUser) == "" || strings.TrimSpace(p.SSHPassword) == "") {
+		return fmt.Errorf("gost: transport %q needs ssh_user and ssh_password", p.Transport)
+	}
+	for _, a := range []struct{ label, v string }{{"ssh_user", p.SSHUser}, {"ssh_password", p.SSHPassword},
+		{"ss_method", p.SSMethod}, {"ss_password", p.SSPassword}, {"utls_fingerprint", p.UTLSFingerprint}} {
+		if a.v != "" && (len(a.v) > 128 || strings.ContainsAny(a.v, "\"'@:/\n\r?&#")) {
+			return fmt.Errorf("gost: %s must be ≤128 URL-safe chars (no quotes/@/:/?/#)", a.label)
+		}
+	}
+	if t == "ss" {
+		if strings.TrimSpace(p.SSMethod) == "" || strings.TrimSpace(p.SSPassword) == "" {
+			return fmt.Errorf("gost: transport ss needs ss_method (e.g. aes-256-gcm) and ss_password")
+		}
+	}
+	if ing := strings.ToLower(strings.TrimSpace(p.Ingress)); ing != "" {
+		if _, ok := gostIngressSchemes[ing]; !ok {
+			return fmt.Errorf("gost: ingress %q not supported (socks5|http|socks4)", p.Ingress)
+		}
+	}
+	// (the raw icmp carrier is not in the allowlist — the generic error
+	// above names the honest alternative)
 	if _, port, err := net.SplitHostPort(strings.TrimSpace(p.CarrierAddr)); err != nil || port == "" {
 		return fmt.Errorf("gost: carrier_addr must be host:port")
 	}
@@ -185,7 +270,7 @@ func (d *GostDriver) ID() string { return gostID }
 
 func (d *GostDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: gostID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","carrier_addr":"0.0.0.0:23344","public_port":0,"local_addr":"127.0.0.1:5201","transport":"ws|tcp|dtls|quic|grpc|http2|kcp|obfs-http|obfs-tls|ftcp|mws","mode":"tcp|udp"}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","carrier_addr":"0.0.0.0:23344","public_port":0,"local_addr":"127.0.0.1:5201","transport":"ws|tcp|dtls|quic|grpc|http2|kcp|obfs-http|obfs-tls|ftcp|mws|pht|tls|mtls|h2|http3|h3|wt|utls|ssh|sshd|ss","mode":"tcp|udp","tls_cert":"","tls_key":"","ssh_user":"","ssh_password":"","ss_method":"aes-256-gcm","ss_password":"","utls_fingerprint":"chrome","ingress":""}`)}
 }
 
 func (d *GostDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
@@ -276,23 +361,98 @@ func gostCarrierScheme(p gostParams) string {
 	return t
 }
 
-// gostArgs renders the end's strictly-typed CLI (see the header for the
-// verified upstream forms). OVERNIGHT-A: the scheme composes the chosen
-// carrier (relay+<transport>), and mode=udp swaps the client's rtcp
-// listener for rudp (reverse UDP forwarding).
-func gostArgs(role, transport string, p gostParams) []string {
+// gostURLQuery builds the metadata query string for one end of the
+// carrier URL (OVERNIGHT-A2): cert paths for the TLS family, the uTLS
+// fingerprint on the dialing end, and the relay bind flag. Values are
+// charset-validated upstream of this point (gostValidateParams) — plain
+// concatenation is safe because argv-only exec never re-parses a shell.
+func gostURLQuery(role, transport string, p gostParams) string {
+	var q []string
+	// bind=true arms the relay for reverse (rtcp/rudp) listeners; in
+	// ingress mode the client chains OUT (no reverse registration), so
+	// the server is a plain relay — no bind.
+	isIngress := gostIngressSchemes[strings.ToLower(strings.TrimSpace(p.Ingress))] != ""
+	if role == "server" && transport != "ss" && !isIngress {
+		q = append(q, "bind=true")
+	}
+	if gostCertCarriers[transport] {
+		q = append(q, "certFile="+p.TLSCert, "keyFile="+p.TLSKey)
+	}
+	if transport == "utls" && role != "server" {
+		fp := strings.ToLower(strings.TrimSpace(p.UTLSFingerprint))
+		if fp == "" {
+			fp = "chrome"
+		}
+		q = append(q, "fingerprint="+fp)
+	}
+	if len(q) == 0 {
+		return ""
+	}
+	return "?" + strings.Join(q, "&")
+}
+
+// gostHostPort renders the address part of a gost URL for one end:
+// server binds the carrier port; client dials the full carrier_addr.
+func gostHostPort(role, transport string, p gostParams) string {
+	port := enginePortOf(p.CarrierAddr)
+	if transport == "ss" {
+		// ss://method:pass@addr
+		if role == "server" {
+			return fmt.Sprintf("%s:%s@:%d", p.SSMethod, p.SSPassword, port)
+		}
+		return fmt.Sprintf("%s:%s@%s", p.SSMethod, p.SSPassword, strings.TrimSpace(p.CarrierAddr))
+	}
 	if role == "server" {
-		return []string{"-L", fmt.Sprintf("relay+%s://:%d?bind=true",
-			transport, enginePortOf(p.CarrierAddr))}
+		if gostSSHCarriers[transport] {
+			return fmt.Sprintf("%s:%s@:%d", p.SSHUser, p.SSHPassword, port)
+		}
+		return fmt.Sprintf(":%d", port)
+	}
+	if gostSSHCarriers[transport] {
+		return fmt.Sprintf("%s:%s@%s", p.SSHUser, p.SSHPassword, strings.TrimSpace(p.CarrierAddr))
+	}
+	return strings.TrimSpace(p.CarrierAddr)
+}
+
+// gostArgs renders the end's strictly-typed CLI. OVERNIGHT-A2: TLS-family
+// carriers carry certFile/keyFile (and the utls client fingerprint) in
+// the URL query; transport=ss swaps the relay composition for the
+// shadowsocks URL shape; ingress modes replace the client's rtcp/rudp
+// listener with the local ingress proxy (the classic gost exit shape).
+func gostArgs(role, transport string, p gostParams) []string {
+	host := gostHostPort(role, transport, p)
+	q := gostURLQuery(role, transport, p)
+	if role == "server" {
+		if transport == "ss" {
+			return []string{"-L", "ss://" + host}
+		}
+		return []string{"-L", fmt.Sprintf("relay+%s://%s%s", transport, host, q)}
 	}
 	fwd := "rtcp"
 	if strings.EqualFold(strings.TrimSpace(p.Mode), "udp") {
 		fwd = "rudp"
 	}
-	return []string{
-		"-L", fmt.Sprintf("%s://:%d/%s", fwd, p.PublicPort, strings.TrimSpace(p.LocalAddr)),
-		"-F", fmt.Sprintf("relay+%s://%s", transport, strings.TrimSpace(p.CarrierAddr)),
+	listen := fmt.Sprintf("%s://:%d/%s", fwd, p.PublicPort, strings.TrimSpace(p.LocalAddr))
+	if ing, ok := gostIngressSchemes[strings.ToLower(strings.TrimSpace(p.Ingress))]; ok {
+		// ingress mode: the public port binds on THIS (client) end as the
+		// local proxy; traffic chains OUT through the carrier.
+		listen = fmt.Sprintf("%s://:%d", ing, p.PublicPort)
 	}
+	forward := fmt.Sprintf("relay+%s://%s", transport, host)
+	if transport == "ss" {
+		forward = "ss://" + host
+	}
+	// the client end's own metadata rides the forward URL (utls
+	// fingerprint; cert params are server-side only and were appended
+	// to the server's URL by the caller above).
+	if transport == "utls" {
+		fp := strings.ToLower(strings.TrimSpace(p.UTLSFingerprint))
+		if fp == "" {
+			fp = "chrome"
+		}
+		forward += "?fingerprint=" + fp
+	}
+	return []string{"-L", listen, "-F", forward}
 }
 
 // Start implements engine.Driver.
@@ -412,8 +572,11 @@ func (d *GostDriver) Health(inst engine.Instance) engine.Health {
 	}
 	// rudp (mode=udp) binds a UDP public port — a TCP dial can never prove
 	// it; the process-alive check stays the honest signal (OVERNIGHT-A).
-	if strings.EqualFold(strings.TrimSpace(st.params.Mode), "udp") {
-		return engine.Health{OK: true, Detail: "gost server running (rudp mode; dial gate N/A)", LatencyMs: -1}
+	// Ingress mode (OVERNIGHT-A2) binds the public port on the CLIENT end
+	// — the server end has no data port to dial; process-alive it is.
+	if strings.EqualFold(strings.TrimSpace(st.params.Mode), "udp") ||
+		gostIngressSchemes[strings.ToLower(strings.TrimSpace(st.params.Ingress))] != "" {
+		return engine.Health{OK: true, Detail: "gost server running (rudp/ingress mode; dial gate N/A)", LatencyMs: -1}
 	}
 	start := time.Now()
 	delays := []time.Duration{0, 300 * time.Millisecond, 800 * time.Millisecond}
