@@ -35,11 +35,24 @@ import (
 
 const backhaulID = "backhaul"
 
-// backhaulTransports is the allowlist: the legacy-supported carriers
-// minus GRE. Plain "tcp" is the lab baseline; the TLS/WS carriers are
-// the Iran-path shapes.
+// backhaulTransports is the allowlist, mirrored from upstream v0.7.2's
+// config.TransportType const block (config/config.go): tcp, tcpmux, ws,
+// wss, wsmux, wssmux, udp. OVERNIGHT-A audit deltas: (a) tcpmux + udp
+// were MISSING from this driver — both are first-class upstream carriers
+// and are now exposed; (b) the old allowlist advertised "tls", but
+// upstream v0.7.2 has NO plain tls transport (no constant, no switch
+// case, no transport file — TLS exists only inside wss/wssmux via
+// tls_cert/tls_key), so a transport="tls" config made upstream fatal on
+// startup. That phantom entry is now rejected with a clear message.
 var backhaulAllowedTransports = map[string]bool{
-	"tcp": true, "tls": true, "ws": true, "wss": true, "wsmux": true, "wssmux": true,
+	"tcp": true, "tcpmux": true, "udp": true,
+	"ws": true, "wss": true, "wsmux": true, "wssmux": true,
+}
+
+// backhaulUDPCarrier reports whether the transport binds a UDP socket as
+// the carrier (the wire accounting rules must then be -p udp).
+func backhaulUDPCarrier(transport string) bool {
+	return strings.ToLower(strings.TrimSpace(transport)) == "udp"
 }
 
 type backhaulParams struct {
@@ -50,12 +63,16 @@ type backhaulParams struct {
 	SHA256Arm  string   `json:"sha256_arm64"`    // pinned fallback (arm64)
 	SigAmd     string   `json:"signature_amd64"` // pinned fallback: base64 ed25519 (amd64)
 	SigArm     string   `json:"signature_arm64"` // pinned fallback (arm64)
-	Transport  string   `json:"transport"`       // tcp | tls | ws | wss | wsmux | wssmux (no GRE)
+	Transport  string   `json:"transport"`       // tcp|tcpmux|udp|ws|wss|wsmux|wssmux (no GRE; no plain "tls" upstream)
 	Token      string   `json:"token"`           // shared auth token
 	BindAddr   string   `json:"bind_addr"`       // server end: carrier listen addr:port
 	RemoteAddr string   `json:"remote_addr"`     // client end: carrier dial addr:port
 	Ports      []string `json:"ports"`           // server-side port mappings (opaque, upstream-parsed)
 	WebPort    int      `json:"web_port"`        // per-instance stats/web port (0 = disabled)
+	// AcceptUDP renders upstream server accept_udp=true (OVERNIGHT-A):
+	// UDP sessions encapsulated over the TCP-family carrier. Server-side
+	// only upstream (the ClientConfig struct has no accept_udp field).
+	AcceptUDP bool `json:"accept_udp,omitempty"`
 }
 
 // backhaulArtifactPin mirrors frpArtifactPin (one tunnel row reaches both
@@ -84,7 +101,10 @@ func backhaulValidateParams(p backhaulParams) error {
 		return err
 	}
 	if !backhaulAllowedTransports[strings.ToLower(strings.TrimSpace(p.Transport))] {
-		return fmt.Errorf("backhaul: transport %q not supported (tcp|tls|ws|wss|wsmux|wssmux; GRE is out of scope)", p.Transport)
+		if strings.EqualFold(strings.TrimSpace(p.Transport), "tls") {
+			return fmt.Errorf("backhaul: transport \"tls\" does not exist upstream (v0.7.2 has tcp|tcpmux|ws|wss|wsmux|wssmux|udp — TLS only rides wss/wssmux); use wss with tls_cert/tls_key")
+		}
+		return fmt.Errorf("backhaul: transport %q not supported (tcp|tcpmux|udp|ws|wss|wsmux|wssmux; GRE is out of scope)", p.Transport)
 	}
 	if len(p.Token) < 8 || len(p.Token) > 256 || strings.ContainsAny(p.Token, "\"'\n\r") {
 		return fmt.Errorf("backhaul: token must be 8-256 chars without quotes/newlines")
@@ -165,7 +185,7 @@ func (d *BackhaulDriver) ID() string { return backhaulID }
 
 func (d *BackhaulDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: backhaulID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"<name of the end hosting the server>","version":"","artifact":"..{arch}..","transport":"tcp|tls|ws|wss|wsmux|wssmux","token":"","bind_addr":"","remote_addr":"","ports":["5201=127.0.0.1:5201"],"web_port":0}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"<name of the end hosting the server>","version":"","artifact":"..{arch}..","transport":"tcp|tcpmux|udp|ws|wss|wsmux|wssmux","token":"","bind_addr":"","remote_addr":"","ports":["5201=127.0.0.1:5201"],"web_port":0,"accept_udp":false}`)}
 }
 
 // EnsureBinary: the Manager calls this before the first instance starts;
@@ -208,6 +228,9 @@ func backhaulRenderConfig(role string, p backhaulParams) string {
 		fmt.Fprintf(&b, "transport = %q\n", transport)
 		fmt.Fprintf(&b, "token = %q\n", p.Token)
 		b.WriteString("nodelay = true\nkeepalive_period = 15\n")
+		if p.AcceptUDP {
+			b.WriteString("accept_udp = true\n")
+		}
 		if len(p.Ports) > 0 {
 			b.WriteString("ports = [")
 			for i, m := range p.Ports {
@@ -354,10 +377,15 @@ func (d *BackhaulDriver) Start(ctx context.Context, inst engine.Instance) error 
 	go engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn)
 	// Wire accounting on the SERVER end only: the carrier port's bytes
 	// are this tunnel's wire view (the client's dial port is shared and
-	// cannot be attributed per instance).
+	// cannot be attributed per instance). transport=udp is a UDP carrier
+	// — its rules ride the -p udp accounting variant (OVERNIGHT-A).
 	if role == "server" {
 		if port := enginePortOf(p.BindAddr); port > 0 {
-			if err := acctWireRulesAdd(acctChainsDriver, inst.TunnelID, port, port); err != nil {
+			proto := "tcp"
+			if backhaulUDPCarrier(p.Transport) {
+				proto = "udp"
+			}
+			if err := acctWireRulesAddProto(acctChainsDriver, inst.TunnelID, port, port, proto); err != nil {
 				fmt.Fprintf(os.Stderr, "backhaul: wire accounting unavailable: %v\n", err)
 			}
 		}
@@ -375,7 +403,11 @@ func (d *BackhaulDriver) Stop(inst engine.Instance) error {
 	engineStopInst(&st.engineInst, func() {
 		if st.role == "server" {
 			if port := enginePortOf(st.params.BindAddr); port > 0 {
-				_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, port, port)
+				proto := "tcp"
+				if backhaulUDPCarrier(st.params.Transport) {
+					proto = "udp"
+				}
+				_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, port, port, proto)
 			}
 		}
 	})

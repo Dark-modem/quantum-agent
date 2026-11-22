@@ -144,16 +144,30 @@ func acctPortRange(min, max int) string {
 // The range is the instance's allowed data-port window; the panel allocates
 // non-overlapping windows per tunnel.
 func acctWireRulesAdd(ch acctChains, tunnelID string, allowMin, allowMax int) error {
+	return acctWireRulesAddProto(ch, tunnelID, allowMin, allowMax, "tcp")
+}
+
+// acctWireRulesAddProto is the protocol-aware accounting variant
+// (OVERNIGHT-A gap-close): UDP-carrier engines (backhaul transport=udp,
+// frp kcp/quic, gost quic/kcp/dtls, rathole udp services) count on
+// "-p udp" rules instead of the historical tcp-only pair. The proto is
+// allowlist-validated (only tcp|udp exist as accounting shapes), the
+// comment scoping and rule text are otherwise identical, and
+// acctWireBytes reads both shapes unchanged (it keys on the comment).
+func acctWireRulesAddProto(ch acctChains, tunnelID string, allowMin, allowMax int, proto string) error {
+	if proto != "tcp" && proto != "udp" {
+		return fmt.Errorf("acct: unsupported rule proto %q", proto)
+	}
 	if err := acctWireRulesEnsure(ch); err != nil {
 		return err
 	}
 	cmt := acctRuleComment(tunnelID)
 	rng := acctPortRange(allowMin, allowMax)
-	if _, err := acctIptables("-A", ch.In, "-p", "tcp", "--dport", rng,
+	if _, err := acctIptables("-A", ch.In, "-p", proto, "--dport", rng,
 		"-m", "comment", "--comment", cmt); err != nil {
 		return err
 	}
-	if _, err := acctIptables("-A", ch.Out, "-p", "tcp", "--sport", rng,
+	if _, err := acctIptables("-A", ch.Out, "-p", proto, "--sport", rng,
 		"-m", "comment", "--comment", cmt); err != nil {
 		return err
 	}
@@ -162,14 +176,22 @@ func acctWireRulesAdd(ch acctChains, tunnelID string, allowMin, allowMax int) er
 
 // acctWireRulesDel removes exactly one instance's rules (comment-scoped).
 func acctWireRulesDel(ch acctChains, tunnelID string, allowMin, allowMax int) error {
+	return acctWireRulesDelProto(ch, tunnelID, allowMin, allowMax, "tcp")
+}
+
+// acctWireRulesDelProto mirrors acctWireRulesAddProto for teardown.
+func acctWireRulesDelProto(ch acctChains, tunnelID string, allowMin, allowMax int, proto string) error {
+	if proto != "tcp" && proto != "udp" {
+		return fmt.Errorf("acct: unsupported rule proto %q", proto)
+	}
 	cmt := acctRuleComment(tunnelID)
 	rng := acctPortRange(allowMin, allowMax)
 	var firstErr error
-	if _, err := acctIptables("-D", ch.In, "-p", "tcp", "--dport", rng,
+	if _, err := acctIptables("-D", ch.In, "-p", proto, "--dport", rng,
 		"-m", "comment", "--comment", cmt); err != nil && firstErr == nil {
 		firstErr = err
 	}
-	if _, err := acctIptables("-D", ch.Out, "-p", "tcp", "--sport", rng,
+	if _, err := acctIptables("-D", ch.Out, "-p", proto, "--sport", rng,
 		"-m", "comment", "--comment", cmt); err != nil && firstErr == nil {
 		firstErr = err
 	}

@@ -74,7 +74,7 @@ func TestGostValidateParams(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*gostParams){
 		"wss transport":  func(p *gostParams) { p.Transport = "wss" },
-		"bad transport":  func(p *gostParams) { p.Transport = "grpc" },
+		"tls transport":  func(p *gostParams) { p.Transport = "tls" },
 		"bad carrier":    func(p *gostParams) { p.CarrierAddr = "no-port" },
 		"carrier quotes": func(p *gostParams) { p.CarrierAddr = `0.0.0.0:"1"` },
 		"public port 0":  func(p *gostParams) { p.PublicPort = 0 },

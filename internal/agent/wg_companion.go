@@ -45,6 +45,12 @@ type wgCompanion struct {
 	ListenAddr   string `json:"listen_addr"`   // both ends: the local fake-TCP port (server binds it; client dials 127.0.0.1:it)
 	Password     string `json:"password"`      // udp2raw -a (8-256, CLI-safe)
 	AutoIptables bool   `json:"auto_iptables"` // manage the kernel RST rule
+	// OVERNIGHT-A gap-close: upstream raw/cipher/auth mode selection
+	// (misc.cpp raw_mode_tostring + encrypt.h enums). "" keeps the
+	// historical faketcp + upstream-default cipher/auth shape.
+	RawMode    string `json:"raw_mode,omitempty"`    // faketcp (default) | easyfaketcp | udp | icmp
+	CipherMode string `json:"cipher_mode,omitempty"` // "" (upstream default aes128cfb) | none | aes128cfb | aes128cbc | xor
+	AuthMode   string `json:"auth_mode,omitempty"`   // "" (upstream default md5) | none | md5 | crc32 | simple | hmac_sha1
 	// Binary delivery (R5 manifest engine "udp2raw" + pinned fallback —
 	// same trust model as every other engine artifact).
 	Version   string `json:"version"`
@@ -53,6 +59,35 @@ type wgCompanion struct {
 	SHA256Arm string `json:"sha256_arm64"`
 	SigAmd    string `json:"signature_amd64"`
 	SigArm    string `json:"signature_arm64"`
+}
+
+// wgCompanionRawModes mirrors upstream raw_mode_tostring (misc.cpp) plus
+// the easyfaketcp alias (misc.cpp maps it to mode_faketcp + the dummy
+// socket). faketcp-family modes are the only ones the kernel-RST guard
+// applies to — the guard rule is skipped for udp/icmp.
+var wgCompanionRawModes = map[string]bool{
+	"": true, "faketcp": true, "easyfaketcp": true, "udp": true, "icmp": true,
+}
+
+// wgCompanionCipherModes mirrors upstream cipher_mode_tostring
+// (encrypt.cpp). "" = upstream default (aes128cfb + md5 auth).
+var wgCompanionCipherModes = map[string]bool{
+	"": true, "none": true, "aes128cfb": true, "aes128cbc": true, "xor": true,
+}
+
+// wgCompanionAuthModes mirrors upstream auth_mode_tostring (encrypt.cpp).
+var wgCompanionAuthModes = map[string]bool{
+	"": true, "none": true, "md5": true, "crc32": true, "simple": true, "hmac_sha1": true,
+}
+
+// wgCompanionFakeTCPFamily reports whether the raw mode rides fake TCP
+// (the kernel RST guard's scope).
+func (c *wgCompanion) fakeTCPFamily() bool {
+	switch strings.ToLower(strings.TrimSpace(c.RawMode)) {
+	case "", "faketcp", "easyfaketcp":
+		return true
+	}
+	return false
 }
 
 func (c *wgCompanion) validate() error {
@@ -72,6 +107,15 @@ func (c *wgCompanion) validate() error {
 	}
 	if len(c.Password) < 8 || len(c.Password) > 256 || strings.ContainsAny(c.Password, "\"'\\\n\r ") {
 		return fmt.Errorf("wg: companion.password must be 8-256 chars without quotes/backslash/space")
+	}
+	if !wgCompanionRawModes[strings.ToLower(strings.TrimSpace(c.RawMode))] {
+		return fmt.Errorf("wg: companion.raw_mode %q not supported (faketcp|easyfaketcp|udp|icmp)", c.RawMode)
+	}
+	if !wgCompanionCipherModes[strings.ToLower(strings.TrimSpace(c.CipherMode))] {
+		return fmt.Errorf("wg: companion.cipher_mode %q not supported (none|aes128cfb|aes128cbc|xor)", c.CipherMode)
+	}
+	if !wgCompanionAuthModes[strings.ToLower(strings.TrimSpace(c.AuthMode))] {
+		return fmt.Errorf("wg: companion.auth_mode %q not supported (none|md5|crc32|simple|hmac_sha1)", c.AuthMode)
 	}
 	if err := wgCompanionValidatePins(c); err != nil {
 		return err
@@ -131,20 +175,38 @@ func wgCompanionArchPin(arch string, c *wgCompanion) (name, sha256Hex, sigB64 st
 // wgCompanionUDP2RawArgs renders the udp2raw CLI for one end.
 // server: udp2raw -s -l <listen> -r 127.0.0.1:<wg_port> -a <password> --raw-mode faketcp
 // client: udp2raw -c -l 127.0.0.1:<local> -r <server_addr> -a <password> --raw-mode faketcp
+// OVERNIGHT-A: the raw/cipher/auth modes ride the companion params —
+// raw_mode defaults to faketcp (historical shape), cipher/auth are passed
+// through only when set (upstream defaults: aes128cfb + md5).
 func wgCompanionUDP2RawArgs(role engineSide, p wgParams, c *wgCompanion, localUDPPort int) []string {
-	if role == engineSideServer {
-		return []string{"-s", "-l", c.ListenAddr,
-			"-r", net.JoinHostPort("127.0.0.1", fmt.Sprint(p.CarrierPort)),
-			"-a", c.Password, "--raw-mode", "faketcp"}
+	mode := strings.ToLower(strings.TrimSpace(c.RawMode))
+	if mode == "" {
+		mode = "faketcp"
 	}
-	return []string{"-c", "-l", net.JoinHostPort("127.0.0.1", fmt.Sprint(localUDPPort)),
-		"-r", c.ServerAddr, "-a", c.Password, "--raw-mode", "faketcp"}
+	var args []string
+	if role == engineSideServer {
+		args = []string{"-s", "-l", c.ListenAddr,
+			"-r", net.JoinHostPort("127.0.0.1", fmt.Sprint(p.CarrierPort)),
+			"-a", c.Password, "--raw-mode", mode}
+	} else {
+		args = []string{"-c", "-l", net.JoinHostPort("127.0.0.1", fmt.Sprint(localUDPPort)),
+			"-r", c.ServerAddr, "-a", c.Password, "--raw-mode", mode}
+	}
+	if cm := strings.ToLower(strings.TrimSpace(c.CipherMode)); cm != "" {
+		args = append(args, "--cipher-mode", cm)
+	}
+	if am := strings.ToLower(strings.TrimSpace(c.AuthMode)); am != "" {
+		args = append(args, "--auth-mode", am)
+	}
+	return args
 }
 
 // wgCompanionIptablesRule is the kernel-RST guard for the server end's
-// fake-TCP listen port (comment-tagged with the tunnel id).
+// fake-TCP listen port (comment-tagged with the tunnel id). OVERNIGHT-A:
+// scoped to the fake-TCP family — raw-mode udp/icmp get no TCP RSTs from
+// the kernel, so the tcp-flags rule is meaningless there (0 = no rule).
 func wgCompanionIptablesRule(c *wgCompanion) int {
-	if c == nil || c.Kind != companionUDP2Raw {
+	if c == nil || c.Kind != companionUDP2Raw || !c.fakeTCPFamily() {
 		return 0
 	}
 	return enginePortOf(c.ListenAddr)
