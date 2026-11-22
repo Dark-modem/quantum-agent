@@ -61,9 +61,27 @@ type hysteriaParams struct {
 	// AuthPassword is the shared hysteria2 password (server auth.password;
 	// client auth). 8-128 CLI/TOML-safe chars.
 	AuthPassword string `json:"auth_password"`
-	// ObfsPassword enables the salamander obfuscation layer when set
-	// (obfs.type=salamander, obfs.salamander.password). Optional.
+	// ObfsPassword enables the QUIC obfuscation layer when set. Optional.
+	// OVERNIGHT-A4: ObfsType picks the layer — "" (default) keeps the A2
+	// shape (salamander), "salamander" is explicit, "gecko" is the
+	// packet-size-padding layer (extras/obfs/gecko.go: salamander-wrapped
+	// with the same password; min/max packet sizes, upstream defaults
+	// 512/1200, buffer bound 2048).
 	ObfsPassword string `json:"obfs_password,omitempty"`
+	ObfsType     string `json:"obfs_type,omitempty"` // "" | salamander | gecko
+	// gecko-only knobs (0 = upstream defaults 512/1200; 1-2048 with
+	// min<=max — extras/obfs/gecko.go WrapPacketConnGecko bounds).
+	ObfsMinPkt int `json:"obfs_min_pkt,omitempty"`
+	ObfsMaxPkt int `json:"obfs_max_pkt,omitempty"`
+	// OVERNIGHT-A4 udphop (port hopping): ServerAddr's port part may be a
+	// RANGE ("host:20000-50000" or "host:443,8443" — upstream
+	// isPortHoppingPort accepts '-' or ','). The SERVER natively listens
+	// on the port union and self-installs the UDP redirect
+	// (resolveServerListenAddr → firewall.SetupUDPPortRedirect — no
+	// driver firewall work); the CLIENT hops with transport.udp.hopInterval
+	// (HopIntervalConfig.normalized: ≥5s, min≤max, default 30s). Client-
+	// side only; a Go duration string ("30s").
+	HopInterval string `json:"hop_interval,omitempty"`
 	// TLS: hysteria2 is ALWAYS TLS — the server needs cert/key paths
 	// (self-signed ok); the client verifies unless insecure/pinSHA256.
 	TLSCert   string `json:"tls_cert,omitempty"`   // server certFile (PEM path)
@@ -110,11 +128,47 @@ func hysteriaValidateParams(p hysteriaParams) error {
 	if _, _, e := net.SplitHostPort(p.ServerAddr); e != nil {
 		return fmt.Errorf("hysteria: server_addr must be host:port")
 	}
+	// OVERNIGHT-A4: the port part may be a udphop range ("20000-50000",
+	// "443,8443" — upstream isPortHoppingPort: '-' or ','), otherwise a
+	// plain 1-65535 port.
+	if _, port, e := net.SplitHostPort(p.ServerAddr); e == nil {
+		if err := hysteriaValidatePortOrRange(port); err != nil {
+			return err
+		}
+	}
 	if err := engineVerifySecretShape("hysteria auth_password", p.AuthPassword, 8, 128); err != nil {
 		return err
 	}
 	if p.ObfsPassword != "" {
 		if err := engineVerifySecretShape("hysteria obfs_password", p.ObfsPassword, 4, 128); err != nil {
+			return err
+		}
+	}
+	// OVERNIGHT-A4 obfs type + gecko packet bounds.
+	switch strings.ToLower(strings.TrimSpace(p.ObfsType)) {
+	case "", "salamander", "gecko":
+	default:
+		return fmt.Errorf("hysteria: obfs_type %q not supported (empty=salamander|salamander|gecko)", p.ObfsType)
+	}
+	if p.ObfsMinPkt != 0 || p.ObfsMaxPkt != 0 {
+		if strings.ToLower(strings.TrimSpace(p.ObfsType)) != "gecko" {
+			return fmt.Errorf("hysteria: obfs_min_pkt/obfs_max_pkt are gecko-only (obfs_type=%q)", p.ObfsType)
+		}
+		if p.ObfsMinPkt < 0 || p.ObfsMaxPkt < 0 || p.ObfsMinPkt > 2048 || p.ObfsMaxPkt > 2048 ||
+			(p.ObfsMinPkt > 0 && p.ObfsMaxPkt > 0 && p.ObfsMinPkt > p.ObfsMaxPkt) {
+			return fmt.Errorf("hysteria: obfs packet sizes must be 0 (default 512/1200) or 1-2048 with min<=max (extras/obfs/gecko.go bound 2048)")
+		}
+		if p.ObfsMinPkt > 0 && p.ObfsMaxPkt == 0 || p.ObfsMinPkt == 0 && p.ObfsMaxPkt > 0 {
+			return fmt.Errorf("hysteria: obfs_min_pkt and obfs_max_pkt must be set together (0/0 = upstream defaults)")
+		}
+	}
+	if p.ObfsType != "" && p.ObfsPassword == "" {
+		return fmt.Errorf("hysteria: obfs_type without obfs_password is dead configuration — set the shared obfs password")
+	}
+	// OVERNIGHT-A4: the hop interval (client end, Go duration string;
+	// upstream HopIntervalConfig.normalized: ≥5s, default 30s).
+	if p.HopInterval != "" {
+		if err := hysteriaValidateHopInterval(p.HopInterval); err != nil {
 			return err
 		}
 	}
@@ -172,6 +226,79 @@ func hysteriaValidateParams(p hysteriaParams) error {
 
 // hysteriaValidateBandwidth bounds the ConvBandwidth strings to the
 // "N mbps" shape (upstream utils.ConvBandwidth accepts unit strings).
+// hysteriaValidatePortOrRange validates the ServerAddr port part: a plain
+// 1-65535 port or a udphop range ("20000-50000", "443,8443" — upstream
+// isPortHoppingPort keys on '-' or ','; eUtils.ParsePortUnion bounds each
+// element 1-65535 with start<=end).
+func hysteriaValidatePortOrRange(port string) error {
+	if port == "" || len(port) > 64 || strings.ContainsAny(port, "\"' \t\n\r/\\") {
+		return fmt.Errorf("hysteria: server_addr port invalid")
+	}
+	if !strings.ContainsAny(port, "-,") {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("hysteria: server_addr port must be 1-65535 or a hop range (A-B / A,B)")
+		}
+		return nil
+	}
+	for _, part := range strings.FieldsFunc(port, func(r rune) bool { return r == '-' || r == ',' }) {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("hysteria: hop range element %q must be 1-65535", part)
+		}
+	}
+	lo, hi, ok := strings.Cut(port, "-")
+	if ok {
+		a, e1 := strconv.Atoi(lo)
+		b, e2 := strconv.Atoi(hi)
+		if e1 == nil && e2 == nil && a > b {
+			return fmt.Errorf("hysteria: hop range start must not exceed end")
+		}
+	}
+	return nil
+}
+
+// hysteriaValidateHopInterval validates the client hop interval (a Go
+// duration string; upstream HopIntervalConfig.normalized requires >=5s and
+// a 30s default when unset).
+func hysteriaValidateHopInterval(v string) error {
+	if len(v) > 16 || strings.ContainsAny(v, "\"'\n\r\\ ") {
+		return fmt.Errorf("hysteria: hop_interval must be a ≤16-char duration string (e.g. 30s)")
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fmt.Errorf("hysteria: hop_interval must parse as a Go duration (e.g. 30s): %v", err)
+	}
+	if d < 5*time.Second || d > time.Hour {
+		return fmt.Errorf("hysteria: hop_interval must be 5s-1h (upstream normalized() lower bound 5s; default 30s)")
+	}
+	return nil
+}
+
+// hysteriaObfsYAML renders the obfs block for the chosen layer (OVERNIGHT-A4:
+// "" keeps the A2 salamander shape for backward compatibility).
+func hysteriaObfsYAML(p hysteriaParams, indent string) []string {
+	t := strings.ToLower(strings.TrimSpace(p.ObfsType))
+	if t == "" {
+		t = "salamander"
+	}
+	var out []string
+	if t == "gecko" {
+		out = append(out, indent+"type: gecko", indent+"gecko:")
+		out = append(out, fmt.Sprintf(indent+"  password: %q", p.ObfsPassword))
+		if p.ObfsMinPkt > 0 {
+			out = append(out, fmt.Sprintf(indent+"  minPacketSize: %d", p.ObfsMinPkt))
+		}
+		if p.ObfsMaxPkt > 0 {
+			out = append(out, fmt.Sprintf(indent+"  maxPacketSize: %d", p.ObfsMaxPkt))
+		}
+		return out
+	}
+	out = append(out, indent+"type: salamander", indent+"salamander:")
+	out = append(out, fmt.Sprintf(indent+"  password: %q", p.ObfsPassword))
+	return out
+}
+
 func hysteriaValidateBandwidth(label, v string) error {
 	if v == "" {
 		return nil
@@ -222,7 +349,7 @@ func (d *HysteriaDriver) ID() string { return hysteriaID }
 
 func (d *HysteriaDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: hysteriaID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:36712","auth_password":"","obfs_password":"","tls_cert":"","tls_key":"","sni":"","insecure":false,"pin_sha256":"","up_mbps":"100 mbps","down_mbps":"","socks_port":0,"http_port":0,"tcp_forwards":[{"listen":0,"remote":"host:port"}],"udp_forwards":[{"listen":0,"remote":"host:port"}]}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:36712 or :20000-50000","auth_password":"","obfs_password":"","obfs_type":"|salamander|gecko","obfs_min_pkt":0,"obfs_max_pkt":0,"hop_interval":"30s","tls_cert":"","tls_key":"","sni":"","insecure":false,"pin_sha256":"","up_mbps":"100 mbps","down_mbps":"","socks_port":0,"http_port":0,"tcp_forwards":[{"listen":0,"remote":"host:port"}],"udp_forwards":[{"listen":0,"remote":"host:port"}]}`)}
 }
 
 func (d *HysteriaDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
@@ -253,11 +380,17 @@ func hysteriaRenderConfig(role string, p hysteriaParams) string {
 	if role == "server" {
 		b.WriteString("listen: ")
 		_, port, _ := net.SplitHostPort(p.ServerAddr)
+		// OVERNIGHT-A4: a udphop range rides the listen string verbatim —
+		// resolveServerListenAddr parses the port union and the binary
+		// self-installs firewall.SetupUDPPortRedirect for it.
 		fmt.Fprintf(&b, "%q\n", ":"+port)
 		fmt.Fprintf(&b, "auth:\n  type: password\n  password: %q\n", p.AuthPassword)
 		if p.ObfsPassword != "" {
-			b.WriteString("obfs:\n  type: salamander\n  salamander:\n")
-			fmt.Fprintf(&b, "    password: %q\n", p.ObfsPassword)
+			b.WriteString("obfs:\n")
+			for _, ln := range hysteriaObfsYAML(p, "  ") {
+				b.WriteString(ln)
+				b.WriteString("\n")
+			}
 		}
 		fmt.Fprintf(&b, "tls:\n  cert: %q\n  key: %q\n", p.TLSCert, p.TLSKey)
 		if p.UpMbps != "" || p.DownMbps != "" {
@@ -274,8 +407,17 @@ func hysteriaRenderConfig(role string, p hysteriaParams) string {
 	fmt.Fprintf(&b, "server: %q\n", p.ServerAddr)
 	fmt.Fprintf(&b, "auth: %q\n", p.AuthPassword)
 	if p.ObfsPassword != "" {
-		b.WriteString("obfs:\n  type: salamander\n  salamander:\n")
-		fmt.Fprintf(&b, "    password: %q\n", p.ObfsPassword)
+		b.WriteString("obfs:\n")
+		for _, ln := range hysteriaObfsYAML(p, "  ") {
+			b.WriteString(ln)
+			b.WriteString("\n")
+		}
+	}
+	// OVERNIGHT-A4 udphop: the hop interval rides transport.udp (the
+	// client's server port already carries the range — fillServerAddr
+	// resolves it as a udphop address when it contains '-' or ',').
+	if p.HopInterval != "" {
+		fmt.Fprintf(&b, "transport:\n  udp:\n    hopInterval: %q\n", p.HopInterval)
 	}
 	b.WriteString("tls:\n")
 	if p.SNI != "" {
