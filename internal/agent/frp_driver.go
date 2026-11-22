@@ -78,6 +78,21 @@ type frpParams struct {
 	// UseEncryption/UseCompression render the per-proxy upstream flags.
 	UseEncryption  bool `json:"use_encryption,omitempty"`
 	UseCompression bool `json:"use_compression,omitempty"`
+	// OVERNIGHT-A2 secret-proxy family (proxy_type stcp|sudp|xtcp): the
+	// shared secretKey of the proxy AND the foreign-end visitor (upstream
+	// STCPProxyConfig/XTCPProxyConfig secretKey + VisitorBaseConfig).
+	SecretKey string `json:"secret_key,omitempty"`
+}
+
+// frpSecretProxy reports the proxy types that need the foreign-end
+// visitor frpc (the visitor binds the public port; the proxy side sits
+// on the Iran end).
+func frpSecretProxy(pt string) bool {
+	switch strings.ToLower(strings.TrimSpace(pt)) {
+	case "stcp", "sudp", "xtcp":
+		return true
+	}
+	return false
 }
 
 // frpAllowedProxyTypes mirrors upstream ProxyType entries the two-end
@@ -85,6 +100,7 @@ type frpParams struct {
 // xtcp need vhost routing, visitors or P2P — documented next wave.
 var frpAllowedProxyTypes = map[string]bool{
 	"": true, "tcp": true, "udp": true,
+	"stcp": true, "sudp": true, "xtcp": true,
 }
 
 // frpAllowedTransports mirrors upstream SupportedTransportProtocols
@@ -163,8 +179,16 @@ func frpValidateParams(p frpParams) error {
 	if p.AllowMin < 1 || p.AllowMax > 65535 || p.AllowMin > p.AllowMax {
 		return fmt.Errorf("frp: allow_port_min <= allow_port_max within 1-65535 required")
 	}
-	if !frpAllowedProxyTypes[strings.ToLower(strings.TrimSpace(p.ProxyType))] {
-		return fmt.Errorf("frp: proxy_type %q not supported yet (tcp|udp; http/https/tcpmux/stcp/sudp/xtcp are the next wave)", p.ProxyType)
+	pt := strings.ToLower(strings.TrimSpace(p.ProxyType))
+	if !frpAllowedProxyTypes[pt] {
+		return fmt.Errorf("frp: proxy_type %q not supported (tcp|udp|stcp|sudp|xtcp; http/https/tcpmux need vhost routing — next wave)", p.ProxyType)
+	}
+	if frpSecretProxy(pt) {
+		if len(p.SecretKey) < 8 || len(p.SecretKey) > 128 || strings.ContainsAny(p.SecretKey, "\"\\ \t\n\r") {
+			return fmt.Errorf("frp: proxy_type %s needs secret_key (8-128 chars without quotes/backslash/whitespace — the proxy and the visitor share it)", p.ProxyType)
+		}
+	} else if p.SecretKey != "" {
+		return fmt.Errorf("frp: secret_key is only valid with proxy_type stcp|sudp|xtcp (got %q)", p.ProxyType)
 	}
 	t := strings.ToLower(strings.TrimSpace(p.Transport))
 	if !frpAllowedTransports[t] {
@@ -309,6 +333,12 @@ type frpInstState struct {
 	engineInst
 	params frpParams
 	role   string
+	// OVERNIGHT-A2 secret-proxy family: the FOREIGN end additionally runs
+	// one frpc WITH A VISITOR config (it binds the public port locally).
+	// The visitor owns its OWN engineInst — sharing the main one would
+	// let the visitor's supervisor overwrite the main proc handle
+	// (engineSupervise calls setProc on respawn).
+	visitorState *engineInst
 }
 
 // FRPDriver implements engine.Driver over frps/frpc.
@@ -333,7 +363,7 @@ func (d *FRPDriver) ID() string { return frpID }
 // Describe implements engine.Describer (PROTOCOL-REQUESTS R3).
 func (d *FRPDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: frpID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"role":"server|client","version":"","artifact":"","sha256":"","signature":"","server_addr":"","server_port":0,"token":"","remote_port":0,"local_addr":"","local_port":0,"dashboard_port":0,"allow_port_min":0,"allow_port_max":0,"proxy_type":"tcp|udp","transport":"tcp|kcp|quic|websocket","use_encryption":false,"use_compression":false}`)}
+		ParamsSchema: json.RawMessage(`{"role":"server|client","version":"","artifact":"","sha256":"","signature":"","server_addr":"","server_port":0,"token":"","remote_port":0,"local_addr":"","local_port":0,"dashboard_port":0,"allow_port_min":0,"allow_port_max":0,"proxy_type":"tcp|udp|stcp|sudp|xtcp","transport":"tcp|kcp|quic|websocket","use_encryption":false,"use_compression":false,"secret_key":""}`)}
 }
 
 // EnsureBinary implements engine.Driver: downloads and verifies the
@@ -420,6 +450,11 @@ func frpRenderConfig(tunnelID, role string, p frpParams) string {
 		fmt.Fprintf(&b, "localIP = \"%s\"\n", p.LocalAddr)
 		fmt.Fprintf(&b, "localPort = %d\n", p.LocalPort)
 		fmt.Fprintf(&b, "remotePort = %d\n", p.RemotePort)
+		if frpSecretProxy(proxyType) {
+			// the proxy name IS the visitor's serverName (upstream
+			// naming.BuildTargetServerProxyName resolves it user-less).
+			fmt.Fprintf(&b, "secretKey = \"%s\"\n", p.SecretKey)
+		}
 		if p.UseEncryption {
 			b.WriteString("useEncryption = true\n")
 		}
@@ -428,6 +463,38 @@ func frpRenderConfig(tunnelID, role string, p frpParams) string {
 		}
 	}
 	return b.String()
+}
+
+// frpVisitorConfig renders the FOREIGN-end visitor frpc TOML for the
+// secret-proxy family (OVERNIGHT-A2): the visitor connects to the local
+// frps (same host) and binds the PUBLIC port locally; public users hit
+// foreign:remote_port → through frps → the Iran-end proxy → local_addr.
+// Verified shapes: VisitorBaseConfig (secretKey/serverName/bindAddr/
+// bindPort) + client/visitor/visitor.go dialRawVisitorConn.
+func frpVisitorConfig(tunnelID string, p frpParams) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "serverAddr = \"127.0.0.1\"\n")
+	fmt.Fprintf(&b, "serverPort = %d\n", p.ServerPort)
+	fmt.Fprintf(&b, "auth.token = \"%s\"\n", p.Token)
+	fmt.Fprintf(&b, "[[visitors]]\n")
+	fmt.Fprintf(&b, "name = \"%s-visitor\"\n", tunnelID)
+	fmt.Fprintf(&b, "type = \"%s\"\n", strings.ToLower(strings.TrimSpace(p.ProxyType)))
+	fmt.Fprintf(&b, "serverName = \"%s\"\n", tunnelID)
+	fmt.Fprintf(&b, "secretKey = \"%s\"\n", p.SecretKey)
+	fmt.Fprintf(&b, "bindAddr = \"0.0.0.0\"\n")
+	fmt.Fprintf(&b, "bindPort = %d\n", p.RemotePort)
+	if p.UseEncryption {
+		b.WriteString("useEncryption = true\n")
+	}
+	if p.UseCompression {
+		b.WriteString("useCompression = true\n")
+	}
+	return b.String()
+}
+
+// frpVisitorConfigPath is the visitor frpc's own config file.
+func frpVisitorConfigPath(tunnelID string) string {
+	return filepath.Join(infra.ConfigDir, "engines", "frp", tunnelID+"-visitor.toml")
 }
 
 // ForwardAddress implements the optional engine.ForwardAddresser
@@ -514,10 +581,33 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		cfg: cfgPath, binPath: binPath}, params: p, role: role}
 	d.runs.put(inst.TunnelID, st)
 	go engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn) // one goroutine per RUNNING instance
+	// OVERNIGHT-A2 secret-proxy family: on the FOREIGN (frps) end spawn
+	// the visitor frpc — it connects to the local frps and binds the
+	// PUBLIC port locally. Its supervisor mirrors the main one; a spawn
+	// failure tears the whole instance down (fail closed, no half state).
+	if role == "server" && frpSecretProxy(p.ProxyType) {
+		visitorCfg := frpVisitorConfig(inst.TunnelID, p)
+		vCfgPath := frpVisitorConfigPath(inst.TunnelID)
+		if err := os.WriteFile(vCfgPath, []byte(visitorCfg), 0o600); err != nil {
+			_ = d.Stop(inst)
+			return fmt.Errorf("frp: write visitor config: %w", err)
+		}
+		visitorProc, err := frpSpawn(filepath.Join(binDir, "frpc"), vCfgPath)
+		if err != nil {
+			_ = os.Remove(vCfgPath)
+			_ = d.Stop(inst)
+			return fmt.Errorf("frp: visitor frpc: %w", err)
+		}
+		st.visitorState = &engineInst{proc: visitorProc, stop: make(chan struct{}),
+			cfg: vCfgPath, binPath: filepath.Join(binDir, "frpc")}
+		go engineSupervise(st.visitorState.stop, st.visitorState, st.visitorState.binPath, st.visitorState.cfg, frpSpawn)
+	}
 	// Wire accounting is installed on the server side only (the client's
 	// control port is shared across instances and cannot be attributed).
 	// kcp/quic carriers are UDP sockets — their rules ride the -p udp
-	// accounting variant (OVERNIGHT-A).
+	// accounting variant (OVERNIGHT-A). The secret family's DATA port is
+	// the visitor bind (stcp=tcp, sudp/xtcp=udp) — both protos get rules
+	// with the same comment so acctWireBytes aggregates honestly.
 	if role == "server" {
 		proto := "tcp"
 		if frpUDPCarrier(p.Transport) {
@@ -526,6 +616,15 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 		if err := acctWireRulesAddProto(acctChainsDriver, inst.TunnelID, p.AllowMin, p.AllowMax, proto); err != nil {
 			// Data plane still runs; counters become Unknown honestly.
 			fmt.Fprintf(os.Stderr, "frp: wire accounting unavailable: %v\n", err)
+		}
+		if frpSecretProxy(p.ProxyType) {
+			udpProto := "udp"
+			if strings.EqualFold(strings.TrimSpace(p.ProxyType), "stcp") {
+				udpProto = "tcp"
+			}
+			if err := acctWireRulesAddProto(acctChainsDriver, inst.TunnelID, p.RemotePort, p.RemotePort, udpProto); err != nil {
+				fmt.Fprintf(os.Stderr, "frp: visitor accounting unavailable: %v\n", err)
+			}
 		}
 	}
 	return nil
@@ -546,12 +645,28 @@ func (d *FRPDriver) Stop(inst engine.Instance) error {
 		return nil
 	}
 	engineStopInst(&st.engineInst, func() {
+		// OVERNIGHT-A2: the visitor frpc dies BEFORE its rules are torn
+		// down (stop channel first — same no-resurrection discipline).
+		if vs := st.visitorState; vs != nil {
+			close(vs.stop)
+			frpProcStop(vs.current())
+			if vs.cfg != "" {
+				_ = os.Remove(vs.cfg)
+			}
+		}
 		if st.role == "server" {
 			proto := "tcp"
 			if frpUDPCarrier(st.params.Transport) {
 				proto = "udp"
 			}
 			_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, st.params.AllowMin, st.params.AllowMax, proto)
+			if frpSecretProxy(st.params.ProxyType) {
+				udpProto := "udp"
+				if strings.EqualFold(strings.TrimSpace(st.params.ProxyType), "stcp") {
+					udpProto = "tcp"
+				}
+				_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, st.params.RemotePort, st.params.RemotePort, udpProto)
+			}
 		}
 	})
 	return nil
@@ -580,6 +695,15 @@ func (d *FRPDriver) Health(inst engine.Instance) engine.Health {
 		return engine.Health{OK: false, Detail: "process exited", LatencyMs: -1}
 	}
 	if st.role == "server" {
+		// OVERNIGHT-A2: the visitor frpc is part of the instance — dead
+		// visitor = unhealthy (the public port disappears with it).
+		if vs := st.visitorState; vs != nil {
+			select {
+			case <-vs.current().Done():
+				return engine.Health{OK: false, Detail: "visitor frpc exited", LatencyMs: -1}
+			default:
+			}
+		}
 		// Real handshake: the localhost dashboard API answers with auth.
 		start := time.Now()
 		code, err := frpDashStatus(st.params.DashPort, frpDashSecret(inst.TunnelID, st.params))

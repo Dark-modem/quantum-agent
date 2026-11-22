@@ -75,14 +75,24 @@ type ratholeParams struct {
 	ServiceType string `json:"service_type,omitempty"`
 	// PreferIPv6 renders upstream's per-service prefer_ipv6 (client side).
 	PreferIPv6 bool `json:"prefer_ipv6,omitempty"`
+	// OVERNIGHT-A2: the tls carrier rides upstream's PKCS12 store
+	// (src/config.rs TlsConfig: pkcs12 + pkcs12_password are BOTH
+	// required — Option::and). The path lands in TOML (charset-checked);
+	// the password is a secret like any token field.
+	PKCS12Path     string `json:"pkcs12_path,omitempty"`
+	PKCS12Password string `json:"pkcs12_password,omitempty"`
 }
 
 // ratholeAllowedTransports mirrors upstream TransportType (config.rs).
 // tls is deliberately absent: it requires cert/key files the panel does
 // not deliver yet — fail closed with a clear message instead of an
 // upstream startup error.
+// "tls" became reachable in OVERNIGHT-A2 — but ONLY with the operator's
+// PKCS12 pair (pkcs12_path + pkcs12_password); validate enforces that
+// pair, so a bare tls still fails closed with a clear message instead
+// of an upstream startup error.
 var ratholeAllowedTransports = map[string]bool{
-	"": true, "noise": true, "tcp": true, "websocket": true,
+	"": true, "noise": true, "tcp": true, "websocket": true, "tls": true,
 }
 
 // ratholeServiceTypes mirrors upstream ServiceType (config.rs).
@@ -143,10 +153,21 @@ func ratholeValidateParams(p ratholeParams) error {
 	}
 	transport := strings.ToLower(strings.TrimSpace(p.Transport))
 	if !ratholeAllowedTransports[transport] {
-		if transport == "tls" {
-			return fmt.Errorf("rathole: transport tls needs operator cert/key files on both ends — not supported yet (use noise, tcp or websocket)")
+		return fmt.Errorf("rathole: transport %q not supported (noise|tcp|websocket|tls)", p.Transport)
+	}
+	if transport == "tls" {
+		// upstream TlsConfig: pkcs12 AND pkcs12_password are both
+		// required (config.rs Option::and — one without the other is an
+		// upstream startup error; fail closed here instead).
+		if strings.TrimSpace(p.PKCS12Path) == "" || strings.TrimSpace(p.PKCS12Password) == "" {
+			return fmt.Errorf("rathole: transport tls needs pkcs12_path and pkcs12_password (upstream rides a PKCS12 store on BOTH ends)")
 		}
-		return fmt.Errorf("rathole: transport %q not supported (noise|tcp|websocket)", p.Transport)
+	}
+	if p.PKCS12Path != "" && (len(p.PKCS12Path) > 256 || strings.ContainsAny(p.PKCS12Path, "\"'\n\r")) {
+		return fmt.Errorf("rathole: pkcs12_path must be a ≤256-char TOML-safe path")
+	}
+	if p.PKCS12Password != "" && (len(p.PKCS12Password) > 256 || strings.ContainsAny(p.PKCS12Password, "\"'\n\r")) {
+		return fmt.Errorf("rathole: pkcs12_password must be ≤256 TOML-safe chars")
 	}
 	// The noise key dance is noise-only ("" IS noise — the historical
 	// default): a noise_server_public on a non-noise carrier would never
@@ -220,7 +241,7 @@ func (d *RatholeDriver) ID() string { return ratholeID }
 
 func (d *RatholeDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: ratholeID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:2333","service_addr":"0.0.0.0:5202","local_addr":"127.0.0.1:5201","token":"","noise_server_public":"","transport":"noise|tcp|websocket","service_type":"tcp|udp","prefer_ipv6":false}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:2333","service_addr":"0.0.0.0:5202","local_addr":"127.0.0.1:5201","token":"","noise_server_public":"","transport":"noise|tcp|websocket|tls","service_type":"tcp|udp","prefer_ipv6":false,"pkcs12_path":"","pkcs12_password":""}`)}
 }
 
 func (d *RatholeDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
@@ -275,6 +296,9 @@ func ratholeRenderConfig(role, svc string, p ratholeParams, noisePrivB64 string)
 		case "websocket":
 			b.WriteString("[server.transport]\ntype = \"websocket\"\n")
 			b.WriteString("[server.transport.websocket]\ntls = false\n")
+		case "tls":
+			b.WriteString("[server.transport]\ntype = \"tls\"\n")
+			fmt.Fprintf(&b, "[server.transport.tls]\npkcs12 = %q\npkcs12_password = %q\n", p.PKCS12Path, p.PKCS12Password)
 		case "tcp":
 			// upstream default — no transport block
 		}
@@ -295,6 +319,9 @@ func ratholeRenderConfig(role, svc string, p ratholeParams, noisePrivB64 string)
 	case "websocket":
 		b.WriteString("[client.transport]\ntype = \"websocket\"\n")
 		b.WriteString("[client.transport.websocket]\ntls = false\n")
+	case "tls":
+		b.WriteString("[client.transport]\ntype = \"tls\"\n")
+		fmt.Fprintf(&b, "[client.transport.tls]\npkcs12 = %q\npkcs12_password = %q\n", p.PKCS12Path, p.PKCS12Password)
 	case "tcp":
 		// upstream default — no transport block
 	}
