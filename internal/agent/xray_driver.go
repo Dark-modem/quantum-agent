@@ -73,6 +73,16 @@ type xrayParams struct {
 	// GrpcServiceName is the grpcSettings serviceName (default
 	// "quantum-reverse"; both ends must match).
 	GrpcServiceName string `json:"grpc_service_name,omitempty"`
+	// OVERNIGHT-A3 (morning human order): optional SOCKS/HTTP ingress
+	// inbounds on the CLIENT end. Probe-proven against the vendored
+	// v24.12.31 binary (`xray run -test` accepts protocol socks with
+	// auth noauth + udp true, and protocol http — Configuration OK).
+	// 0 = off (default — the historical shape). Traffic rides the carrier
+	// outbound (route rules pin the inbounds to it; no direct fallback —
+	// nothing leaks). The SERVER end never renders them (the Iran
+	// proxy-exit shape is the only useful direction).
+	SocksPort int `json:"socks_port,omitempty"`
+	HTTPPort  int `json:"http_port,omitempty"`
 }
 
 // xrayAllowedTransports mirrors the REALITY-capable upstream transports
@@ -172,6 +182,24 @@ func xrayValidateParams(p xrayParams) error {
 	if p.APIPort < 0 || p.APIPort > 65535 {
 		return fmt.Errorf("xray: api_port out of range")
 	}
+	// OVERNIGHT-A3: the optional socks/http ingress ports — in-range and
+	// non-colliding with every port this driver already binds.
+	for _, a := range []struct {
+		label string
+		port  int
+	}{{"socks_port", p.SocksPort}, {"http_port", p.HTTPPort}} {
+		if a.port == 0 {
+			continue
+		}
+		if a.port < 1 || a.port > 65535 {
+			return fmt.Errorf("xray: %s out of range (0 = off)", a.label)
+		}
+		for _, other := range []int{p.CarrierPort, p.PublicPort, p.APIPort, p.APIPort + 1} {
+			if other > 0 && other == a.port {
+				return fmt.Errorf("xray: %s collides with an already-bound port (%d)", a.label, other)
+			}
+		}
+	}
 	return nil
 }
 
@@ -226,6 +254,11 @@ type xrayInboundSettings struct {
 	Port           int        `json:"port,omitempty"`
 	Network        string     `json:"network,omitempty"`
 	FollowRedirect bool       `json:"followRedirect,omitempty"`
+	// OVERNIGHT-A3 socks inbound fields (infra/conf/socks.go:
+	// SocksServerConfig Auth "noauth"|"password", UDP). The http inbound
+	// needs no settings block (HTTPServerConfig is empty by default).
+	Auth string `json:"auth,omitempty"`
+	UDP  bool   `json:"udp,omitempty"`
 }
 
 type xrayStreamSettings struct {
@@ -569,6 +602,28 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 			Domain: []string{"full:" + xrayProbeHost}, OutboundTag: "probe"},
 		{Type: "field", InboundTag: []string{"rev-bridge"}, OutboundTag: "local"},
 	}}
+	// OVERNIGHT-A3: the optional local SOCKS/HTTP ingress (the Iran
+	// proxy-exit shape — everything offered here rides the carrier out;
+	// the rules run BEFORE the bridge rules would matter only if the
+	// inbounds collided, which validation refuses; appended after the
+	// rev-bridge rules because those match by tag and never overlap).
+	if p.SocksPort > 0 {
+		cfg.Inbounds = append(cfg.Inbounds, xrayInbound{
+			Tag: "socks-in", Listen: "127.0.0.1", Port: p.SocksPort, Protocol: "socks",
+			Settings: &xrayInboundSettings{Auth: "noauth", UDP: true},
+		})
+		cfg.Routing.Rules = append(cfg.Routing.Rules, xrayRoutingRule{
+			Type: "field", InboundTag: []string{"socks-in"}, OutboundTag: "carrier-out",
+		})
+	}
+	if p.HTTPPort > 0 {
+		cfg.Inbounds = append(cfg.Inbounds, xrayInbound{
+			Tag: "http-in", Listen: "127.0.0.1", Port: p.HTTPPort, Protocol: "http",
+		})
+		cfg.Routing.Rules = append(cfg.Routing.Rules, xrayRoutingRule{
+			Type: "field", InboundTag: []string{"http-in"}, OutboundTag: "carrier-out",
+		})
+	}
 	return cfg
 }
 
@@ -591,7 +646,7 @@ func (d *XrayDriver) ID() string { return xrayID }
 
 func (d *XrayDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: xrayID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","remote_addr":"","carrier_port":0,"public_port":0,"local_addr":"","local_port":0,"server_name":"","dest":"","short_id":"","reality_public_key":"","reality_private_key":"","flow":"","uuid":"","api_port":0,"transport":"tcp|xhttp|grpc","xhttp_path":"/","grpc_service_name":"quantum-reverse"}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","remote_addr":"","carrier_port":0,"public_port":0,"local_addr":"","local_port":0,"server_name":"","dest":"","short_id":"","reality_public_key":"","reality_private_key":"","flow":"","uuid":"","api_port":0,"transport":"tcp|xhttp|grpc","xhttp_path":"/","grpc_service_name":"quantum-reverse","socks_port":0,"http_port":0}`)}
 }
 
 // EnsureBinary: the Manager calls this before the first instance starts;
