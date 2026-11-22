@@ -349,7 +349,7 @@ func (d *HysteriaDriver) ID() string { return hysteriaID }
 
 func (d *HysteriaDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: hysteriaID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:36712 or :20000-50000","auth_password":"","obfs_password":"","obfs_type":"|salamander|gecko","obfs_min_pkt":0,"obfs_max_pkt":0,"hop_interval":"30s",","tls_cert":"","tls_key":"","sni":"","insecure":false,"pin_sha256":"","up_mbps":"100 mbps","down_mbps":"","socks_port":0,"http_port":0,"tcp_forwards":[{"listen":0,"remote":"host:port"}],"udp_forwards":[{"listen":0,"remote":"host:port"}]}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:36712 or :20000-50000","auth_password":"","obfs_password":"","obfs_type":"|salamander|gecko","obfs_min_pkt":0,"obfs_max_pkt":0,"hop_interval":"30s","tls_cert":"","tls_key":"","sni":"","insecure":false,"pin_sha256":"","up_mbps":"100 mbps","down_mbps":"","socks_port":0,"http_port":0,"tcp_forwards":[{"listen":0,"remote":"host:port"}],"udp_forwards":[{"listen":0,"remote":"host:port"}]}`)}
 }
 
 func (d *HysteriaDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
