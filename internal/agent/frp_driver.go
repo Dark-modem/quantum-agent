@@ -68,6 +68,38 @@ type frpParams struct {
 	DashPort   int    `json:"dashboard_port"`  // frps 127.0.0.1 webServer port (payload counters)
 	AllowMin   int    `json:"allow_port_min"`  // frps smallest allowed remote port
 	AllowMax   int    `json:"allow_port_max"`  // frps largest allowed remote port
+	// OVERNIGHT-A gap-close additions (all optional, defaults preserve the
+	// historical shape):
+	ProxyType string `json:"proxy_type,omitempty"` // tcp (default) | udp — the client proxy block's type
+	// Transport is the frpc↔frps carrier: upstream
+	// SupportedTransportProtocols = tcp|kcp|quic|websocket|wss. wss needs
+	// the server's TLS cert — rejected fail-closed (next wave).
+	Transport string `json:"transport,omitempty"`
+	// UseEncryption/UseCompression render the per-proxy upstream flags.
+	UseEncryption  bool `json:"use_encryption,omitempty"`
+	UseCompression bool `json:"use_compression,omitempty"`
+}
+
+// frpAllowedProxyTypes mirrors upstream ProxyType entries the two-end
+// tunnel shape can drive today (tcp/udp); http/https/tcpmux/stcp/sudp/
+// xtcp need vhost routing, visitors or P2P — documented next wave.
+var frpAllowedProxyTypes = map[string]bool{
+	"": true, "tcp": true, "udp": true,
+}
+
+// frpAllowedTransports mirrors upstream SupportedTransportProtocols
+// minus wss (cert-bound).
+var frpAllowedTransports = map[string]bool{
+	"": true, "tcp": true, "kcp": true, "quic": true, "websocket": true,
+}
+
+// frpUDPCarrier reports the transports whose control+data socket is UDP.
+func frpUDPCarrier(transport string) bool {
+	switch strings.ToLower(strings.TrimSpace(transport)) {
+	case "kcp", "quic":
+		return true
+	}
+	return false
 }
 
 // frpArtifactPin resolves this host's artifact coordinates by GOARCH.
@@ -130,6 +162,16 @@ func frpValidateParams(p frpParams) error {
 	}
 	if p.AllowMin < 1 || p.AllowMax > 65535 || p.AllowMin > p.AllowMax {
 		return fmt.Errorf("frp: allow_port_min <= allow_port_max within 1-65535 required")
+	}
+	if !frpAllowedProxyTypes[strings.ToLower(strings.TrimSpace(p.ProxyType))] {
+		return fmt.Errorf("frp: proxy_type %q not supported yet (tcp|udp; http/https/tcpmux/stcp/sudp/xtcp are the next wave)", p.ProxyType)
+	}
+	t := strings.ToLower(strings.TrimSpace(p.Transport))
+	if !frpAllowedTransports[t] {
+		if t == "wss" {
+			return fmt.Errorf("frp: transport wss needs the server's TLS cert — not supported yet (use tcp|kcp|quic|websocket)")
+		}
+		return fmt.Errorf("frp: transport %q not supported (tcp|kcp|quic|websocket)", p.Transport)
 	}
 	return nil
 }
@@ -291,7 +333,7 @@ func (d *FRPDriver) ID() string { return frpID }
 // Describe implements engine.Describer (PROTOCOL-REQUESTS R3).
 func (d *FRPDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: frpID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"role":"server|client","version":"","artifact":"","sha256":"","signature":"","server_addr":"","server_port":0,"token":"","remote_port":0,"local_addr":"","local_port":0,"dashboard_port":0,"allow_port_min":0,"allow_port_max":0}`)}
+		ParamsSchema: json.RawMessage(`{"role":"server|client","version":"","artifact":"","sha256":"","signature":"","server_addr":"","server_port":0,"token":"","remote_port":0,"local_addr":"","local_port":0,"dashboard_port":0,"allow_port_min":0,"allow_port_max":0,"proxy_type":"tcp|udp","transport":"tcp|kcp|quic|websocket","use_encryption":false,"use_compression":false}`)}
 }
 
 // EnsureBinary implements engine.Driver: downloads and verifies the
@@ -339,14 +381,27 @@ func frpEngineDir() string {
 }
 
 // frpRenderConfig renders the frps/frpc TOML for one instance. The token
-// charset was validated, so plain quoting is safe.
+// charset was validated, so plain quoting is safe. OVERNIGHT-A: the proxy
+// block gains type/useEncryption/useCompression (defaults keep the
+// historical tcp shape), and the transport.protocol block rides both ends
+// when a non-tcp carrier is chosen (kcp/quic/websocket — upstream
+// SupportedTransportProtocols; the control AND data carrier port stays
+// server_port).
 func frpRenderConfig(tunnelID, role string, p frpParams) string {
 	var b strings.Builder
+	proxyType := strings.ToLower(strings.TrimSpace(p.ProxyType))
+	if proxyType == "" {
+		proxyType = "tcp"
+	}
+	transport := strings.ToLower(strings.TrimSpace(p.Transport))
 	switch role {
 	case "server":
 		fmt.Fprintf(&b, "bindAddr = \"0.0.0.0\"\n")
 		fmt.Fprintf(&b, "bindPort = %d\n", p.ServerPort)
 		fmt.Fprintf(&b, "auth.token = \"%s\"\n", p.Token)
+		if transport != "" && transport != "tcp" {
+			fmt.Fprintf(&b, "transport.protocol = \"%s\"\n", transport)
+		}
 		fmt.Fprintf(&b, "webServer.addr = \"127.0.0.1\"\n")
 		fmt.Fprintf(&b, "webServer.port = %d\n", p.DashPort)
 		fmt.Fprintf(&b, "webServer.user = \"quantum\"\n")
@@ -356,12 +411,21 @@ func frpRenderConfig(tunnelID, role string, p frpParams) string {
 		fmt.Fprintf(&b, "serverAddr = \"%s\"\n", p.ServerAddr)
 		fmt.Fprintf(&b, "serverPort = %d\n", p.ServerPort)
 		fmt.Fprintf(&b, "auth.token = \"%s\"\n", p.Token)
+		if transport != "" && transport != "tcp" {
+			fmt.Fprintf(&b, "transport.protocol = \"%s\"\n", transport)
+		}
 		fmt.Fprintf(&b, "[[proxies]]\n")
 		fmt.Fprintf(&b, "name = \"%s\"\n", tunnelID)
-		fmt.Fprintf(&b, "type = \"tcp\"\n")
+		fmt.Fprintf(&b, "type = \"%s\"\n", proxyType)
 		fmt.Fprintf(&b, "localIP = \"%s\"\n", p.LocalAddr)
 		fmt.Fprintf(&b, "localPort = %d\n", p.LocalPort)
 		fmt.Fprintf(&b, "remotePort = %d\n", p.RemotePort)
+		if p.UseEncryption {
+			b.WriteString("useEncryption = true\n")
+		}
+		if p.UseCompression {
+			b.WriteString("useCompression = true\n")
+		}
 	}
 	return b.String()
 }
@@ -452,8 +516,14 @@ func (d *FRPDriver) Start(ctx context.Context, inst engine.Instance) error {
 	go engineSupervise(st.stop, st, st.binPath, st.cfg, frpSpawn) // one goroutine per RUNNING instance
 	// Wire accounting is installed on the server side only (the client's
 	// control port is shared across instances and cannot be attributed).
+	// kcp/quic carriers are UDP sockets — their rules ride the -p udp
+	// accounting variant (OVERNIGHT-A).
 	if role == "server" {
-		if err := acctWireRulesAdd(acctChainsDriver, inst.TunnelID, p.AllowMin, p.AllowMax); err != nil {
+		proto := "tcp"
+		if frpUDPCarrier(p.Transport) {
+			proto = "udp"
+		}
+		if err := acctWireRulesAddProto(acctChainsDriver, inst.TunnelID, p.AllowMin, p.AllowMax, proto); err != nil {
 			// Data plane still runs; counters become Unknown honestly.
 			fmt.Fprintf(os.Stderr, "frp: wire accounting unavailable: %v\n", err)
 		}
@@ -477,7 +547,11 @@ func (d *FRPDriver) Stop(inst engine.Instance) error {
 	}
 	engineStopInst(&st.engineInst, func() {
 		if st.role == "server" {
-			_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, st.params.AllowMin, st.params.AllowMax)
+			proto := "tcp"
+			if frpUDPCarrier(st.params.Transport) {
+				proto = "udp"
+			}
+			_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, st.params.AllowMin, st.params.AllowMax, proto)
 		}
 	})
 	return nil

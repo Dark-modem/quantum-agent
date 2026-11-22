@@ -21,6 +21,13 @@ package agent
 // Validate with a clear message (TLS cert management is a separate
 // slice; fail closed rather than ship an unencrypted-shaped surprise).
 //
+// OVERNIGHT-A gap-close update: the carrier allowlist now covers the
+// cert-free relay carriers of the shipped binary (ws|tcp|dtls|quic|grpc|
+// http2|kcp|obfs-http|obfs-tls|ftcp|mws — all verified against the
+// upstream cmd/gost/register.go registration list), and mode=tcp|udp
+// picks rtcp|rudp. Cert-bound schemes (tls/mtls/h2/utls/http3/wt/ssh)
+// remain rejected — operator cert delivery is the documented next wave.
+//
 // Strictly typed args (no shell, no config file): the CLI form above is
 // fully specified by four typed fields, built with fmt.Sprintf and passed
 // as separate exec args — nothing free-form reaches a shell.
@@ -65,7 +72,34 @@ type gostParams struct {
 	CarrierAddr string `json:"carrier_addr"` // server: relay+ws listen "0.0.0.0:port"; client: dial "host:port"
 	PublicPort  int    `json:"public_port"`  // the PUBLIC data port opened on the foreign host (rtcp)
 	LocalAddr   string `json:"local_addr"`   // client-side target "127.0.0.1:port"
-	Transport   string `json:"transport"`    // "ws" (wss: see the header note — rejected for now)
+	Transport   string `json:"transport"`    // carrier scheme, default ws (see gostAllowedTransports)
+	// Mode picks the reverse-forwarding family (OVERNIGHT-A gap-close):
+	// "tcp" (default) = rtcp (public TCP port on the foreign host);
+	// "udp" = rudp (public UDP port). "" = tcp for backward compat.
+	Mode string `json:"mode,omitempty"`
+}
+
+// gostAllowedTransports is the relay-carrier allowlist (OVERNIGHT-A
+// gap-close), mirrored from the shipped binary's registration list
+// (upstream cmd/gost/register.go): every entry below has a listener
+// package in go-gost/x and composes with the relay handler as
+// "relay+<scheme>". Cert/key-bound schemes (tls, mtls, h2, utls, http3,
+// wt, ssh, sshd, icmp, ws-with-TLS) stay out — no operator certs flow
+// through engine_params yet; they are the documented next wave. UDP
+// carriers (quic, kcp, dtls) switch the wire accounting to -p udp.
+var gostAllowedTransports = map[string]bool{
+	"ws": true, "tcp": true, "dtls": true, "quic": true, "grpc": true,
+	"http2": true, "kcp": true, "obfs-http": true, "obfs-tls": true,
+	"ftcp": true, "mws": true,
+}
+
+// gostUDPCarrier reports the transports whose carrier socket is UDP.
+func gostUDPCarrier(transport string) bool {
+	switch strings.ToLower(strings.TrimSpace(transport)) {
+	case "quic", "kcp", "dtls":
+		return true
+	}
+	return false
 }
 
 func (p gostParams) gostArtifactPin() (name, sha256Hex, sigB64 string, err error) {
@@ -91,11 +125,16 @@ func gostValidateParams(p gostParams) error {
 		return err
 	}
 	t := strings.ToLower(strings.TrimSpace(p.Transport))
-	if t != "ws" {
-		if t == "wss" {
-			return fmt.Errorf("gost: transport wss is not implemented yet (TLS cert management is a separate slice) — use ws")
-		}
-		return fmt.Errorf("gost: transport must be ws (one carrier family by design; wss pending TLS cert management)")
+	if t == "" {
+		t = "ws" // historical default (backward compatible)
+	}
+	if !gostAllowedTransports[t] {
+		return fmt.Errorf("gost: transport %q not supported yet (carrier allowlist: ws|tcp|dtls|quic|grpc|http2|kcp|obfs-http|obfs-tls|ftcp|mws; cert-bound tls/mtls/h2/utls/http3/wt/ssh are the next wave)", p.Transport)
+	}
+	switch strings.ToLower(strings.TrimSpace(p.Mode)) {
+	case "", "tcp", "udp":
+	default:
+		return fmt.Errorf("gost: mode %q not supported (tcp|udp — rtcp|rudp)", p.Mode)
 	}
 	if _, port, err := net.SplitHostPort(strings.TrimSpace(p.CarrierAddr)); err != nil || port == "" {
 		return fmt.Errorf("gost: carrier_addr must be host:port")
@@ -146,7 +185,7 @@ func (d *GostDriver) ID() string { return gostID }
 
 func (d *GostDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: gostID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","carrier_addr":"0.0.0.0:23344","public_port":0,"local_addr":"127.0.0.1:5201","transport":"ws"}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","carrier_addr":"0.0.0.0:23344","public_port":0,"local_addr":"127.0.0.1:5201","transport":"ws|tcp|dtls|quic|grpc|http2|kcp|obfs-http|obfs-tls|ftcp|mws","mode":"tcp|udp"}`)}
 }
 
 func (d *GostDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
@@ -226,15 +265,32 @@ var gostSpawn = func(binPath string, args []string) (frpProcess, error) {
 	return &frpExecProcess{cmd: cmd, done: done}, nil
 }
 
+// gostCarrierScheme resolves the end's carrier scheme: the validated
+// transport, defaulting to the historical "ws" (backward compatible —
+// the empty string was and stays ws).
+func gostCarrierScheme(p gostParams) string {
+	t := strings.ToLower(strings.TrimSpace(p.Transport))
+	if t == "" {
+		return "ws"
+	}
+	return t
+}
+
 // gostArgs renders the end's strictly-typed CLI (see the header for the
-// verified upstream forms).
+// verified upstream forms). OVERNIGHT-A: the scheme composes the chosen
+// carrier (relay+<transport>), and mode=udp swaps the client's rtcp
+// listener for rudp (reverse UDP forwarding).
 func gostArgs(role, transport string, p gostParams) []string {
 	if role == "server" {
 		return []string{"-L", fmt.Sprintf("relay+%s://:%d?bind=true",
 			transport, enginePortOf(p.CarrierAddr))}
 	}
+	fwd := "rtcp"
+	if strings.EqualFold(strings.TrimSpace(p.Mode), "udp") {
+		fwd = "rudp"
+	}
 	return []string{
-		"-L", fmt.Sprintf("rtcp://:%d/%s", p.PublicPort, strings.TrimSpace(p.LocalAddr)),
+		"-L", fmt.Sprintf("%s://:%d/%s", fwd, p.PublicPort, strings.TrimSpace(p.LocalAddr)),
 		"-F", fmt.Sprintf("relay+%s://%s", transport, strings.TrimSpace(p.CarrierAddr)),
 	}
 }
@@ -272,7 +328,7 @@ func (d *GostDriver) Start(ctx context.Context, inst engine.Instance) error {
 		return err
 	}
 	binPath := filepath.Join(binDir, "gost")
-	proc, err := gostSpawn(binPath, gostArgs(role, strings.ToLower(strings.TrimSpace(p.Transport)), p))
+	proc, err := gostSpawn(binPath, gostArgs(role, gostCarrierScheme(p), p))
 	if err != nil {
 		return err
 	}
@@ -280,11 +336,15 @@ func (d *GostDriver) Start(ctx context.Context, inst engine.Instance) error {
 		binPath: binPath}, params: p, role: role}
 	d.runs.put(inst.TunnelID, st)
 	go engineSupervise(st.stop, st, st.binPath, "", func(b, _ string) (frpProcess, error) {
-		return gostSpawn(b, gostArgs(st.role, strings.ToLower(strings.TrimSpace(st.params.Transport)), st.params))
+		return gostSpawn(b, gostArgs(st.role, gostCarrierScheme(st.params), st.params))
 	})
 	if role == "server" {
 		if port := enginePortOf(p.CarrierAddr); port > 0 {
-			if err := acctWireRulesAdd(acctChainsDriver, inst.TunnelID, port, port); err != nil {
+			proto := "tcp"
+			if gostUDPCarrier(p.Transport) {
+				proto = "udp"
+			}
+			if err := acctWireRulesAddProto(acctChainsDriver, inst.TunnelID, port, port, proto); err != nil {
 				fmt.Fprintf(os.Stderr, "gost: wire accounting unavailable: %v\n", err)
 			}
 		}
@@ -308,7 +368,11 @@ func (d *GostDriver) Stop(inst engine.Instance) error {
 	engineStopInst(&st.engineInst, func() {
 		if st.role == "server" {
 			if port := enginePortOf(st.params.CarrierAddr); port > 0 {
-				_ = acctWireRulesDel(acctChainsDriver, inst.TunnelID, port, port)
+				proto := "tcp"
+				if gostUDPCarrier(st.params.Transport) {
+					proto = "udp"
+				}
+				_ = acctWireRulesDelProto(acctChainsDriver, inst.TunnelID, port, port, proto)
 			}
 		}
 	})
@@ -345,6 +409,11 @@ func (d *GostDriver) Health(inst engine.Instance) engine.Health {
 	}
 	if st.role != "server" {
 		return engine.Health{OK: true, Detail: "gost client running", LatencyMs: -1}
+	}
+	// rudp (mode=udp) binds a UDP public port — a TCP dial can never prove
+	// it; the process-alive check stays the honest signal (OVERNIGHT-A).
+	if strings.EqualFold(strings.TrimSpace(st.params.Mode), "udp") {
+		return engine.Health{OK: true, Detail: "gost server running (rudp mode; dial gate N/A)", LatencyMs: -1}
 	}
 	start := time.Now()
 	delays := []time.Duration{0, 300 * time.Millisecond, 800 * time.Millisecond}

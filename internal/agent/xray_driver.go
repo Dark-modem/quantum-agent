@@ -61,6 +61,24 @@ type xrayParams struct {
 	Flow              string `json:"flow"`     // e.g. xtls-rprx-vision
 	UUID              string `json:"uuid"`     // VLESS user id
 	APIPort           int    `json:"api_port"` // loopback StatsService port (server end; 0 = off)
+	// Transport picks the carrier under REALITY (OVERNIGHT-A gap-close):
+	// upstream infra/conf/transport_internet.go TransportProtocol.Build —
+	// REALITY supports RAW(tcp), XHTTP and gRPC only. Default tcp (the
+	// historical shape). ws/httpupgrade are upstream-deprecated AND not
+	// reality-capable; tls/other protocols are the cert-bound next wave.
+	Transport string `json:"transport,omitempty"`
+	// XHTTPPath is the xhttpSettings path (default "/"; both ends must
+	// match — the panel sends one params object to both ends).
+	XHTTPPath string `json:"xhttp_path,omitempty"`
+	// GrpcServiceName is the grpcSettings serviceName (default
+	// "quantum-reverse"; both ends must match).
+	GrpcServiceName string `json:"grpc_service_name,omitempty"`
+}
+
+// xrayAllowedTransports mirrors the REALITY-capable upstream transports
+// (transport_internet.go: "REALITY only supports RAW, XHTTP and gRPC").
+var xrayAllowedTransports = map[string]bool{
+	"": true, "tcp": true, "xhttp": true, "grpc": true,
 }
 
 func (p xrayParams) xrayArtifactPin() (name, sha256Hex, sigB64 string, err error) {
@@ -122,6 +140,25 @@ func xrayValidateParams(p xrayParams) error {
 	}
 	if strings.Contains(p.Flow, "\"") || strings.Contains(p.Flow, "\n") || len(p.Flow) > 64 {
 		return fmt.Errorf("xray: flow invalid")
+	}
+	// OVERNIGHT-A transport allowlist (REALITY-capable only, see the
+	// params note) + the per-transport sub-params' charset discipline
+	// (both ride the JSON config, so quotes/backslashes are injection).
+	switch strings.ToLower(strings.TrimSpace(p.Transport)) {
+	case "", "tcp", "xhttp", "grpc":
+	default:
+		return fmt.Errorf("xray: transport %q not supported under REALITY (tcp|xhttp|grpc; ws/httpupgrade are upstream-deprecated and not reality-capable; tls is the cert-bound next wave)", p.Transport)
+	}
+	if p.XHTTPPath != "" {
+		if len(p.XHTTPPath) > 128 || !strings.HasPrefix(p.XHTTPPath, "/") ||
+			strings.ContainsAny(p.XHTTPPath, "\"'\\\n\r ") {
+			return fmt.Errorf("xray: xhttp_path must be a /-rooted 1-128 char path without quotes/whitespace")
+		}
+	}
+	if p.GrpcServiceName != "" {
+		if len(p.GrpcServiceName) > 64 || strings.ContainsAny(p.GrpcServiceName, "\"'\\\n\r ") {
+			return fmt.Errorf("xray: grpc_service_name must be 1-64 chars without quotes/whitespace")
+		}
 	}
 	// The driver's carrier is ALWAYS the bridge/portal reverse link, whose
 	// underlying protocol is mux.cool (upstream docs: "the reverse proxy
@@ -195,6 +232,22 @@ type xrayStreamSettings struct {
 	Network  string             `json:"network"`
 	Security string             `json:"security"`
 	Reality  *xrayRealityServer `json:"realitySettings,omitempty"`
+	XHTTP    *xrayXHTTPSettings `json:"xhttpSettings,omitempty"`
+	GRPC     *xrayGRPCSettings  `json:"grpcSettings,omitempty"`
+}
+
+// xrayXHTTPSettings is the xhttpSettings block (upstream
+// infra/conf/transport_method.go SplitHTTPConfig — path is the field both
+// ends must share; everything else keeps upstream defaults).
+type xrayXHTTPSettings struct {
+	Path string `json:"path,omitempty"`
+	Mode string `json:"mode,omitempty"`
+}
+
+// xrayGRPCSettings is the grpcSettings block (upstream GRPCConfig —
+// serviceName is the field both ends must share).
+type xrayGRPCSettings struct {
+	ServiceName string `json:"serviceName,omitempty"`
 }
 
 type xraySockopt struct {
@@ -239,6 +292,58 @@ type xrayStreamClient struct {
 	Network  string             `json:"network"`
 	Security string             `json:"security"`
 	Reality  *xrayRealityClient `json:"realitySettings,omitempty"`
+	XHTTP    *xrayXHTTPSettings `json:"xhttpSettings,omitempty"`
+	GRPC     *xrayGRPCSettings  `json:"grpcSettings,omitempty"`
+}
+
+// xrayCarrierTransport resolves the validated carrier transport ("tcp"
+// when empty) — the same string rides both ends' streamSettings.network.
+func xrayCarrierTransport(p xrayParams) string {
+	t := strings.ToLower(strings.TrimSpace(p.Transport))
+	if t == "" {
+		return "tcp"
+	}
+	return t
+}
+
+// xrayStreamTransport applies the chosen transport to a SERVER-end
+// streamSettings (tcp keeps the historical bare shape — no sub-blocks).
+func xrayStreamTransport(s *xrayStreamSettings, p xrayParams) {
+	s.Network = xrayCarrierTransport(p)
+	switch s.Network {
+	case "xhttp":
+		path := p.XHTTPPath
+		if path == "" {
+			path = "/"
+		}
+		s.XHTTP = &xrayXHTTPSettings{Path: path}
+	case "grpc":
+		name := p.GrpcServiceName
+		if name == "" {
+			name = "quantum-reverse"
+		}
+		s.GRPC = &xrayGRPCSettings{ServiceName: name}
+	}
+}
+
+// xrayStreamClientTransport is the client-end mirror of
+// xrayStreamTransport (same fields, client reality struct).
+func xrayStreamClientTransport(s *xrayStreamClient, p xrayParams) {
+	s.Network = xrayCarrierTransport(p)
+	switch s.Network {
+	case "xhttp":
+		path := p.XHTTPPath
+		if path == "" {
+			path = "/"
+		}
+		s.XHTTP = &xrayXHTTPSettings{Path: path}
+	case "grpc":
+		name := p.GrpcServiceName
+		if name == "" {
+			name = "quantum-reverse"
+		}
+		s.GRPC = &xrayGRPCSettings{ServiceName: name}
+	}
 }
 
 type xrayOutbound struct {
@@ -365,6 +470,9 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 		}
 		cfg.Outbounds = []xrayOutbound{{Tag: "direct", Protocol: "freedom"}}
 		cfg.Reverse = &xrayReverse{Portals: []xrayPortal{{Tag: "rev-portal", Domain: xrayPortalDomain}}}
+		// OVERNIGHT-A: the carrier transport rides the Reality inbound
+		// (tcp keeps the bare shape; xhttp/grpc add their settings blocks).
+		xrayStreamTransport(cfg.Inbounds[0].StreamSettings, p)
 		cfg.Routing = &xrayRouting{Rules: []xrayRoutingRule{
 			{Type: "field", InboundTag: []string{"vless-in"}, OutboundTag: "rev-portal"},
 			{Type: "field", InboundTag: []string{"dokodemo-" + fmt.Sprint(p.PublicPort)}, OutboundTag: "rev-portal"},
@@ -419,20 +527,24 @@ func xrayBuildConfig(role engineSide, p xrayParams) xrayConfig {
 	}
 	// Bridge: the vless outbound dials OUT through Reality; the reverse
 	// bridge rides it and forwards to freedom (the Iran-local service).
-	cfg.Outbounds = []xrayOutbound{
-		{Tag: "carrier-out", Protocol: "vless",
-			StreamSettings: &xrayStreamClient{
-				Network: "tcp", Security: "reality",
-				Reality: &xrayRealityClient{
-					Show: false, Fingerprint: "chrome", ServerName: p.ServerName,
-					PublicKey: p.RealityPublicKey, ShortID: p.ShortID, SpiderX: "",
-				},
-			},
-			Settings: &xrayOutboundSettings{
-				Vnext: []xrayVnext{{Address: p.RemoteAddr, Port: p.CarrierPort,
-					Users: []xrayUser{{ID: p.UUID, Flow: p.Flow, Encryption: "none"}}}},
+	carrierOut := xrayOutbound{
+		Tag: "carrier-out", Protocol: "vless",
+		StreamSettings: &xrayStreamClient{
+			Network: "tcp", Security: "reality",
+			Reality: &xrayRealityClient{
+				Show: false, Fingerprint: "chrome", ServerName: p.ServerName,
+				PublicKey: p.RealityPublicKey, ShortID: p.ShortID, SpiderX: "",
 			},
 		},
+		Settings: &xrayOutboundSettings{
+			Vnext: []xrayVnext{{Address: p.RemoteAddr, Port: p.CarrierPort,
+				Users: []xrayUser{{ID: p.UUID, Flow: p.Flow, Encryption: "none"}}}},
+		},
+	}
+	// OVERNIGHT-A: mirror the server's carrier transport on the dialing
+	// end (xhttp/grpc settings must match both ends exactly).
+	xrayStreamClientTransport(carrierOut.StreamSettings, p)
+	cfg.Outbounds = []xrayOutbound{carrierOut,
 		{Tag: "local", Protocol: "freedom"},
 		// The warmup probe's answer: connections the portal sent down the
 		// reverse channel asking for probe.quantum get an HTTP response
@@ -479,7 +591,7 @@ func (d *XrayDriver) ID() string { return xrayID }
 
 func (d *XrayDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: xrayID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","remote_addr":"","carrier_port":0,"public_port":0,"local_addr":"","local_port":0,"server_name":"","dest":"","short_id":"","reality_public_key":"","reality_private_key":"","flow":"xtls-rprx-vision","uuid":"","api_port":0}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","remote_addr":"","carrier_port":0,"public_port":0,"local_addr":"","local_port":0,"server_name":"","dest":"","short_id":"","reality_public_key":"","reality_private_key":"","flow":"","uuid":"","api_port":0,"transport":"tcp|xhttp|grpc","xhttp_path":"/","grpc_service_name":"quantum-reverse"}`)}
 }
 
 // EnsureBinary: the Manager calls this before the first instance starts;

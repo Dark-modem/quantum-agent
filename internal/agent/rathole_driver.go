@@ -62,6 +62,32 @@ type ratholeParams struct {
 	// client in a later desired revision (same dance as WG peer_public).
 	// The private key NEVER leaves the server agent.
 	NoiseServerPublic string `json:"noise_server_public,omitempty"`
+	// Transport picks the carrier (OVERNIGHT-A gap-close): upstream
+	// src/config.rs TransportType = tcp|tls|noise|websocket. "" and
+	// "noise" keep the historical encrypted shape (backward compatible);
+	// "tcp" is the plain carrier; "websocket" is plain ws (upstream
+	// websocket.tls=false — no operator certs). "tls" needs operator
+	// cert/key files on both ends — rejected fail-closed (next wave).
+	Transport string `json:"transport,omitempty"`
+	// ServiceType picks the per-service forwarding protocol: upstream
+	// ServiceType = tcp|udp. "" = tcp (historical shape). udp renders
+	// `type = "udp"` into BOTH ends' service blocks.
+	ServiceType string `json:"service_type,omitempty"`
+	// PreferIPv6 renders upstream's per-service prefer_ipv6 (client side).
+	PreferIPv6 bool `json:"prefer_ipv6,omitempty"`
+}
+
+// ratholeAllowedTransports mirrors upstream TransportType (config.rs).
+// tls is deliberately absent: it requires cert/key files the panel does
+// not deliver yet — fail closed with a clear message instead of an
+// upstream startup error.
+var ratholeAllowedTransports = map[string]bool{
+	"": true, "noise": true, "tcp": true, "websocket": true,
+}
+
+// ratholeServiceTypes mirrors upstream ServiceType (config.rs).
+var ratholeServiceTypes = map[string]bool{
+	"": true, "tcp": true, "udp": true,
 }
 
 func (p ratholeParams) ratholeArtifactPin() (name, sha256Hex, sigB64 string, err error) {
@@ -114,6 +140,23 @@ func ratholeValidateParams(p ratholeParams) error {
 		if strings.ContainsAny(p.NoiseServerPublic, "\"'\n\r\\") {
 			return fmt.Errorf("rathole: noise_server_public not TOML-safe")
 		}
+	}
+	transport := strings.ToLower(strings.TrimSpace(p.Transport))
+	if !ratholeAllowedTransports[transport] {
+		if transport == "tls" {
+			return fmt.Errorf("rathole: transport tls needs operator cert/key files on both ends — not supported yet (use noise, tcp or websocket)")
+		}
+		return fmt.Errorf("rathole: transport %q not supported (noise|tcp|websocket)", p.Transport)
+	}
+	// The noise key dance is noise-only ("" IS noise — the historical
+	// default): a noise_server_public on a non-noise carrier would never
+	// be read upstream — reject it rather than silently carry a dead
+	// secret.
+	if transport != "" && transport != "noise" && p.NoiseServerPublic != "" {
+		return fmt.Errorf("rathole: noise_server_public is only valid with transport=noise (got %q)", p.Transport)
+	}
+	if !ratholeServiceTypes[strings.ToLower(strings.TrimSpace(p.ServiceType))] {
+		return fmt.Errorf("rathole: service_type %q not supported (tcp|udp)", p.ServiceType)
 	}
 	return nil
 }
@@ -177,7 +220,7 @@ func (d *RatholeDriver) ID() string { return ratholeID }
 
 func (d *RatholeDriver) Describe() engine.EngineInfo {
 	return engine.EngineInfo{ID: ratholeID, Version: panelVersion,
-		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:2333","service_addr":"0.0.0.0:5202","local_addr":"127.0.0.1:5201","token":"","noise_server_public":""}`)}
+		ParamsSchema: json.RawMessage(`{"server_side":"","version":"","artifact":"..{arch}..","server_addr":"0.0.0.0:2333","service_addr":"0.0.0.0:5202","local_addr":"127.0.0.1:5201","token":"","noise_server_public":"","transport":"noise|tcp|websocket","service_type":"tcp|udp","prefer_ipv6":false}`)}
 }
 
 func (d *RatholeDriver) EnsureBinary(ctx context.Context) (string, error) { return "", nil }
@@ -209,27 +252,60 @@ func ratholeServiceName(tunnelID string) string {
 	return "q" + tunnelID
 }
 
-// ratholeRenderConfig renders the end's TOML with the noise transport
-// (the candidates doc's pick: encrypted reverse tunnel). The server holds
-// the noise PRIVATE key (generated on that agent, 0600 state); the client
-// is pushed the server's PUBLIC key via the desired revision.
+// ratholeRenderConfig renders the end's TOML. OVERNIGHT-A: the transport
+// block follows the chosen carrier — noise keeps the historical NK blocks;
+// tcp is upstream's default (no block at all); websocket renders the plain
+// ws pair (tls=false, no operator certs). The per-service type follows
+// service_type (tcp default / udp), and prefer_ipv6 rides the client
+// service block. The server holds the noise PRIVATE key (generated on that
+// agent, 0600 state) only on the noise carrier; the client is pushed the
+// server's PUBLIC key via the desired revision.
 func ratholeRenderConfig(role, svc string, p ratholeParams, noisePrivB64 string) string {
 	var b strings.Builder
+	transport := strings.ToLower(strings.TrimSpace(p.Transport))
+	svcType := strings.ToLower(strings.TrimSpace(p.ServiceType))
 	if role == "server" {
 		b.WriteString("[server]\n")
 		fmt.Fprintf(&b, "bind_addr = %q\n", p.ServerAddr)
 		b.WriteString("heartbeat_interval = 30\n")
-		b.WriteString("[server.transport]\ntype = \"noise\"\n")
-		fmt.Fprintf(&b, "[server.transport.noise]\nlocal_private_key = %q\n", noisePrivB64)
-		fmt.Fprintf(&b, "\n[server.services.%s]\ntoken = %q\nbind_addr = %q\n", svc, p.Token, p.ServiceAddr)
+		switch transport {
+		case "", "noise":
+			b.WriteString("[server.transport]\ntype = \"noise\"\n")
+			fmt.Fprintf(&b, "[server.transport.noise]\nlocal_private_key = %q\n", noisePrivB64)
+		case "websocket":
+			b.WriteString("[server.transport]\ntype = \"websocket\"\n")
+			b.WriteString("[server.transport.websocket]\ntls = false\n")
+		case "tcp":
+			// upstream default — no transport block
+		}
+		fmt.Fprintf(&b, "\n[server.services.%s]\n", svc)
+		if svcType == "udp" {
+			b.WriteString("type = \"udp\"\n")
+		}
+		fmt.Fprintf(&b, "token = %q\nbind_addr = %q\n", p.Token, p.ServiceAddr)
 		return b.String()
 	}
 	b.WriteString("[client]\n")
 	fmt.Fprintf(&b, "remote_addr = %q\n", p.ServerAddr)
 	b.WriteString("heartbeat_timeout = 40\nretry_interval = 3\n")
-	b.WriteString("[client.transport]\ntype = \"noise\"\n")
-	fmt.Fprintf(&b, "[client.transport.noise]\nremote_public_key = %q\n", p.NoiseServerPublic)
-	fmt.Fprintf(&b, "\n[client.services.%s]\ntoken = %q\nlocal_addr = %q\n", svc, p.Token, p.LocalAddr)
+	switch transport {
+	case "", "noise":
+		b.WriteString("[client.transport]\ntype = \"noise\"\n")
+		fmt.Fprintf(&b, "[client.transport.noise]\nremote_public_key = %q\n", p.NoiseServerPublic)
+	case "websocket":
+		b.WriteString("[client.transport]\ntype = \"websocket\"\n")
+		b.WriteString("[client.transport.websocket]\ntls = false\n")
+	case "tcp":
+		// upstream default — no transport block
+	}
+	fmt.Fprintf(&b, "\n[client.services.%s]\n", svc)
+	if svcType == "udp" {
+		b.WriteString("type = \"udp\"\n")
+	}
+	if p.PreferIPv6 {
+		b.WriteString("prefer_ipv6 = true\n")
+	}
+	fmt.Fprintf(&b, "token = %q\nlocal_addr = %q\n", p.Token, p.LocalAddr)
 	return b.String()
 }
 
@@ -358,14 +434,18 @@ func (d *RatholeDriver) Start(ctx context.Context, inst engine.Instance) error {
 	if err != nil {
 		return err
 	}
+	transport := strings.ToLower(strings.TrimSpace(p.Transport))
+	noiseMode := transport == "" || transport == "noise"
 	var noisePrivB64 string
-	if role == "server" {
+	if role == "server" && noiseMode {
 		noisePrivB64, err = ratholeNoisePrivateKey(inst.TunnelID)
 		if err != nil {
 			return fmt.Errorf("rathole: noise key: %w", err)
 		}
-	} else if strings.TrimSpace(p.NoiseServerPublic) == "" {
-		return fmt.Errorf("rathole: client end needs noise_server_public (the server's acked key) — fail closed")
+	} else if role == "client" && noiseMode {
+		if strings.TrimSpace(p.NoiseServerPublic) == "" {
+			return fmt.Errorf("rathole: client end needs noise_server_public (the server's acked key) — fail closed")
+		}
 	}
 	binDir, err := ratholeEnsureBinary(ctx, p)
 	if err != nil {
@@ -494,6 +574,12 @@ func (d *RatholeDriver) Health(inst engine.Instance) engine.Health {
 	port := enginePortOf(st.params.ServiceAddr)
 	if port <= 0 {
 		return engine.Health{OK: true, Detail: "rathole server running (no service port)", LatencyMs: -1}
+	}
+	// UDP services bind a UDP socket — a TCP dial can never prove
+	// registration there; the process-alive check above stays the honest
+	// signal (OVERNIGHT-A service_type=udp gap-close).
+	if strings.EqualFold(strings.TrimSpace(st.params.ServiceType), "udp") {
+		return engine.Health{OK: true, Detail: "rathole server running (udp service; dial gate N/A)", LatencyMs: -1}
 	}
 	start := time.Now()
 	delays := []time.Duration{0, 300 * time.Millisecond, 800 * time.Millisecond}

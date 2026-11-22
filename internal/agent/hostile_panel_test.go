@@ -131,7 +131,7 @@ func TestHostileBackhaulParamsFailClosed(t *testing.T) {
 		ServerSide: "iran", Version: "0.7.2", Artifact: "backhaul-{arch}.tar.gz",
 		SHA256Amd: strings.Repeat("ab", 32), SigAmd: strings.Repeat("A", 68),
 		SHA256Arm: strings.Repeat("cd", 32), SigArm: strings.Repeat("B", 68),
-		Transport: "tls", Token: "tok-12345678", BindAddr: "0.0.0.0:443",
+		Transport: "tcp", Token: "tok-12345678", BindAddr: "0.0.0.0:443",
 		RemoteAddr: "198.51.100.9:443", Ports: []string{"5201=127.0.0.1:5201"}, WebPort: 0,
 	}
 	for _, field := range []struct {
@@ -175,6 +175,20 @@ func TestHostileBackhaulParamsFailClosed(t *testing.T) {
 }
 
 func field2Backhaul(p backhaulParams, v string) backhaulParams { p.Transport = v; return p }
+
+// TestBackhaulPhantomTLSRejected pins the OVERNIGHT-A audit finding:
+// upstream v0.7.2 has NO plain tls transport (config.TransportType has no
+// such constant and both switch tables would fall to default-fatal), so
+// the driver must refuse it instead of rendering a config upstream exits
+// on. The old hostile baseline used transport=tls as VALID — that made
+// the phantom look real; tcp is the honest baseline now.
+func TestBackhaulPhantomTLSRejected(t *testing.T) {
+	for _, v := range []string{"tls", "TLS", " tls", "grpc", "quic"} {
+		if err := backhaulValidateParams(field2Backhaul(backhaulTestParams(), v)); err == nil {
+			t.Fatalf("backhaul transport %q must fail", v)
+		}
+	}
+}
 
 func TestHostileRatholeGostWstChiselParamsFailClosed(t *testing.T) {
 	// rathole: host:port fields (charset + SplitHostPort) and token.
