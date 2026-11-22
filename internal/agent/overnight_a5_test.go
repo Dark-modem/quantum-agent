@@ -341,3 +341,118 @@ func TestWaterwallLabDump(t *testing.T) {
 	}
 	t.Logf("lab configs dumped to %s", dir)
 }
+
+// ---- OVERNIGHT-A6: the singbox L3 ingress family + the waterwall reverse ----
+
+func TestSingboxL3IngressFamily(t *testing.T) {
+	// tun: the D4 runtime-proven shape (address/auto_route/stack=gvisor-mixed).
+	p := singboxTestParams()
+	p.Protocol = "shadowsocks"
+	p.Ingress = "tun"
+	if err := singboxValidateParams(p); err != nil {
+		t.Fatalf("tun ingress rejected: %v", err)
+	}
+	cli := singboxRenderConfig("client", p)
+	b, _ := json.Marshal(cli)
+	s := string(b)
+	if !strings.Contains(s, `"type":"tun"`) || !strings.Contains(s, `"address":["172.19.0.1/30"]`) ||
+		!strings.Contains(s, `"auto_route":true`) || !strings.Contains(s, `"stack":"mixed"`) ||
+		!strings.Contains(s, `"inbound":["ingress-in"],"outbound":"carrier-out"`) {
+		t.Fatalf("tun ingress render wrong: %s", s)
+	}
+	// redirect: listens on local_port, Linux SO_ORIGINAL_DST shape.
+	p2 := singboxTestParams()
+	p2.Ingress = "redirect"
+	cli2 := singboxRenderConfig("client", p2)
+	b2, _ := json.Marshal(cli2)
+	if !strings.Contains(string(b2), `"type":"redirect"`) || !strings.Contains(string(b2), `"listen_port":21081`) {
+		t.Fatalf("redirect ingress render wrong: %s", string(b2))
+	}
+	// tproxy: network MUST be the JSON array — NEVER "tcp+udp" (the D4 trap).
+	p3 := singboxTestParams()
+	p3.Ingress = "tproxy"
+	cli3 := singboxRenderConfig("client", p3)
+	b3, _ := json.Marshal(cli3)
+	if !strings.Contains(string(b3), `"network":["tcp","udp"]`) || strings.Contains(string(b3), `"network":"tcp+udp"`) {
+		t.Fatalf("tproxy network render wrong (D4 trap): %s", string(b3))
+	}
+	// socks/http explicit entries.
+	for _, ing := range []string{"socks", "http", "mixed"} {
+		p4 := singboxTestParams()
+		p4.Ingress = ing
+		if err := singboxValidateParams(p4); err != nil {
+			t.Fatalf("%s ingress rejected: %v", ing, err)
+		}
+		b4, _ := json.Marshal(singboxRenderConfig("client", p4))
+		if !strings.Contains(string(b4), `"type":"`+ing+`"`) {
+			t.Fatalf("%s ingress type missing: %s", ing, string(b4))
+		}
+	}
+	// hostile: unknown ingress, dead on tor/naive.
+	bad := singboxTestParams()
+	bad.Ingress = "wiretap"
+	if err := singboxValidateParams(bad); err == nil {
+		t.Fatalf("unknown ingress accepted")
+	}
+	bad.Ingress, bad.Protocol = "tun", "tor"
+	if err := singboxValidateParams(bad); err == nil {
+		t.Fatalf("ingress on tor accepted")
+	}
+	bad.Ingress, bad.Protocol, bad.NaiveUsername, bad.TLSCert, bad.TLSKey = "tun", "naive", "nv", "/c.pem", "/k.pem"
+	if err := singboxValidateParams(bad); err == nil {
+		t.Fatalf("ingress on naive accepted")
+	}
+}
+
+func TestWaterwallReverseChain(t *testing.T) {
+	p := wwTestParams()
+	p.Method = "reverse"
+	p.AuthPassword = "ww-rev-secret-01"
+	p.ReversePort = 27001
+	if err := waterwallValidateParams(p); err != nil {
+		t.Fatalf("reverse params rejected: %v", err)
+	}
+	srv := wwChain("server", p)
+	types := make([]string, 0, len(srv.Nodes))
+	for _, n := range srv.Nodes {
+		types = append(types, n.Type)
+	}
+	// server: carrier listener → ReverseServer → BridgeA; public listener → BridgeB
+	if !strings.Contains(strings.Join(types, ","), "TcpListener,ReverseServer,Bridge,TcpListener,Bridge") {
+		t.Fatalf("reverse server chain wrong: %v", types)
+	}
+	if srv.Nodes[2].Settings["pair"] != "bridge-b" || srv.Nodes[4].Settings["pair"] != "bridge-a" {
+		t.Fatalf("server bridge pair names wrong")
+	}
+	cli := wwChain("client", p)
+	ctypes := make([]string, 0, len(cli.Nodes))
+	for _, n := range cli.Nodes {
+		ctypes = append(ctypes, n.Type)
+	}
+	// client: BridgeC → ReverseClient → carrier dial; target → BridgeD
+	if !strings.Contains(strings.Join(ctypes, ","), "Bridge,ReverseClient,TcpConnector,TcpConnector,Bridge") {
+		t.Fatalf("reverse client chain wrong: %v", ctypes)
+	}
+	if cli.Nodes[0].Settings["pair"] != "bridge-d" || cli.Nodes[4].Settings["pair"] != "bridge-c" {
+		t.Fatalf("client bridge pair names wrong")
+	}
+	// the adjacency rule: Bridge is IMMEDIATELY before ReverseClient.
+	if cli.Nodes[0].Next != cli.Nodes[1].Name || cli.Nodes[1].Type != "ReverseClient" {
+		t.Fatalf("reverse adjacency broken")
+	}
+	// hostile: missing reverse_port, port collision, missing secret.
+	for name, mutate := range map[string]func(*waterwallParams){
+		"no reverse port": func(p *waterwallParams) { p.ReversePort = 0 },
+		"port collision":  func(p *waterwallParams) { p.ReversePort = 21500 },
+		"no secret":       func(p *waterwallParams) { p.AuthPassword = "" },
+	} {
+		bad := wwTestParams()
+		bad.Method = "reverse"
+		bad.AuthPassword = "ww-rev-secret-01"
+		bad.ReversePort = 27001
+		mutate(&bad)
+		if err := waterwallValidateParams(bad); err == nil {
+			t.Fatalf("waterwall reverse %s accepted", name)
+		}
+	}
+}
