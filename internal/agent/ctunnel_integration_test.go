@@ -53,10 +53,12 @@ import (
 )
 
 const (
-	ctUpstreamURL = "https://github.com/CIAUB/C-Tunnel/releases/download/v1.1.1/ctunnel-engine-linux-amd64"
-	// sha256 of the v1.1.1 ctunnel-engine-linux-amd64 release asset
-	// (verified against the upstream SHA256SUMS file during the audit).
-	ctUpstreamSHA = "c5deec0a4c996b82037d5b7961885f37342f3aae4a53090b80e9952e49edb370"
+	// The v2 binary comes from OUR published core release (the exact bytes
+	// the agents download — tarball sha256 verified before extraction).
+	ctUpstreamURL = "https://github.com/Dark-modem/quantum-cores/releases/download/ctunnel-v2.0.0/ctunnel-linux-amd64.tar.gz"
+	// sha256 of the ctunnel-v2.0.0 ctunnel-linux-amd64.tar.gz release asset
+	// (the AGENT-29 pack bytes; mirrored in quantum-cores ctunnel/MANIFEST.json).
+	ctUpstreamSHA = "19d6b3f0d64c57b7b9fb1231ceed8cb23219aee079e262c5c2abaf2b8da2cf32"
 
 	ctNSA   = "quantum-test-ct-a" // foreign end (ROLE=iran: passive carrier + public DNAT)
 	ctNSB   = "quantum-test-ct-b" // Iran end (ROLE=kharej: dials OUT + relay INPUT)
@@ -90,45 +92,78 @@ func ctIntSkip(t *testing.T) string {
 	return dir
 }
 
-// ctFetchEngine downloads (once, cached) the upstream release binary and
-// verifies it against the pinned sha256.
+// ctFetchEngine downloads (once, cached) the published v2 release tarball,
+// verifies its sha256, and extracts ctunnel_2.0.0/ctunnel-engine — the
+// M2 shape the production driver exercises (verify-then-extract).
 func ctFetchEngine(t *testing.T, dir string) []byte {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cache := filepath.Join(dir, "ctunnel-engine-bin")
+	cache := filepath.Join(dir, "ctunnel-artifact-bin")
+	var tarBytes []byte
 	if b, err := os.ReadFile(cache); err == nil {
 		sum := sha256.Sum256(b)
 		if hex.EncodeToString(sum[:]) != ctUpstreamSHA {
-			t.Fatal("cached ctunnel-engine does not match the pinned sha256")
+			t.Fatal("cached ctunnel artifact does not match the pinned sha256")
 		}
-		return b
+		tarBytes = b
 	}
-	resp, err := http.Get(ctUpstreamURL)
+	if tarBytes == nil {
+		resp, err := http.Get(ctUpstreamURL)
+		if err != nil {
+			t.Fatalf("download ctunnel artifact: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("download ctunnel artifact: HTTP %d", resp.StatusCode)
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(body)
+		if hex.EncodeToString(sum[:]) != ctUpstreamSHA {
+			t.Fatalf("downloaded ctunnel artifact sha256 mismatch (want %s)", ctUpstreamSHA)
+		}
+		tarBytes = body
+		if err := os.WriteFile(cache, tarBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Extract ctunnel_2.0.0/ctunnel-engine (the pack shape).
+	gz, err := gzip.NewReader(bytes.NewReader(tarBytes))
 	if err != nil {
-		t.Fatalf("download ctunnel-engine: %v", err)
+		t.Fatalf("artifact not gzip: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("download ctunnel-engine: HTTP %d", resp.StatusCode)
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	bin := []byte(nil)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Typeflag == tar.TypeDir || filepath.Base(hdr.Name) != "ctunnel-engine" {
+			continue
+		}
+		bin, err = io.ReadAll(io.LimitReader(tr, 64<<20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		break
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-	if err != nil {
-		t.Fatal(err)
+	if bin == nil {
+		t.Fatal("artifact carries no ctunnel-engine")
 	}
-	sum := sha256.Sum256(body)
-	if hex.EncodeToString(sum[:]) != ctUpstreamSHA {
-		t.Fatalf("downloaded ctunnel-engine sha256 mismatch (want %s)", ctUpstreamSHA)
-	}
-	if err := os.WriteFile(cache, body, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return body
+	return bin
 }
 
 // ctIntegrationArtifact wraps the REAL binary into the tar.gz the driver
-// extracts (ctunnel_1.1.1/ directory entry + binary + LICENSE).
+// extracts (ctunnel_2.0.0/ directory entry + binary + LICENSE).
 func ctIntegrationArtifact(t *testing.T, dir string, realBin []byte) (body []byte, shaHex, sigB64, pubB64 string) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -143,17 +178,17 @@ func ctIntegrationArtifact(t *testing.T, dir string, realBin []byte) (body []byt
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	if err := tw.WriteHeader(&tar.Header{Name: "ctunnel_1.1.1/", Mode: int64(0o755), Typeflag: tar.TypeDir}); err != nil {
+	if err := tw.WriteHeader(&tar.Header{Name: "ctunnel_2.0.0/", Mode: int64(0o755), Typeflag: tar.TypeDir}); err != nil {
 		t.Fatal(err)
 	}
-	if err := tw.WriteHeader(&tar.Header{Name: "ctunnel_1.1.1/ctunnel-engine", Mode: 0o755, Size: int64(len(realBin))}); err != nil {
+	if err := tw.WriteHeader(&tar.Header{Name: "ctunnel_2.0.0/ctunnel-engine", Mode: 0o755, Size: int64(len(realBin))}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tw.Write(realBin); err != nil {
 		t.Fatal(err)
 	}
 	lic := []byte("GNU AFFERO GENERAL PUBLIC LICENSE Version 3 — see the upstream CIAUB/C-Tunnel repository")
-	if err := tw.WriteHeader(&tar.Header{Name: "ctunnel_1.1.1/LICENSE", Mode: 0o644, Size: int64(len(lic))}); err != nil {
+	if err := tw.WriteHeader(&tar.Header{Name: "ctunnel_2.0.0/LICENSE", Mode: 0o644, Size: int64(len(lic))}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tw.Write(lic); err != nil {
@@ -654,4 +689,341 @@ func ctLogTail(t *testing.T, dir, tag string) string {
 		lines = lines[len(lines)-8:]
 	}
 	return strings.Join(lines, " | ")
+}
+
+// TestCtunnelIntegrationKernelLegs — REAL kernel-direct family legs over
+// the same lab topology shape (a veth carrier between two namespaces):
+//
+//	gre DIRECT      — both ends run the driver's kernel path (NO engine):
+//	                  ip link add type gre remote <peer carrier> + addr +
+//	                  MSS + notrack; the inner 10.77 pair pings THROUGH the
+//	                  gre device in BOTH directions; client payload counters
+//	                  move; Stop deletes the devices.
+//	vxlan DIRECT    — same shape with the vxlan device (dstport + VNI).
+//	icmp (engine)   — TUN + the REAL v2 ctunnel-engine on both ends; the
+//	                  sealed ICMP-echo carrier carries the inner pings.
+//
+// These legs prove the kernel/stealth data planes without the forward/
+// relay composition (that is proven by the dtls-1.3 leg + the relay leg):
+// the health-gate's through-probe needs the in-process relay, which binds
+// inside the ROOT namespace — a netns tunnel address is not bindable from
+// the test process, so the gate here is the inner ping itself. Honest
+// scope: launch + inner datapath + teardown, no throughput campaigns.
+func TestCtunnelIntegrationKernelLegs(t *testing.T) {
+	dir := ctIntSkip(t)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		knsA   = "quantum-test-ct-ka"
+		knsB   = "quantum-test-ct-kb"
+		kvethA = "v-ctk-a"
+		kvethB = "v-ctk-b"
+		kIPA   = "10.211.0.1"
+		kIPB   = "10.211.0.2"
+		kPort  = 24417
+	)
+	clean := func() {
+		for _, ns := range []string{knsA, knsB} {
+			exec.Command("sudo", "ip", "netns", "del", ns).Run()
+		}
+		for _, l := range []string{kvethA, kvethB} {
+			exec.Command("sudo", "ip", "link", "del", l).Run()
+		}
+	}
+	clean()
+	t.Cleanup(clean)
+	for _, c := range [][]string{
+		{"ip", "netns", "add", knsA}, {"ip", "netns", "add", knsB},
+		{"ip", "link", "add", kvethA, "type", "veth", "peer", "name", kvethB},
+		{"ip", "link", "set", kvethA, "netns", knsA},
+		{"ip", "link", "set", kvethB, "netns", knsB},
+	} {
+		if out, err := exec.Command("sudo", c...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v: %s", c, err, out)
+		}
+	}
+	runKNS := func(ns string, args ...string) (string, error) {
+		full := append([]string{"ip", "netns", "exec", ns}, args...)
+		out, err := exec.Command("sudo", full...).CombinedOutput()
+		return string(out), err
+	}
+	mustKNS := func(ns string, args ...string) string {
+		out, err := runKNS(ns, args...)
+		if err != nil {
+			t.Fatalf("netns exec %s %v: %v: %s", ns, args, err, out)
+		}
+		return out
+	}
+	mustKNS(knsA, "ip", "addr", "add", kIPA+"/30", "dev", kvethA)
+	mustKNS(knsA, "ip", "link", "set", kvethA, "up")
+	mustKNS(knsA, "ip", "link", "set", "lo", "up")
+	mustKNS(knsB, "ip", "addr", "add", kIPB+"/30", "dev", kvethB)
+	mustKNS(knsB, "ip", "link", "set", kvethB, "up")
+	mustKNS(knsB, "ip", "link", "set", "lo", "up")
+	if out, err := runKNS(knsA, "ping", "-c", "1", "-W", "2", kIPB); err != nil {
+		t.Fatalf("kernel-leg underlay unreachable: %v: %s", err, out)
+	}
+
+	origConfigDir := infra.ConfigDir
+	infra.ConfigDir = t.TempDir()
+	t.Cleanup(func() { infra.ConfigDir = origConfigDir })
+	origRunner := infra.Runner
+	infra.Runner = infra.ExecRunner
+	t.Cleanup(func() { infra.Runner = origRunner })
+
+	// Per-leg seams: interface + tc + wg + route-get + iptables + sysctl
+	// all land in the CURRENT leg namespace (serveKNS flips between the
+	// two Starts, exactly the server→client swap the main leg does).
+	serveKNS := knsA
+
+	// The artifact server (only the icmp leg needs the engine): the REAL
+	// published v2 tarball, re-signed by the leg's own ed25519 key — the
+	// R5 verify-then-extract path the production driver exercises.
+	realBin := ctFetchEngine(t, dir)
+	body, shaHex, sigB64, pubB64 := ctIntegrationArtifact(t, dir, realBin)
+	artLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artMux := http.NewServeMux()
+	artMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { w.Write(body) })
+	artSrv := &http.Server{Handler: artMux}
+	go artSrv.Serve(artLn)
+	defer artSrv.Close()
+	artURL := fmt.Sprintf("http://127.0.0.1:%d", artLn.Addr().(*net.TCPAddr).Port)
+
+	origKey := engineArtifactPubKeyB64
+	engineArtifactPubKeyB64 = pubB64
+	t.Cleanup(func() { engineArtifactPubKeyB64 = origKey })
+
+	origIdent := frpLoadIdentity
+	frpLoadIdentity = func() (agentIdentity, bool) {
+		// The enrollment identity follows the CURRENT leg namespace (the
+		// two Starts are two hosts): ns-a is server_side, ns-b is iran-1.
+		// Each "host" also gets its own state dir so the artifact fetch
+		// (icmp leg) runs per end.
+		if serveKNS == knsB {
+			return agentIdentity{Server: artURL, Name: "iran-1"}, true
+		}
+		return agentIdentity{Server: artURL, Name: "germany"}, true
+	}
+	t.Cleanup(func() { frpLoadIdentity = origIdent })
+	origIPCmd := ctIPCmd
+	ctIPCmd = func(args ...string) error {
+		full := append([]string{"ip", "netns", "exec", serveKNS, "ip"}, args...)
+		_, err := exec.Command("sudo", full...).CombinedOutput()
+		if f, ferr := os.OpenFile(filepath.Join(dir, "kernel-legs-commands.log"),
+			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
+			fmt.Fprintf(f, "%s | %v => %v\n", serveKNS, args, err)
+			f.Close()
+		}
+		return err
+	}
+	t.Cleanup(func() { ctIPCmd = origIPCmd })
+	origTCCmd := ctTCCmd
+	ctTCCmd = func(args ...string) error {
+		full := append([]string{"ip", "netns", "exec", serveKNS, "tc"}, args...)
+		_, err := exec.Command("sudo", full...).CombinedOutput()
+		return err
+	}
+	t.Cleanup(func() { ctTCCmd = origTCCmd })
+	origWg := ctWgCmd
+	ctWgCmd = func(args ...string) error {
+		full := append([]string{"ip", "netns", "exec", serveKNS, "wg"}, args...)
+		_, err := exec.Command("sudo", full...).CombinedOutput()
+		return err
+	}
+	t.Cleanup(func() { ctWgCmd = origWg })
+	origLocal := ctLocalIPFor
+	ctLocalIPFor = func(peerIP string) (string, error) {
+		out, err := exec.Command("sudo", "ip", "netns", "exec", serveKNS,
+			"ip", "-4", "route", "get", peerIP).CombinedOutput()
+		if err != nil {
+			return "", err
+		}
+		i := strings.Index(string(out), " src ")
+		if i < 0 {
+			return "", fmt.Errorf("no src in route get: %s", out)
+		}
+		return strings.Fields(string(out)[i+5:])[0], nil
+	}
+	t.Cleanup(func() { ctLocalIPFor = origLocal })
+	origIpt := acctIptables
+	acctIptables = func(args ...string) ([]byte, error) {
+		full := append([]string{"ip", "netns", "exec", serveKNS, "iptables"}, args...)
+		return exec.Command("sudo", full...).CombinedOutput()
+	}
+	t.Cleanup(func() { acctIptables = origIpt })
+	origSysctl := ctSysctl
+	ctSysctl = func(args ...string) error {
+		full := append([]string{"ip", "netns", "exec", serveKNS, "sysctl"}, args...)
+		_, err := exec.Command("sudo", full...).CombinedOutput()
+		return err
+	}
+	t.Cleanup(func() { ctSysctl = origSysctl })
+	// The kernel-direct legs must never spawn the engine (fail loudly if
+	// they try); the icmp leg swaps its own spawn seam in below.
+	origSpawn := ctSpawn
+	ctSpawn = func(binPath string, args []string) (frpProcess, error) {
+		return nil, fmt.Errorf("kernel-direct legs must not spawn the engine")
+	}
+	t.Cleanup(func() { ctSpawn = origSpawn })
+	// The netdev view for the payload counters of the CURRENT leg ns.
+	origNetDev := infra.AgentReadNetDev
+	infra.AgentReadNetDev = func() (string, error) {
+		out, err := exec.Command("sudo", "ip", "netns", "exec", serveKNS, "cat", "/proc/net/dev").CombinedOutput()
+		return string(out), err
+	}
+	t.Cleanup(func() { infra.AgentReadNetDev = origNetDev })
+
+	dA := NewCtunnelDriver()
+	dB := NewCtunnelDriver()
+	instA := engine.Instance{TunnelID: "ct-kleg", LocalServer: "germany", RemoteServer: "iran"}
+	instB := engine.Instance{TunnelID: "ct-kleg", LocalServer: "iran", RemoteServer: "germany"}
+
+	runKernelLeg := func(method string, carrierPort int) {
+		t.Helper()
+		p := ctunnelParams{
+			ServerSide: "germany", Method: method, Direction: "direct",
+			ForeignAddr: fmt.Sprintf("%s:%d", kIPB, carrierPort),
+			PeerAddr:    fmt.Sprintf("%s:%d", kIPA, carrierPort),
+			CarrierPort: carrierPort, PublicPort: ctPublic,
+			LocalAddr: fmt.Sprintf("127.0.0.1:%d", ctTarget), Proto: "tcp",
+			Secret: strings.Repeat("3a", 32),
+		}
+		instA.Params = infra.MustJSON(p)
+		instB.Params = infra.MustJSON(p)
+		serveKNS = knsA
+		if err := dA.Start(context.Background(), instA); err != nil {
+			t.Fatalf("%s server Start: %v", method, err)
+		}
+		serveKNS = knsB
+		if err := dB.Start(context.Background(), instB); err != nil {
+			t.Fatalf("%s client Start: %v", method, err)
+		}
+		idx := ctDeriveFor("ct-kleg", "iran").index
+		innerA := fmt.Sprintf("10.77.%d.1", idx)
+		innerB := fmt.Sprintf("10.77.%d.2", idx)
+		// The inner pair pings THROUGH the kernel device, both directions.
+		var pingErr error
+		var pingOut string
+		for i := 0; i < 10; i++ {
+			pingOut, pingErr = runKNS(knsA, "ping", "-c", "1", "-W", "3", innerB)
+			if pingErr == nil {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if pingErr != nil {
+			t.Fatalf("%s: inner ping %s -> %s failed: %v: %s", method, innerA, innerB, pingErr, pingOut)
+		}
+		if out, err := runKNS(knsB, "ping", "-c", "1", "-W", "3", innerA); err != nil {
+			t.Fatalf("%s: inner ping %s -> %s failed: %v: %s", method, innerB, innerA, err, out)
+		}
+		// The client end's payload counters see the device (both directions
+		// moved bytes through it).
+		cn := dB.Counters(instB)
+		if !cn.PayloadKnown || cn.PayloadRx == 0 || cn.PayloadTx == 0 {
+			t.Fatalf("%s: client payload counters not moving: %+v", method, cn)
+		}
+		t.Logf("%s kernel-direct leg: inner ping both ways + payload counters PASS", method)
+		// Stop removes the devices (each Stop lands in ITS OWN namespace:
+		// flip the seam like the Starts did).
+		serveKNS = knsA
+		if err := dA.Stop(instA); err != nil {
+			t.Fatalf("%s server Stop: %v", method, err)
+		}
+		serveKNS = knsB
+		if err := dB.Stop(instB); err != nil {
+			t.Fatalf("%s client Stop: %v", method, err)
+		}
+		if out, err := runKNS(knsA, "ip", "link", "show", ctDeriveFor("ct-kleg", "iran").iface); err == nil {
+			t.Fatalf("%s: server device survived Stop: %s", method, out)
+		}
+	}
+
+	runKernelLeg("gre", 0)       // raw-IP carrier, no FOU
+	runKernelLeg("vxlan", kPort) // UDP carrier on the allocated port
+
+	// The icmp leg: TUN + the REAL engine on both ends (the spawn seam →
+	// namespaces, mirroring the dtls leg's shape).
+	ctSpawn = func(binPath string, args []string) (frpProcess, error) {
+		envPath := ""
+		for i, a := range args {
+			if a == "-config" && i+1 < len(args) {
+				envPath = args[i+1]
+			}
+		}
+		raw, err := os.ReadFile(envPath)
+		if err != nil {
+			return nil, err
+		}
+		ns := knsA
+		if strings.Contains(string(raw), "ROLE=kharej") {
+			ns = knsB
+		}
+		lf, err := os.Create(filepath.Join(dir, "icmp-"+strings.ReplaceAll(ns, "quantum-test-", "")+".log"))
+		if err != nil {
+			return nil, err
+		}
+		cmd := exec.Command("sudo", "ip", "netns", "exec", ns, binPath)
+		cmd.Args = append(cmd.Args, args...)
+		cmd.Stdout = lf
+		cmd.Stderr = lf
+		if err := cmd.Start(); err != nil {
+			lf.Close()
+			return nil, err
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+			lf.Close()
+		}()
+		return &frpExecProcess{cmd: cmd, done: done}, nil
+	}
+	p := ctunnelParams{
+		ServerSide: "germany", Version: ctPinnedVersion,
+		Artifact:  "ctunnel-" + ctPinnedVersion + "-linux-{arch}.tar.gz",
+		SHA256Amd: shaHex, SHA256Arm: shaHex, SigAmd: sigB64, SigArm: sigB64,
+		Method: "icmp", Direction: "reverse",
+		ForeignAddr: fmt.Sprintf("%s:%d", kIPA, 0),
+		CarrierPort: 0, PublicPort: ctPublic,
+		LocalAddr: fmt.Sprintf("127.0.0.1:%d", ctTarget), Proto: "tcp",
+		Secret: strings.Repeat("3a", 32), Padding: 16,
+	}
+	instA.Params = infra.MustJSON(p)
+	instB.Params = infra.MustJSON(p)
+	serveKNS = knsA
+	infra.ConfigDir = t.TempDir() // the "second host" gets a fresh state dir
+	if err := dA.Start(context.Background(), instA); err != nil {
+		t.Fatalf("icmp server Start: %v", err)
+	}
+	serveKNS = knsB
+	infra.ConfigDir = t.TempDir()
+	if err := dB.Start(context.Background(), instB); err != nil {
+		t.Fatalf("icmp client Start: %v", err)
+	}
+	idx := ctDeriveFor("ct-kleg", "iran").index
+	innerB := fmt.Sprintf("10.77.%d.2", idx)
+	gateOK := false
+	for i := 0; i < 20; i++ {
+		if out, err := runKNS(knsA, "ping", "-c", "1", "-W", "3", innerB); err == nil {
+			gateOK = true
+			break
+		} else if i == 19 {
+			t.Fatalf("icmp: inner ping through the sealed carrier failed: %s (server log: %s | client log: %s)",
+				out, ctLogTail(t, dir, "icmp-a"), ctLogTail(t, dir, "icmp-b"))
+		}
+		time.Sleep(time.Second)
+	}
+	t.Logf("icmp engine leg: inner ping through the sealed ICMP carrier PASS (gate=%v)", gateOK)
+	serveKNS = knsA
+	if err := dA.Stop(instA); err != nil {
+		t.Fatal(err)
+	}
+	serveKNS = knsB
+	if err := dB.Stop(instB); err != nil {
+		t.Fatal(err)
+	}
 }
