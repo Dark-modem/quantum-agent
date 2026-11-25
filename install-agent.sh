@@ -193,16 +193,21 @@ arch_tag() {
     esac
 }
 
-fetch_binary() {
+# fetch_binary DEST: put the checksum-verified binary at DEST and die on
+# any failure. The caller owns DEST. (It used to print a mktemp path guarded
+# by a RETURN trap: the trap deleted the download before the caller could
+# install it, so the release path never installed anything.)
+fetch_binary() { # dest
+    local dest="$1"
     local arch; arch="$(arch_tag)"
     if [[ -n "$BINARY" ]]; then
         [[ -r "$BINARY" ]] || die "cannot read --binary: $BINARY"
+        cp -f "$BINARY" "$dest" || die "cannot copy --binary into $dest"
         local got
-        got="$(trun 60 sha256sum "$BINARY" | awk '{print $1}')"
+        got="$(trun 60 sha256sum "$dest" | awk '{print $1}')"
         [[ "$got" == "$CHECKSUM" ]] || die "checksum mismatch for $BINARY
   expected: $CHECKSUM
   got:      $got"
-        printf '%s' "$BINARY"
         return 0
     fi
     have curl || have wget || die "need curl or wget to download the release"
@@ -211,22 +216,20 @@ fetch_binary() {
     fi
     local url_base="https://github.com/${REPO}/releases/download/${VERSION}"
     local asset="quantum-agent-linux-${arch}"
-    local tmp; tmp="$(mktemp -t quantum-agent.XXXXXX)"
-    trap 'rm -f "$tmp"' RETURN
-    info "downloading ${asset} (${VERSION})"
-    download "$url_base/$asset" "$tmp" || die "download failed: $asset"
     local sums; sums="$(mktemp -t quantum-sums.XXXXXX)"
-    trap 'rm -f "$tmp" "$sums"' RETURN
+    info "downloading ${asset} (${VERSION})"
+    download "$url_base/$asset" "$dest" || { rm -f "$sums"; die "download failed: $asset"; }
     download "$url_base/checksums.txt" "$sums" \
-        || die "download failed: checksums.txt (refusing an unverified binary)"
+        || { rm -f "$sums"; die "download failed: checksums.txt (refusing an unverified binary)"; }
     local want
     want="$(trun 10 awk -v a="$asset" '$2==a || $2=="*"a {print $1}' "$sums")"
+    rm -f "$sums"
     [[ -n "$want" ]] || die "checksums.txt has no entry for $asset"
-    local got; got="$(trun 60 sha256sum "$tmp" | awk '{print $1}')"
+    local got; got="$(trun 60 sha256sum "$dest" | awk '{print $1}')"
     [[ "$got" == "$want" ]] || die "checksum mismatch for $asset
   expected: $want
   got:      $got"
-    printf '%s' "$tmp"
+    return 0
 }
 
 release_latest() {
@@ -247,18 +250,23 @@ download() { # url dest
 }
 
 install_binary() {
-    local src; src="$(fetch_binary)"
+    local tmp; tmp="$(mktemp -t quantum-agent-bin.XXXXXX)"
+    fetch_binary "$tmp"
+    local new; new="$(trun 60 sha256sum "$tmp" | awk '{print $1}')"
+    [[ -n "$new" ]] || { rm -f "$tmp"; die "cannot hash the fetched binary"; }
     local cur=""
     [[ -x "$BIN" ]] && cur="$(trun 30 sha256sum "$BIN" | awk '{print $1}')"
-    local new; new="$(trun 30 sha256sum "$src" | awk '{print $1}')"
-    if [[ "$cur" == "$new" ]]; then
+    # compare only when something IS installed: two empty hashes are not a match
+    if [[ -n "$cur" && "$cur" == "$new" ]]; then
+        rm -f "$tmp"
         info "binary already installed (sha256 ${new:0:12}…) — skipping"
         return 0
     fi
     if [[ -x "$BIN" ]]; then
         cp -a "$BIN" "${BIN}.bak"   # one-generation rollback copy
     fi
-    install -m 0755 "$src" "${BIN}.new" && mv -f "${BIN}.new" "$BIN"
+    install -m 0755 "$tmp" "${BIN}.new" && mv -f "${BIN}.new" "$BIN"
+    rm -f "$tmp"
     info "installed $BIN (sha256 ${new:0:12}…)"
 }
 
@@ -808,7 +816,6 @@ install_binary
 # Binary + checksum verified (fetch_binary dies on mismatch BEFORE this
 # point): only NOW do we require systemd for the unit/service work.
 need_systemd
-install_binary
 prereq_step
 mkdir -p "$AGENT_DIR"
 enroll

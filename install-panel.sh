@@ -41,7 +41,7 @@
 # (the binary's own output is captured and suppressed).
 #
 # Usage:
-#   sudo bash install-panel.sh [--port 7443] [--base-path PATH]
+#   sudo bash install-panel.sh [--port 7777] [--tls-port 7443] [--base-path PATH]
 #        [--username admin] (--password-file FILE | --password '...' |
 #         [--generate-password]) [--version latest|vX.Y.Z]
 #        [--binary FILE [--checksum SHA256]] [--no-start] [--check] [--yes]
@@ -71,7 +71,7 @@ need_systemd() { have systemctl || die "systemd is required"; }
 # ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
-PORT="7443" BASE_PATH="" USERNAME="admin"
+PORT="7777" BASE_PATH="" USERNAME="admin"
 PASSWORD="" PASSWORD_FILE="" GENERATE=0
 VERSION="latest" BINARY="" CHECKSUM="" REPLACED_BINARY=0
 UNINSTALL=0 PURGE=0 UPGRADE=0 NO_START=0 CHECK_ONLY=0 VERIFY_ONLY=0 TLS_PORT="7443" SERVER_NAME=""
@@ -135,13 +135,19 @@ release_latest() {
     printf '%s' "$out"
 }
 
-fetch_binary() {
+# fetch_binary DEST: put the checksum-verified binary at DEST and die on any
+# failure. The caller owns DEST. (It used to print a mktemp path guarded by a
+# RETURN trap: the trap deleted the download before the caller installed it,
+# so the release path never installed anything.)
+fetch_binary() { # dest
+    local dest="$1"
     local arch; arch="$(arch_tag)"
     if [[ -n "$BINARY" ]]; then
         [[ -r "$BINARY" ]] || die "cannot read --binary: $BINARY"
-        local got; got="$(trun 60 sha256sum "$BINARY" | awk '{print $1}')"
+        cp -f "$BINARY" "$dest" || die "cannot copy --binary into $dest"
+        local got; got="$(trun 60 sha256sum "$dest" | awk '{print $1}')"
         [[ "$got" == "$CHECKSUM" ]] || die "checksum mismatch for $BINARY (expected $CHECKSUM, got $got)"
-        printf '%s' "$BINARY"; return 0
+        return 0
     fi
     have curl || have wget || die "need curl or wget"
     if [[ "$VERSION" == "latest" ]]; then
@@ -149,28 +155,31 @@ fetch_binary() {
     fi
     local base="https://github.com/${REPO}/releases/download/${VERSION}"
     local asset="quantum-panel-linux-${arch}"
-    local tmp sums
-    tmp="$(mktemp -t quantum-panel.XXXXXX)"; sums="$(mktemp -t quantum-sums.XXXXXX)"
-    trap 'rm -f "$tmp" "$sums"' RETURN
+    local sums; sums="$(mktemp -t quantum-sums.XXXXXX)"
     info "downloading ${asset} (${VERSION})"
-    download "$base/$asset" "$tmp" || die "download failed: $asset"
-    download "$base/checksums.txt" "$sums" || die "download failed: checksums.txt (refusing an unverified binary)"
+    download "$base/$asset" "$dest" || { rm -f "$sums"; die "download failed: $asset"; }
+    download "$base/checksums.txt" "$sums" || { rm -f "$sums"; die "download failed: checksums.txt (refusing an unverified binary)"; }
     local want; want="$(trun 10 awk -v a="$asset" '$2==a || $2=="*"a {print $1}' "$sums")"
+    rm -f "$sums"
     [[ -n "$want" ]] || die "checksums.txt has no entry for $asset"
-    local got; got="$(trun 60 sha256sum "$tmp" | awk '{print $1}')"
+    local got; got="$(trun 60 sha256sum "$dest" | awk '{print $1}')"
     [[ "$got" == "$want" ]] || die "checksum mismatch for $asset (expected $want, got $got)"
-    printf '%s' "$tmp"
+    return 0
 }
 
 install_binary() {
-    local src; src="$(fetch_binary)"
+    local tmp; tmp="$(mktemp -t quantum-panel-bin.XXXXXX)"
+    fetch_binary "$tmp"
+    local new; new="$(trun 60 sha256sum "$tmp" | awk '{print $1}')"
+    [[ -n "$new" ]] || { rm -f "$tmp"; die "cannot hash the fetched binary"; }
     local cur=""; [[ -x "$BIN" ]] && cur="$(trun 30 sha256sum "$BIN" | awk '{print $1}')"
-    local new; new="$(trun 30 sha256sum "$src" | awk '{print $1}')"
-    if [[ "$cur" == "$new" ]]; then
-        info "binary already current (sha256 ${new:0:12}…)"; return 0
+    # compare only when something IS installed: two empty hashes are not a match
+    if [[ -n "$cur" && "$cur" == "$new" ]]; then
+        rm -f "$tmp"; info "binary already current (sha256 ${new:0:12}…)"; return 0
     fi
     [[ -x "$BIN" ]] && cp -a "$BIN" "${BIN}.bak"
-    install -o root -g root -m 0755 "$src" "${BIN}.new" && mv -f "${BIN}.new" "$BIN"
+    install -o root -g root -m 0755 "$tmp" "${BIN}.new" && mv -f "${BIN}.new" "$BIN"
+    rm -f "$tmp"
     REPLACED_BINARY=1
     info "installed $BIN (sha256 ${new:0:12}…)"
 }
@@ -250,6 +259,8 @@ tls_selfsigned_step() {
         info "TLS certificate already present (${td})"
         return 0
     fi
+    # Fail loudly instead of dying inside a redirected openssl call.
+    have openssl || die "openssl is required to generate the panel TLS certificate (apt-get install -y openssl)"
     mkdir -p "$td"; chmod 700 "$td"
     local cn="quantum-panel"
     [[ -n "$SERVER_NAME" ]] && cn="$SERVER_NAME"
@@ -297,7 +308,8 @@ credential_step() {
     fi
     if [[ -n "$PASSWORD_FILE" ]]; then
         [[ -r "$PASSWORD_FILE" ]] || die "cannot read --password-file: $PASSWORD_FILE"
-        PASSWORD="$(trun 5 head -c 4096 "$PASSWORD_FILE" | tr -d '[:space:]')"
+        # strip only the line ending: a password may legitimately hold spaces
+        PASSWORD="$(trun 5 head -c 4096 "$PASSWORD_FILE" | tr -d '\r\n')"
     elif [[ $GENERATE -eq 1 ]]; then
         PASSWORD="$(trun 10 openssl rand -base64 18 2>/dev/null || tr -dc 'A-Za-z0-9' </dev/urandom | trun 5 head -c 20)"
     fi
@@ -358,7 +370,7 @@ firewall_step() {
         warn "ufw installed but inactive — panel port NOT opened (enable ufw deliberately, with the SSH door verified first)"
         return 0
     fi
-    trun 30 ufw status 2>/dev/null | grep -q "${PORT}/tcp" && { info "panel HTTPS port already allowed"; return 0; }
+    trun 30 ufw status 2>/dev/null | grep -q "${TLS_PORT}/tcp" && { info "panel HTTPS port already allowed"; return 0; }
     trun 30 ufw allow "${TLS_PORT}/tcp" comment "quantum:installer:panel" >/dev/null
     info "panel HTTPS port open: ${TLS_PORT}/tcp (tagged quantum:installer:panel)"
 }
@@ -399,7 +411,7 @@ verify() {
     # The TLS listener may take a moment; probe the declared port.
     local probe=0
     for _attempt in 1 2 3 4 5; do
-        if trun 6 bash -c "exec 3<>/dev/tcp/127.0.0.1/${PORT}" 2>/dev/null; then probe=1; break; fi
+        if trun 6 bash -c "exec 3<>/dev/tcp/127.0.0.1/${TLS_PORT}" 2>/dev/null; then probe=1; break; fi
         sleep 1
     done
     if [[ $probe -eq 1 ]]; then info "panel port ${TLS_PORT} answers locally"; else warn "panel port ${TLS_PORT} does not answer yet"; ok=0; fi
@@ -504,17 +516,20 @@ panel_uninstall() {
 # service fails to start within 8 seconds.
 panel_upgrade() {
     [[ -x "$BIN" ]] || die "--upgrade: no existing install at $BIN (run the plain installer first)"
-    fetch_binary
     info "upgrading quantum-panel — panel.json, credentials and data are KEPT"
-    local src
-    src="$(fetch_binary)"
+    # one fetch (the old code fetched twice and then hashed a file the shell
+    # had already removed)
+    local tmp; tmp="$(mktemp -t quantum-panel-up.XXXXXX)"
+    fetch_binary "$tmp"
+    local new; new="$(sha256sum "$tmp" | awk '{print $1}')"
+    [[ -n "$new" ]] || { rm -f "$tmp"; die "cannot hash the fetched binary"; }
     cp -a "$BIN" "${BIN}.bak"
-    install -m 0755 "$src" "${BIN}.new" && mv -f "${BIN}.new" "$BIN"
+    install -m 0755 "$tmp" "${BIN}.new" && mv -f "${BIN}.new" "$BIN"
+    rm -f "$tmp"
     # RUNBOOK-FIXES 31: hash-verify the INSTALLED binary against the source
-    local li liw
+    local li
     li="$(sha256sum "$BIN" 2>/dev/null | awk '{print $1}')"
-    liw="$(sha256sum "$src" 2>/dev/null | awk '{print $1}')"
-    [[ "$li" == "$liw" ]] || die "installed-binary hash mismatch (RUNBOOK-FIXES 31): $li != $liw"
+    [[ "$li" == "$new" ]] || die "installed-binary hash mismatch (RUNBOOK-FIXES 31): $li != $new"
     info "installed-binary hash verified"
     if command -v systemctl >/dev/null 2>&1; then
         systemctl restart quantum-panel.service 2>/dev/null || true
