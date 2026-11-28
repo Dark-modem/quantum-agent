@@ -77,7 +77,11 @@ func TestWaterwallAll18MethodsRender(t *testing.T) {
 		{"socks5", func(p *waterwallParams) { p.AuthUser, p.AuthPassword = "wwuser", "ww-s5-pw-01" },
 			[]string{"TcpListener", "Socks5Server", "TcpConnector"},
 			[]string{"TcpListener", "Socks5Client", "TcpConnector"}},
-		{"fake-tcp", func(p *waterwallParams) { p.AuthPassword = "ww-ftcp-pw-1" },
+		{"fake-tcp", func(p *waterwallParams) {
+			p.AuthPassword = "ww-ftcp-pw-1"
+			p.FakeTCPClientIP = "192.0.2.10"
+			p.ServerAddr = "198.51.100.10:21444"
+		},
 			[]string{"RawSocket", "IpOverrider", "FakeTcpHeaderServer", "PacketsToConnection", "UdpConnector"},
 			[]string{"UdpListener", "ConnectionToPackets", "FakeTcpHeaderClient", "IpOverrider", "RawSocket"}},
 		{"obfuscator", func(p *waterwallParams) { p.ObfsMethod, p.ObfsKey = "xor", 90 },
@@ -322,6 +326,7 @@ func TestWaterwallLabDump(t *testing.T) {
 	ft.Method = "fake-tcp"
 	ft.AuthPassword = "ww-ftcp-lab-1"
 	ft.ServerAddr = "10.200.0.2:21444"
+	ft.FakeTCPClientIP = "10.200.1.4"
 	ft.LocalAddr, ft.LocalPort = "127.0.0.1", 21701
 	for _, role := range []string{"server", "client"} {
 		core, cfg, err := waterwallRenderFiles(role, ft)
@@ -453,6 +458,63 @@ func TestWaterwallReverseChain(t *testing.T) {
 		mutate(&bad)
 		if err := waterwallValidateParams(bad); err == nil {
 			t.Fatalf("waterwall reverse %s accepted", name)
+		}
+	}
+}
+
+func TestWaterwallFakeTCPRealIP(t *testing.T) {
+	// the FULL upstream shape: the per-end real-IP overrides ride the
+	// IpOverrider/RawSocket settings (tunnels/FakeTcpHeaderClient|Server/
+	// examples — the A5 minimal render lacked exactly these).
+	p := wwTestParams()
+	p.Method = "fake-tcp"
+	p.AuthPassword = "ww-ftcp-pw-1"
+	p.FakeTCPClientIP = "192.0.2.10"
+	p.ServerAddr = "198.51.100.10:21444"
+	p.FakeTCPPort = 40000
+	if err := waterwallValidateParams(p); err != nil {
+		t.Fatalf("fake-tcp real-ip params rejected: %v", err)
+	}
+	srv := wwChain("server", p)
+	b, _ := json.Marshal(srv)
+	s := string(b)
+	// the server captures the CLIENT real IP and rewrites down toward it.
+	if !strings.Contains(s, `"capture-ips":["192.0.2.10"]`) ||
+		!strings.Contains(s, `"ipv4":"198.51.100.10"`) || !strings.Contains(s, `"ipv4":"192.0.2.10"`) ||
+		!strings.Contains(s, `"ipv4":"10.90.0.1"`) || !strings.Contains(s, `"ipv4":"10.90.0.2"`) ||
+		!strings.Contains(s, `"capture-filter-mode":"source-ip"`) || !strings.Contains(s, `"capture-protocols":[6]`) {
+		t.Fatalf("fake-tcp server real-ip render wrong: %s", s)
+	}
+	cli := wwChain("client", p)
+	cb, _ := json.Marshal(cli)
+	cs := string(cb)
+	// the client emits its REAL source ip toward the server's REAL ip and
+	// the raw socket captures the server real IP.
+	if !strings.Contains(cs, `"capture-ips":["198.51.100.10"]`) ||
+		!strings.Contains(cs, `"ipv4":"192.0.2.10"`) || !strings.Contains(cs, `"ipv4":"198.51.100.10"`) ||
+		!strings.Contains(cs, `"ipv4":"10.90.0.2"`) || !strings.Contains(cs, `"ipv4":"10.90.0.1"`) ||
+		!strings.Contains(cs, `"source-ipv4":"10.90.0.1"`) || !strings.Contains(cs, `"target-address":"10.90.0.2"`) ||
+		!strings.Contains(cs, `"acknowledgment":67890`) {
+		t.Fatalf("fake-tcp client real-ip render wrong: %s", cs)
+	}
+	// the simulated context is symmetric (both ends agree by construction).
+	if strings.Count(s+cs, `"target-address":"10.90.0.2"`) != 1 || !strings.Contains(cs, `"port":5300`) {
+		t.Fatalf("fake-tcp simulated context wrong")
+	}
+	// hostile: missing client IP, junk IP, a hostname carrier, junk pin.
+	for name, mutate := range map[string]func(*waterwallParams){
+		"no client ip":   func(p *waterwallParams) { p.FakeTCPClientIP = "" },
+		"junk client ip": func(p *waterwallParams) { p.FakeTCPClientIP = "not-an-ip" },
+		"carrier dns":    func(p *waterwallParams) { p.ServerAddr = "mesh.example.com:21444" },
+	} {
+		bad := wwTestParams()
+		bad.Method = "fake-tcp"
+		bad.AuthPassword = "ww-ftcp-pw-1"
+		bad.ServerAddr = "198.51.100.10:21444"
+		bad.FakeTCPClientIP = "192.0.2.10"
+		mutate(&bad)
+		if err := waterwallValidateParams(bad); err == nil {
+			t.Fatalf("fake-tcp %s accepted", name)
 		}
 	}
 }

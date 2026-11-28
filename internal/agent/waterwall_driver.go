@@ -108,6 +108,11 @@ type waterwallParams struct {
 	NoAuth bool `json:"no_auth,omitempty"` // http/socks5 without auth (loopback entries only)
 	// fake-tcp:
 	FakeTCPPort int `json:"fake_tcp_port,omitempty"` // FakeTcpHeaderServer server-port (0 = default)
+	// fake-tcp: the iran host's raw-reachable IP (the REAL source address
+	// the client's RawSocket emits and the server's RawSocket captures —
+	// the per-end context the A5 one-params-object model lacked; REQUIRED
+	// for method=fake-tcp). The server's real IP rides server_addr's host.
+	FakeTCPClientIP string `json:"fake_tcp_client_ip,omitempty"`
 	// quic client trust override (self-signed pairs — the upstream docs:
 	// explicit verify=false disables trust/name checks while retaining the
 	// encrypted handshake). Additive — dead on non-quic methods.
@@ -239,6 +244,21 @@ func waterwallValidateParams(p waterwallParams) error {
 	case "trojan", "reality", "bgp4", "fake-tcp", "reverse":
 		if err := engineVerifySecretShape("waterwall auth_password", p.AuthPassword, 8, 128); err != nil {
 			return err
+		}
+		if p.Method == "fake-tcp" {
+			// the per-end real-IP context (OVERNIGHT-A8): the iran host's
+			// raw-reachable IP is REQUIRED; the carrier host must be a bare
+			// IP (raw-socket fake-TCP framing targets a bare address — no
+			// DNS in the raw path).
+			if strings.TrimSpace(p.FakeTCPClientIP) == "" || len(p.FakeTCPClientIP) > 45 ||
+				strings.ContainsAny(p.FakeTCPClientIP, "\"'\n\r ") ||
+				net.ParseIP(strings.TrimSpace(p.FakeTCPClientIP)) == nil {
+				return fmt.Errorf("waterwall: method fake-tcp needs fake_tcp_client_ip — a bare IP (the iran host's raw-reachable address; the per-end real-IP context)")
+			}
+			if h, _, e := net.SplitHostPort(strings.TrimSpace(p.ServerAddr)); e != nil ||
+				net.ParseIP(h) == nil {
+				return fmt.Errorf("waterwall: method fake-tcp needs server_addr's host as a bare IP (the raw carrier has no DNS)")
+			}
 		}
 	case "vless", "vmess":
 		if err := engineVerifySecretShape("waterwall uuid", p.UUID, 16, 64); err != nil {
@@ -586,24 +606,82 @@ func wwChain(role string, p waterwallParams) wwConfig {
 				tcpDial(carrierHost, cPort))
 		}
 	case "fake-tcp":
+		// OVERNIGHT-A8: the FULL upstream shape (tunnels/FakeTcpHeaderClient|
+		// Server/examples/client|server/config.json) with the per-end real-IP
+		// overrides the A5 minimal render lacked. The simulated context
+		// (10.90.0.1 = the simulated client, 10.90.0.2 = the simulated
+		// server, the 40000/40001-40016 fake-TCP ports) is rendered from the
+		// upstream example constants on BOTH ends — the pair agrees by
+		// construction. The real IPs: client = FakeTCPClientIP, server =
+		// server_addr's host (validation requires a bare IP).
+		cliReal := strings.TrimSpace(p.FakeTCPClientIP)
 		fs := map[string]any{"password": p.AuthPassword}
 		if p.FakeTCPPort > 0 {
 			fs["server-port"] = p.FakeTCPPort
+		} else {
+			fs["server-port"] = 40000 // the upstream example default
+		}
+		header := map[string]any{
+			"client-port-range":  []int{40001, 40016},
+			"sequence":           "random_port",
+			"increment-sequence": true,
+			"window":             65535,
+		}
+		ctP := map[string]any{
+			"source-ipv4":    "10.90.0.1",
+			"target-address": "10.90.0.2",
+			"port":           5300,
+			"mtu":            1479,
 		}
 		if role == "server" {
-			// RawSocket → IpOverrider → FakeTcpHeaderServer → PacketsToConnection → UdpConnector
-			join(wwNode{Name: "raw", Type: "RawSocket", Next: "ip"},
-				wwNode{Name: "ip", Type: "IpOverrider", Next: "f"},
-				wwNode{Name: "f", Type: "FakeTcpHeaderServer", Next: "p", Settings: fs},
-				wwNode{Name: "p", Type: "PacketsToConnection", Next: "target"},
+			// RawSocket(capture cliReal) → IpOverrider → FakeTcpHeaderServer
+			// → PacketsToConnection → UdpConnector(local target)
+			nodes = append(nodes,
+				wwNode{Name: "raw", Type: "RawSocket", Next: "ip", Settings: map[string]any{
+					"capture-filter-mode": "source-ip",
+					"capture-ips":         []string{cliReal},
+					"capture-protocols":   []int{6},
+				}},
+				wwNode{Name: "ip", Type: "IpOverrider", Next: "f", Settings: map[string]any{
+					"down": map[string]any{
+						"source-ip": map[string]any{"ipv4": carrierHost},
+						"dest-ip":   map[string]any{"ipv4": cliReal},
+					},
+					"up": map[string]any{
+						"source-ip": map[string]any{"ipv4": "10.90.0.1"},
+						"dest-ip":   map[string]any{"ipv4": "10.90.0.2"},
+					},
+				}},
+				wwNode{Name: "f", Type: "FakeTcpHeaderServer", Next: "p", Settings: wwMergeMaps(fs, header)},
+				wwNode{Name: "p", Type: "PacketsToConnection", Next: "carrier", Settings: map[string]any{}},
 				udpDial(host, p.LocalPort))
 		} else {
-			// UdpListener → ConnectionToPackets → FakeTcpHeaderClient → IpOverrider → RawSocket
-			join(udpIn(p.LocalPort),
-				wwNode{Name: "p", Type: "ConnectionToPackets", Next: "f"},
-				wwNode{Name: "f", Type: "FakeTcpHeaderClient", Next: "ip", Settings: fs},
-				wwNode{Name: "ip", Type: "IpOverrider", Next: "raw"},
-				wwNode{Name: "raw", Type: "RawSocket", Settings: map[string]any{}})
+			// UdpListener(:local_port) → ConnectionToPackets →
+			// FakeTcpHeaderClient → IpOverrider → RawSocket(capture srvReal)
+			u := udpIn(p.LocalPort)
+			u.Next = "p"
+			nodes = append(nodes,
+				u,
+				wwNode{Name: "p", Type: "ConnectionToPackets", Next: "f", Settings: ctP},
+				wwNode{Name: "f", Type: "FakeTcpHeaderClient", Next: "ip", Settings: wwMergeMaps(fs, map[string]any{
+					"acknowledgment": 67890,
+				})},
+				wwNode{Name: "ip", Type: "IpOverrider", Next: "raw", Settings: map[string]any{
+					"up": map[string]any{
+						"source-ip": map[string]any{"ipv4": cliReal},
+						"dest-ip":   map[string]any{"ipv4": carrierHost},
+					},
+					"down": map[string]any{
+						"source-ip": map[string]any{"ipv4": "10.90.0.2"},
+						"dest-ip":   map[string]any{"ipv4": "10.90.0.1"},
+					},
+				}},
+				wwNode{Name: "raw", Type: "RawSocket", Settings: map[string]any{
+					"capture-filter-mode": "source-ip",
+					"capture-ips":         []string{carrierHost},
+					"capture-protocols":   []int{6},
+				}})
+			_ = header
 		}
 	case "obfuscator":
 		obs := map[string]any{"method": "xor", "xor_key": p.ObfsKey, "skip": "none", "tls_record_header": false}
@@ -778,6 +856,19 @@ type WaterwallDriver struct {
 
 func NewWaterwallDriver() *WaterwallDriver {
 	return &WaterwallDriver{runs: newInstTable[waterwallInstState]()}
+}
+
+// wwMergeMaps composes two settings maps (base first, overrides win) —
+// the fake-tcp header fields ride the base password/server-port map.
+func wwMergeMaps(base, overrides map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(overrides))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range overrides {
+		out[k] = v
+	}
+	return out
 }
 
 func (d *WaterwallDriver) ID() string { return wwID }
