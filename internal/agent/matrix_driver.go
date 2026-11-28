@@ -238,6 +238,12 @@ func NewAgentEngines() (*engine.Registry, error) {
 	if err := reg.Register(NewEasytierDriver()); err != nil {
 		return nil, err
 	}
+	// OVERNIGHT-A9: the NaiveProxy CLIENT driver (CORES-6 v154.0.8037.49-5,
+	// BSD — the h2 CONNECT forward proxy; composes with the sing-box naive
+	// inbound on the server half).
+	if err := reg.Register(NewNaiveDriver()); err != nil {
+		return nil, err
+	}
 	if err := RegisterLabEngines(reg); err != nil {
 		return nil, err
 	}
